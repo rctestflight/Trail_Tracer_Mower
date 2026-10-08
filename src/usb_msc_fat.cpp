@@ -210,7 +210,6 @@ static void populate_defaults(DeviceConfig& c,
     c.rx_channel            = 1;
     c.CRUISE_THROTTLE       = 1650;
     c.CREEP_THROTTLE        = 1620;
-    c.throttle_expo         = 0.0;
     c.PWM_OUT_1_DEFAULT     = 1500;
     c.PWM_OUT_1_MIN         = 1000;
     c.PWM_OUT_1_MAX         = 2000;
@@ -228,14 +227,6 @@ static void populate_defaults(DeviceConfig& c,
     c.kd                    = 0.0;
     c.pid_direction         = 0;   
     c.enable_sensor_2       = false;
-    c.rear_kp               = 5.0;
-    c.rear_ki               = 0.0;
-    c.rear_kd               = 0.0;
-    c.rear_pid_direction    = 0;   
-    c.reverse_rear_steer_in = false;
-    c.use_heading           = false;
-    c.heading_weight        = 5.0;
-    c.sensor_spacing_mm     = 350.0;
     c.stuck_threshold_mm    = 0.1f;
     c.stuck_timeout_ms      = 20000.0f;
     c.BTxFollowChannel      = 0;
@@ -248,7 +239,6 @@ static void populate_defaults(DeviceConfig& c,
     c.CHARGE_MAX_CURRENT    = 6.0;
     c.CHARGE_MAX_SECONDS    = 180;
     c.espnow_enabled        = false;
-    c.tpa                   = 0.0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -268,7 +258,6 @@ static void validate_config(DeviceConfig& c)
     // Throttle range sanity
     c.CRUISE_THROTTLE   = constrain(c.CRUISE_THROTTLE, 1000, 2000);
     c.CREEP_THROTTLE    = constrain(c.CREEP_THROTTLE,  1000, 2000);
-    c.throttle_expo     = constrain(c.throttle_expo,   0.0, 1.0);
 
     // PWM output limits – must satisfy MIN > PWM_ABS_MIN, MAX < PWM_ABS_MAX
     // and DEFAULT must be within [MIN, MAX].
@@ -291,11 +280,6 @@ static void validate_config(DeviceConfig& c)
     if (c.ki < 0.0)  c.ki = 0.0;
     if (c.kd < 0.0)  c.kd = 0.0;
     if (c.pid_direction < 0 || c.pid_direction > 1) c.pid_direction = 0;
-    if (c.rear_kp < 0.0)  c.rear_kp = 0.0;
-    if (c.rear_ki < 0.0)  c.rear_ki = 0.0;
-    if (c.rear_kd < 0.0)  c.rear_kd = 0.0;
-    if (c.rear_pid_direction < 0 || c.rear_pid_direction > 1)
-        c.rear_pid_direction = 0;
 
     // Stuck
     if (c.stuck_threshold_mm < 1.0f)   c.stuck_threshold_mm = 1.0f;
@@ -318,8 +302,6 @@ static void validate_config(DeviceConfig& c)
     if (c.CHARGE_MAX_SECONDS < 5)   c.CHARGE_MAX_SECONDS = 5;
     if (c.CHARGE_MAX_SECONDS > 3600) c.CHARGE_MAX_SECONDS = 3600;
 
-    // TPA (>1.0 = full attenuation reached before max throttle)
-    c.tpa = constrain(c.tpa, 0.0, 3.0);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -333,7 +315,6 @@ static void prefs_save(const DeviceConfig& c)
     p.putUChar("rxCh",     c.rx_channel);
     p.putInt("crsThr",     c.CRUISE_THROTTLE);
     p.putInt("crpThr",     c.CREEP_THROTTLE);
-    p.putDouble("thrExp",  c.throttle_expo);
     p.putInt("p1Def",      c.PWM_OUT_1_DEFAULT);
     p.putInt("p1Min",      c.PWM_OUT_1_MIN);
     p.putInt("p1Max",      c.PWM_OUT_1_MAX);
@@ -351,14 +332,6 @@ static void prefs_save(const DeviceConfig& c)
     p.putDouble("kd",      c.kd);
     p.putInt("pidDir",     c.pid_direction);
     p.putBool("enS2",      c.enable_sensor_2);
-    p.putDouble("rkp",     c.rear_kp);
-    p.putDouble("rki",     c.rear_ki);
-    p.putDouble("rkd",     c.rear_kd);
-    p.putInt("rPidDir",    c.rear_pid_direction);
-    p.putBool("revRear",   c.reverse_rear_steer_in);
-    p.putBool("useHdg",    c.use_heading);
-    p.putDouble("hdgWt",   c.heading_weight);
-    p.putDouble("snsSpc",  c.sensor_spacing_mm);
     p.putFloat("stThresh", c.stuck_threshold_mm);
     p.putFloat("stTout",   c.stuck_timeout_ms);
     p.putUChar("btxCh",    c.BTxFollowChannel);
@@ -371,7 +344,6 @@ static void prefs_save(const DeviceConfig& c)
     p.putDouble("chgIMax", c.CHARGE_MAX_CURRENT);
     p.putInt("chgTSec",    c.CHARGE_MAX_SECONDS);
     p.putBool("espNow",    c.espnow_enabled);
-    p.putDouble("tpa",     c.tpa);
     p.end();
 }
 
@@ -385,7 +357,6 @@ static bool prefs_load(DeviceConfig& c)
     c.rx_channel            = p.getUChar("rxCh",     c.rx_channel);
     c.CRUISE_THROTTLE       = p.getInt("crsThr",     c.CRUISE_THROTTLE);
     c.CREEP_THROTTLE        = p.getInt("crpThr",     c.CREEP_THROTTLE);
-    c.throttle_expo         = p.getDouble("thrExp",  c.throttle_expo);
     c.PWM_OUT_1_DEFAULT     = p.getInt("p1Def",      c.PWM_OUT_1_DEFAULT);
     c.PWM_OUT_1_MIN         = p.getInt("p1Min",      c.PWM_OUT_1_MIN);
     c.PWM_OUT_1_MAX         = p.getInt("p1Max",      c.PWM_OUT_1_MAX);
@@ -403,14 +374,6 @@ static bool prefs_load(DeviceConfig& c)
     c.kd                    = p.getDouble("kd",      c.kd);
     c.pid_direction         = p.getInt("pidDir",     c.pid_direction);
     c.enable_sensor_2       = p.getBool("enS2",      c.enable_sensor_2);
-    c.rear_kp               = p.getDouble("rkp",     c.rear_kp);
-    c.rear_ki               = p.getDouble("rki",     c.rear_ki);
-    c.rear_kd               = p.getDouble("rkd",     c.rear_kd);
-    c.rear_pid_direction    = p.getInt("rPidDir",    c.rear_pid_direction);
-    c.reverse_rear_steer_in = p.getBool("revRear",   c.reverse_rear_steer_in);
-    c.use_heading           = p.getBool("useHdg",    c.use_heading);
-    c.heading_weight        = p.getDouble("hdgWt",   c.heading_weight);
-    c.sensor_spacing_mm     = p.getDouble("snsSpc",  c.sensor_spacing_mm);
     c.stuck_threshold_mm    = p.getFloat("stThresh", c.stuck_threshold_mm);
     c.stuck_timeout_ms      = p.getFloat("stTout",   c.stuck_timeout_ms);
     c.BTxFollowChannel      = p.getUChar("btxCh",    c.BTxFollowChannel);
@@ -423,7 +386,6 @@ static bool prefs_load(DeviceConfig& c)
     c.CHARGE_MAX_CURRENT    = p.getDouble("chgIMax", c.CHARGE_MAX_CURRENT);
     c.CHARGE_MAX_SECONDS    = p.getInt("chgTSec",    c.CHARGE_MAX_SECONDS);
     c.espnow_enabled        = p.getBool("espNow",    c.espnow_enabled);
-    c.tpa                   = p.getDouble("tpa",      c.tpa);
     p.end();
     return true;
 }
@@ -642,7 +604,6 @@ static bool config_write_json(const DeviceConfig& c)
     doc["rx_channel"]            = c.rx_channel;
     doc["CRUISE_THROTTLE"]       = c.CRUISE_THROTTLE;
     doc["CREEP_THROTTLE"]        = c.CREEP_THROTTLE;
-    doc["throttle_expo"]         = c.throttle_expo;
     doc["PWM_OUT_1_DEFAULT"]     = c.PWM_OUT_1_DEFAULT;
     doc["PWM_OUT_1_MIN"]         = c.PWM_OUT_1_MIN;
     doc["PWM_OUT_1_MAX"]         = c.PWM_OUT_1_MAX;
@@ -660,15 +621,6 @@ static bool config_write_json(const DeviceConfig& c)
     doc["kd"]                    = c.kd;
     doc["pid_direction"]         = (bool)c.pid_direction;   // false=NORMAL, true=REVERSE
     doc["enable_sensor_2"]       = c.enable_sensor_2;
-    doc["use_heading"]           = c.use_heading;
-    doc["heading_weight"]        = c.heading_weight;
-    doc["sensor_spacing_mm"]     = c.sensor_spacing_mm;
-    doc["rear_kp"]               = c.rear_kp;
-    doc["rear_ki"]               = c.rear_ki;
-    doc["rear_kd"]               = c.rear_kd;
-    doc["rear_pid_direction"]    = (bool)c.rear_pid_direction;
-    doc["reverse_rear_steer_in"] = c.reverse_rear_steer_in;
-    doc["tpa"]                   = c.tpa;
     doc["stuck_threshold_mm"]    = c.stuck_threshold_mm;
     doc["stuck_timeout_ms"]      = c.stuck_timeout_ms;
     doc["BTxFollowChannel"]      = c.BTxFollowChannel;
@@ -834,7 +786,6 @@ static bool config_read_json(DeviceConfig& c)
     JSON_GET_UINT8("rx_channel",            rx_channel);
     JSON_GET_INT("CRUISE_THROTTLE",         CRUISE_THROTTLE);
     JSON_GET_INT("CREEP_THROTTLE",          CREEP_THROTTLE);
-    JSON_GET_DBL("throttle_expo",           throttle_expo);
     JSON_GET_INT("PWM_OUT_1_DEFAULT",       PWM_OUT_1_DEFAULT);
     JSON_GET_INT("PWM_OUT_1_MIN",           PWM_OUT_1_MIN);
     JSON_GET_INT("PWM_OUT_1_MAX",           PWM_OUT_1_MAX);
@@ -852,14 +803,6 @@ static bool config_read_json(DeviceConfig& c)
     JSON_GET_DBL("kd",                      kd);
     JSON_GET_BOOL("pid_direction",          pid_direction);
     JSON_GET_BOOL("enable_sensor_2",        enable_sensor_2);
-    JSON_GET_DBL("rear_kp",                 rear_kp);
-    JSON_GET_DBL("rear_ki",                 rear_ki);
-    JSON_GET_DBL("rear_kd",                 rear_kd);
-    JSON_GET_BOOL("rear_pid_direction",     rear_pid_direction);
-    JSON_GET_BOOL("reverse_rear_steer_in",  reverse_rear_steer_in);
-    JSON_GET_BOOL("use_heading",            use_heading);
-    JSON_GET_DBL("heading_weight",          heading_weight);
-    JSON_GET_DBL("sensor_spacing_mm",       sensor_spacing_mm);
     JSON_GET_FLT("stuck_threshold_mm",      stuck_threshold_mm);
     JSON_GET_FLT("stuck_timeout_ms",        stuck_timeout_ms);
     JSON_GET_UINT8("BTxFollowChannel",      BTxFollowChannel);
@@ -873,7 +816,6 @@ static bool config_read_json(DeviceConfig& c)
     JSON_GET_DBL("CHARGE_MAX_CURRENT",      CHARGE_MAX_CURRENT);
     JSON_GET_INT("CHARGE_MAX_SECONDS",      CHARGE_MAX_SECONDS);
     JSON_GET_BOOL("espnow_enabled",         espnow_enabled);
-    JSON_GET_DBL("tpa",                      tpa);
 
 #undef JSON_GET_INT
 #undef JSON_GET_UINT8

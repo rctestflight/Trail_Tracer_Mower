@@ -19,7 +19,6 @@ struct DeviceConfig {
     // Drive parameters
     int CRUISE_THROTTLE;
     int CREEP_THROTTLE;
-    double throttle_expo;   // 0.0 = linear, 1.0 = strong exponential around center
 
     // Output 1 – front steering
     int PWM_OUT_1_DEFAULT;
@@ -31,12 +30,12 @@ struct DeviceConfig {
     int PWM_OUT_2_MIN;
     int PWM_OUT_2_MAX;
 
-    // Output 3 – rear steering
+    // Output 3 – auxiliary
     int PWM_OUT_3_DEFAULT;
     int PWM_OUT_3_MIN;
     int PWM_OUT_3_MAX;
 
-    // Output 4 – mirrored rear steering / aux
+    // Output 4 – auxiliary
     int PWM_OUT_4_DEFAULT;
     int PWM_OUT_4_MIN;
     int PWM_OUT_4_MAX;
@@ -47,18 +46,6 @@ struct DeviceConfig {
     double kd;
     int    pid_direction;   // PID_v1: DIRECT=0, REVERSE=1
     bool   enable_sensor_2;
-
-    // Rear PID
-    double rear_kp;
-    double rear_ki;
-    double rear_kd;
-    int    rear_pid_direction;
-
-    // Steering options
-    bool   reverse_rear_steer_in;
-    bool   use_heading;
-    double heading_weight;
-    double sensor_spacing_mm;  // Distance between s1 and s2 sensors in mm
 
     // Stuck-vehicle detector
     float stuck_threshold_mm;
@@ -82,10 +69,6 @@ struct DeviceConfig {
     // Features
     bool   espnow_enabled;
 
-    // TPA (Throttle PID Attenuation)
-    // 0.0 = no attenuation at max throttle, 1.0 = full attenuation at max throttle.
-    // Scaling is applied linearly between PWM_OUT_2_DEFAULT and PWM_OUT_2_MAX.
-    double tpa;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

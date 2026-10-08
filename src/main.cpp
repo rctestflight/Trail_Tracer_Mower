@@ -28,14 +28,13 @@ uint8_t vehicleID; // Used for ESP-NOW Telemetry. Set to the same value on recei
 uint8_t rx_channel; // Set this to match the channel on the Trail Tracer Tx. Allows for multiple tracks to operate in close proximity
 int CRUISE_THROTTLE; // The vehicle will drive at this throttle level when in reveiverless mode (press button on Rx to enter receiverless mode)
 int CREEP_THROTTLE; // Throttle level used when triggered by BTx Channel 1
-double throttle_expo; // Helps with fine manual throttle control for vehicles with crappy ESCs
 int PWM_OUT_1_DEFAULT; // Center steering PWM value (typically 1500)
 int PWM_OUT_1_MIN; // Minimum steering PWM value (typically 1000)
 int PWM_OUT_1_MAX; // Maximum steering PWM value (typically 2000)
 int PWM_OUT_2_DEFAULT; // Default throttle PWM value (typically 1500)
 int PWM_OUT_2_MIN; // Minimum throttle PWM value (typically 1000)
 int PWM_OUT_2_MAX; // Maximum throttle PWM value (typically 2000)
-int PWM_OUT_3_DEFAULT; // Default PWM value for output 3 (typically used for rear steering) (typically 1500)
+int PWM_OUT_3_DEFAULT; // Default PWM value for output 3 (typically 1500)
 int PWM_OUT_3_MIN; // Minimum PWM value for output 3  (typically 1000)
 int PWM_OUT_3_MAX; // Maximum PWM value for output 3 (typically 2000)
 int PWM_OUT_4_DEFAULT;
@@ -46,14 +45,6 @@ double ki; // Steering controller integral gain (usually set to 0 or a small val
 double kd; // Steering controller derivative gain (usually never needed)
 int pid_direction; // PID direction (0 = normal, 1 = reversed)
 bool enable_sensor_2; // Enable second sensor. Save and Reboot after changing
-double rear_kp; // Rear steering controller proportional gain
-double rear_ki; // Rear steering controller integral gain
-double rear_kd; // Rear steering controller derivative gain
-int rear_pid_direction; // Rear PID direction (0 = normal, 1 = reversed)
-bool reverse_rear_steer_in; // Reverse rear steer input. Use this if manual RC steering results in rear wheels steering in the wrong direction
-bool use_heading; // Enable or disable use of dual sensor heading estimation for front steering (if false, only distance from wire is used for front steering). Rear steering always uses dual sensor heading estimation when enable_sensor_2 is true.
-double heading_weight; // Weighting factor for heading estimation. Higher values put more weight on heading vs distance for determining steering output. If use_heading is false, this value has no effect.
-double tpa; // Reduces the sensativity of steering controller as the throttle is increased. 0 is usually fine for slow vehicles, but faster vehicles that experience more severe oscillations at high speed may benefit from a higher value. A value of 0.5 means that at full throttle, the steering controller output is reduced to 50%
 StuckVehicle stuckDetector(&stmPacket.items.s1_y, 15, 18000, 2000);  // Distance threshold (mm) and time threshold (milliseconds). For 1/10 scale vehicles start with 15mm and 15000ms. For 1/18 vehicles start with 10mm and 15000ms.
 uint8_t BTxFollowChannel; // If set to 0, BTx signals control creep throttle and sine swerve disable. For BTx follow functionality, set to the value of the BTx channel on the vehicle.
 double BTxAccelRate; // How fast/slow the vehicle accelerates for BTx follow
@@ -94,9 +85,6 @@ int    CHARGE_MAX_SECONDS; // Maximum charge time in seconds. Vehicle will resum
 #define SPARE_OUT_1 GPIO_NUM_11
 #define SPARE_OUT_2 GPIO_NUM_12
 
-// Spare GPIO
-#define SPARE_GPIO_IO39 GPIO_NUM_39 //P18
-#define SPARE_GPIO_IO40 GPIO_NUM_40 //P17
 
 // Spare I2C/SPI, but can be as GPIO too
 #define SPARE_NSS       GPIO_NUM_38
@@ -195,13 +183,6 @@ uint32_t last_charge_code = 0;
 uint32_t last_status_bits = 0;
 bool lapFlag = false;
 
-// Extra GPIO control
-#define GPIO_39_RESTART_CYCLES 3  // number of 100Hz cycles to wait to restart (1000 = 10s)
-int8_t gpio_39_status;
-uint32_t gpio_39_timer;
-#define GPIO_40_RESTART_CYCLES 3  // number of 100Hz cycles to wait to restart (1000 = 10s)
-int8_t gpio_40_status;
-uint32_t gpio_40_timer;
 
 
 int vehicleStatus = 0; //0=stuck, 1=driving, 2=charging - used for telemetry
@@ -240,18 +221,10 @@ bool sine_wave_force_disabled = false;
 // Steering ------------------------------------------------------
 double target_x_pos = 0;  // target x distance from wire
 double live_position = 0;
-double rear_target_x_pos = 0;  // rear target x distance from wire
-double rear_live_position = 0;
-double sensor_spacing_mm;  // Distance between s1 and s2 sensors in mm
-double wire_angle_deg = 0.0;  // Estimated angle of vehicle relative to wire (degrees)
 // PID Initialization
 double pid_output = 0.0;
-double rear_pid_output = 0.0;
 double steering_output = PWM_OUT_1_DEFAULT;
-double rear_steering_output = PWM_OUT_3_DEFAULT;
-double KP_DEFAULT = kp;
 PID steeringPID(&live_position, &pid_output, &target_x_pos, kp, ki, kd, pid_direction);
-PID rearSteeringPID(&rear_live_position, &rear_pid_output, &rear_target_x_pos, rear_kp, rear_ki, rear_kd, rear_pid_direction);
 
 // PID Low pass filterint setup -----------------------------------------------------------------------------------
 bool low_pass_enable = true;  // true = low pass active, false disables low-pass
@@ -259,13 +232,9 @@ float low_pass_cutoff = 5;  // Frequency of a 2nd order low-pass filter.  Smalle
 float low_pass_alpha = 0.0;  // filter coefficient that's calculated from the cutoff value
 float low_pass_beta = 0.0;  // filter coefficient that's calculated from the cutoff value
 bool low_pass_compute = false;  // bool to only compute when PID loop updates
-bool rear_low_pass_compute = false;  // bool to only compute when rear PID loop updates
 bool low_pass_first_cycle = true;
-bool rear_low_pass_first_cycle = true;
 float low_pass_last_val_1 = 0.0;
 float low_pass_last_val_2 = 0.0;
-float rear_low_pass_last_val_1 = 0.0;
-float rear_low_pass_last_val_2 = 0.0;
 
 volatile uint32_t data_ready = 0;  // incremented by ISR each time STM32 asserts nDATA_READY
 uint32_t uart_overrun_count = 0;   // diagnostic counter, incremented on each overrun recovery
@@ -299,8 +268,6 @@ void button6sPressEvent();  // Called on a 6-second button press
 
 void chargeControl();
 uint16_t driveMode();
-int8_t gpio39Status();
-int8_t gpio40Status();
 int BTxFollow(int base_throttle, double &btx_throttle, bool &btx_throttle_init, bool &btx_follow_active, float btx_signal);
 
 /*
@@ -637,7 +604,7 @@ bool odrive_rcFault() {
 }
 
 // Map the final servo-equivalent output to -1..1 using its configured center
-// and endpoints. Do not apply RC deadband/expo again to calculated PID outputs.
+// and endpoints. Do not apply RC deadband again to calculated PID outputs.
 float odrive_normalizeOutput(double pulse_us, int center, int minimum, int maximum) {
   const double offset = pulse_us - center;
   const int span = offset >= 0.0 ? maximum - center : center - minimum;
@@ -920,10 +887,6 @@ void setup() {
   steeringPID.SetSampleTime(10);  // Set the sample interval in milliseconds
   steeringPID.SetControllerDirection(pid_direction);  // Apply direction loaded from config
   steeringPID.SetMode(AUTOMATIC);  // Turn on the control loop
-  rearSteeringPID.SetOutputLimits(PWM_OUT_3_MIN - PWM_OUT_3_DEFAULT, PWM_OUT_3_MAX - PWM_OUT_3_DEFAULT);  // Set rear output constraints
-  rearSteeringPID.SetSampleTime(10);  // Set the sample interval in milliseconds
-  rearSteeringPID.SetControllerDirection(rear_pid_direction);  // Apply direction loaded from config
-  rearSteeringPID.SetMode(AUTOMATIC);  // Turn on the rear control loop
 
   // PID low pass setup
   low_pass_alpha = pow(2.71828183, (-1.0 / (100 * 1/(low_pass_cutoff * 6.2831))));
@@ -1016,14 +979,6 @@ void loop() {
 
     // update the double X position from the float in the latest STM32 packet
     live_position = stmPacket.items.s1_x;
-    rear_live_position = stmPacket.items.s2_x;
-    double sensor_dx_mm = rear_live_position - live_position;
-    wire_angle_deg = atan2(sensor_dx_mm, sensor_spacing_mm) * (180.0 / 3.14159265358979323846);
-    if(use_heading){
-      live_position = live_position + heading_weight * wire_angle_deg;
-    }
-    rear_live_position = wire_angle_deg;
-
     uint32_t loop_now_ms = millis();
 
     // Filter and condition BTx signals
@@ -1040,7 +995,6 @@ void loop() {
 
     // Reset target each loop so optional modifiers can add on cleanly
     target_x_pos = 0.0;
-    rear_target_x_pos = 0.0;
 
     // Sine wave steering component
     bool sine_wave_enabled = SineSwerveEnabled && (SineSwerveAmplitude != 0);
@@ -1060,22 +1014,8 @@ void loop() {
       sine_wave_blend = 0.0;
     }
 
-    // Use PWM input 4 to control the proportional gain of the steering controller
-    uint32_t kp_input_pwm = pwm_read_rmt_dur(3);
-    double kp_target = KP_DEFAULT;
-    if(kp_input_pwm >= 800){
-      int kp_input_clamped = constrain((int)kp_input_pwm, 1000, 2000);
-      kp_target = 1.0 + (double)(kp_input_clamped - 1000) * 0.007;
-      kp_target = round(kp_target * 15.0) / 15.0;
-    }
-    if(kp != kp_target){
-      kp = kp_target;
-      steeringPID.SetTunings(kp, ki, kd);
-    }
-
     // Steering control
     low_pass_compute = steeringPID.Compute();  // compute new steering command according to straight PID
-    rear_low_pass_compute = rearSteeringPID.Compute();  // compute new rear steering command
 
     // apply low pass to PID output (mostly to reduce jitter due to kd term)
     if(low_pass_compute && low_pass_enable && (!low_pass_first_cycle)){
@@ -1089,27 +1029,12 @@ void loop() {
       low_pass_last_val_2 = pid_output;
       low_pass_first_cycle = false;
     }
-    if(rear_low_pass_compute && low_pass_enable && (!rear_low_pass_first_cycle)){
-      rear_pid_output = rear_pid_output * low_pass_beta + rear_low_pass_last_val_1 * low_pass_alpha;  // Compute first low-pass
-      rear_low_pass_last_val_1 = rear_pid_output;  // save intermediate value
-      rear_pid_output = rear_pid_output * low_pass_beta + rear_low_pass_last_val_2 * low_pass_alpha;  // Compute second low-pass
-      rear_low_pass_last_val_2 = rear_pid_output;  // save last value
-    }
-    if(rear_low_pass_compute && rear_low_pass_first_cycle && low_pass_enable){
-      rear_low_pass_last_val_1 = rear_pid_output;
-      rear_low_pass_last_val_2 = rear_pid_output;
-      rear_low_pass_first_cycle = false;
-    }
-
     throttle = driveMode(); // get throttleMicros from drive mode logic
 
     if(charge_status > 0){
       stuckDetector.ResetStatus();  // ignore stuck detection when charging
     }
 
-    if(gpio39Status()){
-      throttle = CREEP_THROTTLE;
-    }
 
     //Btx Logic -----------------------------------------------------------------------
     // Creep Speed -------------------------------
@@ -1222,46 +1147,21 @@ void loop() {
 
     // In manual mode, disable PID steering contribution when user steering is beyond +/-100us from center.
     int manual_steer_offset = 0;
-    int rear_manual_steer_offset = 0;
     double pid_steer_contribution = pid_output;
-    double rear_pid_steer_contribution = rear_pid_output;
-
-    // TPA: scale PID output down proportionally with throttle between (PWM_OUT_2_DEFAULT + 30) and PWM_OUT_2_MAX
-    if(tpa > 0.0){
-      const int tpa_start = PWM_OUT_2_DEFAULT + 30;
-      const int tpa_range = PWM_OUT_2_MAX - tpa_start;
-      if(tpa_range > 0 && throttle > tpa_start){
-        double throttle_fraction = (double)constrain(throttle - tpa_start, 0, tpa_range) / (double)tpa_range;
-        double tpa_scale = fmax(0.0, 1.0 - tpa * throttle_fraction);
-        pid_steer_contribution *= tpa_scale;
-        rear_pid_steer_contribution *= tpa_scale;
-      }
-    }
 
     if(drive_mode_status == 0 ){  // Manual mode
       uint32_t steering_input = pwm_read_rmt_dur(0);
       bool steering_valid = (steering_input >= 500 && steering_input <= 2500);
       if(steering_valid){
         manual_steer_offset = (int)steering_input - 1500;
-        rear_manual_steer_offset = reverse_rear_steer_in ? -manual_steer_offset : manual_steer_offset;
         if(abs(manual_steer_offset) >= 100){
           pid_steer_contribution = 0.0;
-          rear_pid_steer_contribution = 0.0;
         }
       }
     }
 
     steering_output = PWM_OUT_1_DEFAULT + pid_steer_contribution + manual_steer_offset; //calculate steering output
-    rear_steering_output = PWM_OUT_3_DEFAULT + rear_pid_steer_contribution + rear_manual_steer_offset;
     steering_output = constrain(steering_output, PWM_OUT_1_MIN, PWM_OUT_1_MAX); //Keep steering output within limits
-    rear_steering_output = constrain(rear_steering_output, PWM_OUT_3_MIN, PWM_OUT_3_MAX); //Keep rear steering output within limits
-
-    auto inverse_rear_steer_to_pwm4 = [](double rear_output)->uint32_t {
-      // Mirror rear steering command about center for PWM_OUT_4.
-      double pwm4_value = PWM_OUT_4_DEFAULT - (rear_output - PWM_OUT_3_DEFAULT);
-      return (uint32_t)constrain((int)lround(pwm4_value), PWM_OUT_4_MIN, PWM_OUT_4_MAX);
-    };
-
 
      // Check for faults before commanding skid steering and remaining servo outputs.
      if( WFRX_STATUS_GET_BIT(stmPacket.items.status_bits, WFRX_STATUS_S1_SIGNAL_OVERLOAD)  //  signal overload fault bit
@@ -1269,7 +1169,7 @@ void loop() {
       || (stmPacket.items.temperature > 100)  // STM32 internal temp in °C
       ){
         odrive_setDriveOutput(PWM_OUT_2_DEFAULT, PWM_OUT_1_DEFAULT, false);
-        writePwmMicros(3, PWM_OUT_3_DEFAULT);  // write center steering value to reversed output 3
+        writePwmMicros(3, PWM_OUT_3_DEFAULT);  // write default value to output 3
         writePwmMicros(4, PWM_OUT_4_DEFAULT);
 
      }else if(((drive_mode_status == 1 || drive_mode_status == 2)
@@ -1277,7 +1177,7 @@ void loop() {
           || (charge_status > 0)  // vehicle charge in progress
           ){
         odrive_setDriveOutput(PWM_OUT_2_DEFAULT, PWM_OUT_1_DEFAULT, false);
-        sine_wave_force_disabled = true; sine_wave_blend = 0.0; target_x_pos = 0.0; rear_target_x_pos = 0.0;
+        sine_wave_force_disabled = true; sine_wave_blend = 0.0; target_x_pos = 0.0;
         vehicleStatus = 2; //set status to 'charging' for telemetry purposes
         if (charge_status == 0) { // If there is a fault other than charging
          vehicleStatus = 0; //the vehicle should be considered stuck
@@ -1285,8 +1185,6 @@ void loop() {
 
      }else{
        odrive_setDriveOutput(throttle, steering_output, true);
-       //writePwmMicros(3, rear_steering_output);  // write inverse steering value to output 3
-       //writePwmMicros(4, inverse_rear_steer_to_pwm4(rear_steering_output));
        sine_wave_force_disabled = false;
        vehicleStatus = 1; //set status to driving for telemetry purposes
      }
@@ -1308,8 +1206,6 @@ void loop() {
   mainLoopCounter();  // increment data loop counter
   chargeControl();  // monitor and control charge port
   espPacketFifo_sendCmd();  // Send one STM32 UART command from the command queue
-  gpio39Status();  // Monitor GPIO 39 and update status
-  gpio40Status();  // Monitor GPIO 40 and update status
 
   }  // end else (CRC pass)
   }  // end else (normal packet path)
@@ -1344,11 +1240,8 @@ void loop() {
     //Serial.print(" Ch4: "); Serial.print(pwm_read_rmt_dur(3)); // R/C PWM input 4 (unused)
     //Serial.print(" Thr Out: "); Serial.print(throttle);
     //Serial.print(" Str Out: "); Serial.print(steering_output);
-    //Serial.print(" Rear Steering Output: "); Serial.print(rear_steering_output);
     //Serial.print(" PID Output: "); Serial.print(pid_output);
     //Serial.printf(" Drive Mode:  %12d\n\r", drive_mode_status);
-    //Serial.print("gpio_39: "); Serial.print(gpio_39_status);
-    //Serial.print("  gpio_40: "); Serial.print(gpio_40_status);
     //Serial.print(" BTx1: "); Serial.print(BTx1Signal);
     //Serial.print(" BTx2: "); Serial.print(BTx2Signal);
     //Serial.print(" X1: "); Serial.print(stmPacket.items.s1_x);
@@ -1358,7 +1251,6 @@ void loop() {
     //Serial.print(" X2: "); Serial.print(stmPacket.items.s2_x);
     //Serial.print(" Y2: "); Serial.print(stmPacket.items.s2_y);
     //Serial.print(" R2: "); Serial.print(stmPacket.items.s2_radius);
-    //Serial.print(" Angle: "); Serial.print(wire_angle_deg, 0); // in degrees
     //Serial.print(" BTx1: "); Serial.print(stmPacket.items.s1_btx_radius[0]); // Sensor 1 BTx raw
     //Serial.print(" BTx2: "); Serial.print(stmPacket.items.s1_btx_radius[1]); // Sensor 1 BTx raw
     //Serial.print("S2 BTx1: "); Serial.print(stmPacket.items.s2_btx_radius[0]); // Sensor 2 BTx raw
@@ -1462,16 +1354,6 @@ void mainLoopCounter(){
   }
 }
 
-// Apply a centre-preserving exponential curve to throttle PWM input.
-static uint32_t applyThrottleExpoPwm(uint32_t pwm_in){
-  int clamped = constrain((int)pwm_in, 1000, 2000);
-  double x = ((double)clamped - 1500.0) / 500.0;  // [-1, +1]
-  double expo = constrain(throttle_expo, 0.0, 1.0);
-  double y = ((1.0 - expo) * x) + (expo * x * x * x);
-  int shaped = (int)lround(1500.0 + (y * 500.0));
-  return (uint32_t)constrain(shaped, 1000, 2000);
-}
-
 // Cruise Control logic ---------------------------------------------------------
 uint16_t driveMode(){
   // Passthrough input throttle command until PWM_IN_3 goes above 1500µs for 500ms, then latch on to the last throttle command.
@@ -1484,7 +1366,7 @@ uint16_t driveMode(){
   bool steering_valid = (steering_input >= 500 && steering_input <= 2500);  // check if steering is in valid range
   bool throttle_valid = (throttle_input_raw_pwm >= 500 && throttle_input_raw_pwm <= 2500);  // check if throttle is in valid range
   bool aux_valid = (aux_input >= 500 && aux_input <= 2500);  // check if aux channel is in valid range
-  uint32_t throttle_input_pwm = throttle_valid ? applyThrottleExpoPwm(throttle_input_raw_pwm) : 1500;
+  uint32_t throttle_input_pwm = throttle_valid ? (uint32_t)constrain((int)throttle_input_raw_pwm, 1000, 2000) : 1500;
 
   // Start in autonomous mode when no throttle PWM is present at startup
   static bool startup_checked = false;
@@ -1786,9 +1668,6 @@ void chargeControl(){
 }
 
 
-// MPU6050 owns both auxiliary pins; their digital controls are unavailable.
-int8_t gpio39Status(){ return 0; }
-int8_t gpio40Status(){ return 0; }
 
 void broadcastTelemetry(){
   if (   // Check if we should queue a telemetry message
@@ -1888,7 +1767,7 @@ int BTxFollow(int base_throttle, double &btx_throttle, bool &btx_throttle_init, 
 // applyDeviceConfig
 //
 // Copies all fields from cfg into the global firmware variables and reconfigures
-// the PID controllers, stuck detector, and charge parameters to match.
+// the steering PID, stuck detector, and charge parameters to match.
 // Call after msc_fat_init() and again whenever msc_fat_loop() returns true.
 // -----------------------------------------------------------------------------
 void applyDeviceConfig(const DeviceConfig& cfg)
@@ -1900,7 +1779,6 @@ void applyDeviceConfig(const DeviceConfig& cfg)
   // Drive parameters
   CRUISE_THROTTLE     = cfg.CRUISE_THROTTLE;
   CREEP_THROTTLE      = cfg.CREEP_THROTTLE;
-  throttle_expo       = cfg.throttle_expo;
 
   // PWM output limits and centres
   PWM_OUT_1_DEFAULT   = cfg.PWM_OUT_1_DEFAULT;
@@ -1920,28 +1798,11 @@ void applyDeviceConfig(const DeviceConfig& cfg)
   kp                  = cfg.kp;
   ki                  = cfg.ki;
   kd                  = cfg.kd;
-  KP_DEFAULT          = cfg.kp;
   pid_direction       = cfg.pid_direction;
   steeringPID.SetControllerDirection(pid_direction);
   steeringPID.SetTunings(kp, ki, kd);
   steeringPID.SetOutputLimits(PWM_OUT_1_MIN - PWM_OUT_1_DEFAULT,
                                PWM_OUT_1_MAX - PWM_OUT_1_DEFAULT);
-
-  // Rear PID gains and direction
-  rear_kp             = cfg.rear_kp;
-  rear_ki             = cfg.rear_ki;
-  rear_kd             = cfg.rear_kd;
-  rear_pid_direction  = cfg.rear_pid_direction;
-  rearSteeringPID.SetControllerDirection(rear_pid_direction);
-  rearSteeringPID.SetTunings(rear_kp, rear_ki, rear_kd);
-  rearSteeringPID.SetOutputLimits(PWM_OUT_3_MIN - PWM_OUT_3_DEFAULT,
-                                   PWM_OUT_3_MAX - PWM_OUT_3_DEFAULT);
-
-  // Steering options
-  reverse_rear_steer_in = cfg.reverse_rear_steer_in;
-  use_heading           = cfg.use_heading;
-  heading_weight        = -cfg.heading_weight;
-  sensor_spacing_mm     = cfg.sensor_spacing_mm;
 
   // Stuck detector
   stuckDetector.SetThreshold(cfg.stuck_threshold_mm);
@@ -1952,9 +1813,6 @@ void applyDeviceConfig(const DeviceConfig& cfg)
   BTxThreshold        = cfg.BTxThreshold;
   BTxAccelRate        = cfg.BTxAccelRate;
   BTxCreepDuration    = cfg.BTxCreepDuration;
-
-  // TPA
-  tpa                 = cfg.tpa;
 
   // Sensor 2
   enable_sensor_2     = cfg.enable_sensor_2;
