@@ -45,6 +45,12 @@ struct DeviceConfig {
     double ki;
     double kd;
     int    pid_direction;   // PID_v1: DIRECT=0, REVERSE=1
+    // Yaw-rate PID: input/setpoint in deg/s, output normalized to -1..1.
+    double steering_rate_kp;
+    double steering_rate_ki;
+    double steering_rate_kd;
+    int    steering_rate_pid_direction; // DIRECT=0, REVERSE=1
+    double steering_rate_max_dps;       // Full-scale steering request
     bool   enable_sensor_2;
 
     // Stuck-vehicle detector

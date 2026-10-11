@@ -1,4 +1,13 @@
-//https://www.rctestflight.com/trailtracer
+// SN65HVD230 CAN transceiver connected to the native ESP32-S2 TWAI controller
+// P9 (GPIO36) - TXD
+// P10 (GPIO38) - RXD
+
+// MPU6050 I2C
+// SDA - GPIO39
+// SCL - GPIO40
+
+// Motor Arming Switch - P11 (GPIO35)
+// Buzzer - P8 (GPIO37)
 
 #include <Arduino.h>
 #include <math.h>
@@ -10,6 +19,66 @@
 MPU6050 mpu(Wire);
 #define SDA_PIN 39
 #define SCL_PIN 40
+
+bool gyro_ready = false;
+uint32_t gyro_sample_ms = 0;
+
+// Take one calibration sample per loop, leaving STM32 packet handling active.
+// Keep the sensor stationary until the calibration-complete message appears.
+static void serviceMpu() {
+  enum class State { Init, Settling, Sampling, Ready, Failed };
+  static State state = State::Init;
+  static uint32_t started_ms = 0;
+  static uint32_t last_sample_ms = 0;
+  static uint16_t samples = 0;
+  static float sums[6] = {};
+  const uint32_t now = millis();
+
+  if (state == State::Init) {
+    Wire.begin(SDA_PIN, SCL_PIN);
+    byte status = mpu.begin();
+    if (status != 0) {
+      Serial.printf("MPU6050 init failed: %u; sensor disabled\n", status);
+      state = State::Failed;
+      return;
+    }
+    mpu.setGyroOffsets(0, 0, 0);
+    mpu.setAccOffsets(0, 0, 0);
+    started_ms = millis();
+    state = State::Settling;
+    return;
+  }
+  if (state == State::Failed) return;
+  if (state == State::Settling) {
+    if (now - started_ms < 500) return;
+    state = State::Sampling;
+  }
+  if (state == State::Sampling) {
+    if (now - last_sample_ms < 1) return;
+    last_sample_ms = now;
+    mpu.fetchData();
+    sums[0] += mpu.getAccX();
+    sums[1] += mpu.getAccY();
+    sums[2] += mpu.getAccZ() - 1.0f;
+    sums[3] += mpu.getGyroX();
+    sums[4] += mpu.getGyroY();
+    sums[5] += mpu.getGyroZ();
+    if (++samples == CALIB_OFFSET_NB_MES) {
+      mpu.setAccOffsets(sums[0] / samples, sums[1] / samples, sums[2] / samples);
+      mpu.setGyroOffsets(sums[3] / samples, sums[4] / samples, sums[5] / samples);
+      state = State::Ready;
+      // Wait for the first offset-corrected update before enabling motors.
+      Serial.println("MPU6050 calibration complete");
+    }
+    return;
+  }
+  if (now - last_sample_ms >= 1) {
+    last_sample_ms = now;
+    mpu.update();
+    gyro_sample_ms = millis();
+    gyro_ready = isfinite(mpu.getGyroZ());
+  }
+}
 #include "wfrx_stm32_comms.h"
 #include "rctf_wfrx_status_bits.h"
 #include "rctf_wfrx_exp32.h"
@@ -91,6 +160,11 @@ int    CHARGE_MAX_SECONDS; // Maximum charge time in seconds. Vehicle will resum
 #define SPARE_SCL_SCK   GPIO_NUM_36
 #define SPARE_SDA_DOUT  GPIO_NUM_37
 #define SPARE_DIN       GPIO_NUM_35
+
+#define MOTOR_ARM_SWITCH_PIN GPIO_NUM_35  // Low forces every ODrive idle.
+#define BUZZER_PIN GPIO_NUM_37  // Active-high buzzer.
+#define ODRIVE_BUZZER_PERIOD_MS 2000
+#define ODRIVE_BUZZER_PULSE_MS 100
 
 // Native ESP32-S2 TWAI controller connected to a 3.3V SN65HVD230 transceiver.
 #define TWAI_TX_PIN GPIO_NUM_36
@@ -225,6 +299,29 @@ double live_position = 0;
 double pid_output = 0.0;
 double steering_output = PWM_OUT_1_DEFAULT;
 PID steeringPID(&live_position, &pid_output, &target_x_pos, kp, ki, kd, pid_direction);
+
+// Inner loop accepts physical yaw-rate commands. A future angle controller can
+// convert heading error (degrees) to a bounded deg/s request through this API.
+double steering_rate_input_dps = 0.0;
+double steering_rate_target_dps = 0.0;
+double steering_rate_output = 0.0;
+double steering_rate_max_dps = 90.0;
+PID steeringRatePID(&steering_rate_input_dps, &steering_rate_output,
+                    &steering_rate_target_dps, 0.02, 0.01, 0.0, DIRECT);
+
+void steeringRateSetTargetDps(double rate_dps) {
+  steering_rate_target_dps = isfinite(rate_dps)
+    ? constrain(rate_dps, -steering_rate_max_dps, steering_rate_max_dps) : 0.0;
+}
+
+void steeringRateReset() {
+  steeringRatePID.SetMode(MANUAL);
+  steering_rate_output = 0.0; // Clear integral on the next MANUAL -> AUTOMATIC transition.
+}
+
+bool steeringRateGyroValid() {
+  return gyro_ready && millis() - gyro_sample_ms <= 50 && isfinite(mpu.getGyroZ());
+}
 
 // PID Low pass filterint setup -----------------------------------------------------------------------------------
 bool low_pass_enable = true;  // true = low pass active, false disables low-pass
@@ -614,6 +711,7 @@ float odrive_normalizeOutput(double pulse_us, int center, int minimum, int maxim
 
 void odrive_stopRc() {
   odrive_rc_active = false;
+  steeringRateReset();
   for (uint8_t node = 0; node < ODRIVE_NODE_COUNT; ++node) {
     odrive_setInputVel(node, 0.0f);
     odrive_setAxisState(node, ODRIVE_AXIS_STATE_IDLE);
@@ -622,8 +720,13 @@ void odrive_stopRc() {
 }
 
 void odrive_startRc() {
-  if (!can_init_ok || !odrive_rcInputsValid() || odrive_rcFault()) return;
+  if (digitalRead(MOTOR_ARM_SWITCH_PIN) == LOW ||
+      !can_init_ok || !odrive_rcInputsValid() || odrive_rcFault()) return;
   for (uint8_t node = 0; node < ODRIVE_NODE_COUNT; ++node) {
+    if (digitalRead(MOTOR_ARM_SWITCH_PIN) == LOW) {
+      odrive_stopRc();
+      return;
+    }
     odrive_clearErrors(node);
     delay(2);
     odrive_setControllerMode(node, ODRIVE_CONTROL_MODE_VELOCITY, ODRIVE_INPUT_MODE_PASSTHROUGH);
@@ -632,6 +735,10 @@ void odrive_startRc() {
     odrive_setLimits(node, ODRIVE_VEL_LIMIT_RPS, (node == 2 || node == 3) ? 6.0f : 3.0f);
     delay(2);
     odrive_setInputVel(node, 0.0f);
+    if (digitalRead(MOTOR_ARM_SWITCH_PIN) == LOW) {
+      odrive_stopRc();
+      return;
+    }
     odrive_setAxisState(node, ODRIVE_AXIS_STATE_CLOSED_LOOP);
     delay(5);
   }
@@ -646,25 +753,41 @@ void odrive_setDriveOutput(double throttle_us, double steering_us, bool enabled)
   odrive_output_enabled = enabled;
   odrive_drive_command = enabled ? odrive_normalizeOutput(throttle_us,
     PWM_OUT_2_DEFAULT, PWM_OUT_2_MIN, PWM_OUT_2_MAX) : 0.0f;
-  odrive_steer_command = enabled ? -odrive_normalizeOutput(steering_us,
-    PWM_OUT_1_DEFAULT, PWM_OUT_1_MIN, PWM_OUT_1_MAX) : 0.0f;
+  if (!enabled) odrive_steer_command = 0.0f;
+  if (enabled) {
+    // All modes share this conversion after wire PID / manual arbitration.
+    steeringRateSetTargetDps(odrive_normalizeOutput(steering_us,
+      PWM_OUT_1_DEFAULT, PWM_OUT_1_MIN, PWM_OUT_1_MAX) * steering_rate_max_dps);
+  } else {
+    steeringRateSetTargetDps(0.0);
+    steeringRateReset();
+  }
   if (!enabled && odrive_rc_active) odrive_stopRc();
 }
 
 void odrive_outputUpdate() {
   const uint32_t now = millis();
+  const bool motor_idle_requested = digitalRead(MOTOR_ARM_SWITCH_PIN) == LOW;
+  if (motor_idle_requested && odrive_rc_active) odrive_stopRc();
   if (now - odrive_rc_update_millis < ODRIVE_RC_UPDATE_MS) return;
   odrive_rc_update_millis = now;
-  const bool rc_ready = can_init_ok && odrive_output_enabled &&
+  const bool rc_ready = !motor_idle_requested && can_init_ok && odrive_output_enabled &&
     now - odrive_output_millis <= ODRIVE_OUTPUT_TIMEOUT_MS &&
-    odrive_rcInputsValid() && !odrive_rcFault();
+    odrive_rcInputsValid() && !odrive_rcFault() && steeringRateGyroValid();
   if (odrive_rc_active && !rc_ready) {
     odrive_stopRc();
   } else if (!odrive_rc_active && rc_ready) {
     odrive_startRc();
+    serviceMpu(); // Arming takes time; refresh feedback before the first rate calculation.
+    if (odrive_rc_active && !steeringRateGyroValid()) odrive_stopRc();
   }
   float even_rps = 0.0f, odd_rps = 0.0f;
   if (odrive_rc_active) {
+    steering_rate_input_dps = mpu.getGyroZ();
+    steeringRatePID.SetMode(AUTOMATIC);
+    steeringRatePID.Compute();
+    // Keep the existing motor-mixer polarity; PID direction is configured separately.
+    odrive_steer_command = -(float)steering_rate_output;
     // Skid steering: opposite motor mounting directions on the two sides.
     even_rps = constrain(-(ODRIVE_DRIVE_SCALE_RPS * odrive_drive_command + ODRIVE_TURN_SCALE_RPS * odrive_steer_command),
       -ODRIVE_VEL_LIMIT_RPS, ODRIVE_VEL_LIMIT_RPS);
@@ -678,6 +801,26 @@ void odrive_outputUpdate() {
     odrive_setInputVel(node, (node & 1) ? odd_rps : even_rps);
     if (!odrive_rc_active) odrive_setAxisState(node, ODRIVE_AXIS_STATE_IDLE);
   }
+}
+
+// Nonblocking alarm; start immediately on a fault and repeat every two seconds.
+void odrive_updateBuzzer() {
+  static bool fault_was_present = false;
+  static uint32_t pulse_started_ms = 0;
+  bool fault_present = false;
+  for (uint8_t node = 0; node < ODRIVE_NODE_COUNT; ++node) {
+    if (odrive_axis_errors[node] || odrive_active_errors[node] || odrive_disarm_reasons[node]) {
+      fault_present = true;
+      break;
+    }
+  }
+  const uint32_t now = millis();
+  if (fault_present && (!fault_was_present || now - pulse_started_ms >= ODRIVE_BUZZER_PERIOD_MS)) {
+    pulse_started_ms = now;
+  }
+  digitalWrite(BUZZER_PIN,
+    fault_present && now - pulse_started_ms < ODRIVE_BUZZER_PULSE_MS ? HIGH : LOW);
+  fault_was_present = fault_present;
 }
 
 // Recovery runs asynchronously: initiate once, poll state, restart after recovery.
@@ -836,6 +979,9 @@ void setup() {
   // Configure pins
   pinMode(nLED, OUTPUT);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(MOTOR_ARM_SWITCH_PIN, INPUT_PULLUP);
+  digitalWrite(BUZZER_PIN, LOW);
+  pinMode(BUZZER_PIN, OUTPUT);
 
   pinMode(PWM_IN_1, INPUT);
   pinMode(PWM_IN_2, INPUT);
@@ -865,15 +1011,9 @@ void setup() {
   writePwmMicros(3, PWM_OUT_3_DEFAULT);
   writePwmMicros(4, PWM_OUT_4_DEFAULT);
 
-  Wire.begin(SDA_PIN, SCL_PIN);
-  byte mpu_status = mpu.begin();
-  if (mpu_status != 0) {
-    Serial.printf("MPU6050 init failed: %u\n", mpu_status);
-    while (true) delay(500);
-  }
-  delay(500);  // Keep the sensor stationary during calibration.
-  mpu.calcOffsets(true, true);
-  delay(100);
+  // Boot STM32 before initializing other peripherals. Its GPIO ISR is attached
+  // below, after TWAI/RMT allocation; the handshake polls nDATA_READY directly.
+  stm32_boot_handshake();
 
   // Install TWAI before allocating RMT and STM32 GPIO interrupts.
   can_init_ok = odriveCan_init();
@@ -895,8 +1035,6 @@ void setup() {
   // Attach falling edge interrupt to STM_nDATA_READY pin
   attachInterrupt(digitalPinToInterrupt(STM_nDATA_READY), receiveStmUart, FALLING);
   pwm_reset_readings();
-
-  stm32_boot_handshake();
 
   data_ready = 0;  // Clear any pending data ready flags that may have been set during boot
 
@@ -929,7 +1067,6 @@ void setup() {
 
 // Main Loop ---------------------------------------------------------------------------------------------------------------
 void loop() {
-  mpu.update();
 
   static uint32_t last_button_update = 0;
   if (millis() - last_button_update >= 10) {
@@ -938,6 +1075,7 @@ void loop() {
   }
   odrive_recoverIfNeeded();
   odrive_pollAndPrintCan();
+  odrive_updateBuzzer();
   odrive_outputUpdate();  // Send calculated outputs; stop if outputs or RC go stale.
   odrive_requestEncoderEstimates();
 
@@ -1272,6 +1410,7 @@ void loop() {
     // Serial.printf("Re(S2C2): %12.4f\n\r", (stmPacket.items.coil_data[1][2]));
     // Serial.printf("Im(S2C2): %12.4f\n\r", (stmPacket.items.coil_data[1][3]));
     // Serial.println(mpu.getGyroZ(), 3);  // Yaw rate in degrees/second
+    // Serial.printf(" GPIO35: %d GPIO37: %d\n", digitalRead(MOTOR_ARM_SWITCH_PIN), digitalRead(BUZZER_PIN));
 
     data_sent = 1;
   }
@@ -1309,6 +1448,8 @@ void loop() {
   }
   */
 
+  // Process STM32 packets first, then do at most one sensor sample.
+  serviceMpu();
 } // End of main loop -------------------------------------------------------------------------
 
 // STM32 UART ISR, triggered by falling edge of nDATA_READY after each full packet
@@ -1803,6 +1944,15 @@ void applyDeviceConfig(const DeviceConfig& cfg)
   steeringPID.SetTunings(kp, ki, kd);
   steeringPID.SetOutputLimits(PWM_OUT_1_MIN - PWM_OUT_1_DEFAULT,
                                PWM_OUT_1_MAX - PWM_OUT_1_DEFAULT);
+
+  // Rate PID is reset when live settings change to discard old integral state.
+  steeringRateReset();
+  steering_rate_max_dps = cfg.steering_rate_max_dps;
+  steeringRateSetTargetDps(steering_rate_target_dps);
+  steeringRatePID.SetControllerDirection(cfg.steering_rate_pid_direction);
+  steeringRatePID.SetTunings(cfg.steering_rate_kp, cfg.steering_rate_ki, cfg.steering_rate_kd);
+  steeringRatePID.SetOutputLimits(-1.0, 1.0);
+  steeringRatePID.SetSampleTime(ODRIVE_RC_UPDATE_MS);
 
   // Stuck detector
   stuckDetector.SetThreshold(cfg.stuck_threshold_mm);

@@ -24,6 +24,7 @@
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include <inttypes.h>
+#include <math.h>
 
 #include "esp_partition.h"
 #include "esp_log.h"
@@ -226,6 +227,11 @@ static void populate_defaults(DeviceConfig& c,
     c.ki                    = 0.0;
     c.kd                    = 0.0;
     c.pid_direction         = 0;   
+    c.steering_rate_kp = 0.02;
+    c.steering_rate_ki = 0.01;
+    c.steering_rate_kd = 0.0;
+    c.steering_rate_pid_direction = 0;
+    c.steering_rate_max_dps = 90.0;
     c.enable_sensor_2       = false;
     c.stuck_threshold_mm    = 0.1f;
     c.stuck_timeout_ms      = 20000.0f;
@@ -281,6 +287,12 @@ static void validate_config(DeviceConfig& c)
     if (c.kd < 0.0)  c.kd = 0.0;
     if (c.pid_direction < 0 || c.pid_direction > 1) c.pid_direction = 0;
 
+    if (!isfinite(c.steering_rate_kp) || c.steering_rate_kp < 0.0) c.steering_rate_kp = 0.02;
+    if (!isfinite(c.steering_rate_ki) || c.steering_rate_ki < 0.0) c.steering_rate_ki = 0.01;
+    if (!isfinite(c.steering_rate_kd) || c.steering_rate_kd < 0.0) c.steering_rate_kd = 0.0;
+    if (c.steering_rate_pid_direction < 0 || c.steering_rate_pid_direction > 1) c.steering_rate_pid_direction = 0;
+    if (!isfinite(c.steering_rate_max_dps) || c.steering_rate_max_dps <= 0.0 || c.steering_rate_max_dps > 500.0) c.steering_rate_max_dps = 90.0;
+
     // Stuck
     if (c.stuck_threshold_mm < 1.0f)   c.stuck_threshold_mm = 1.0f;
     if (c.stuck_timeout_ms   < 1000.0f) c.stuck_timeout_ms  = 1000.0f;
@@ -331,6 +343,11 @@ static void prefs_save(const DeviceConfig& c)
     p.putDouble("ki",      c.ki);
     p.putDouble("kd",      c.kd);
     p.putInt("pidDir",     c.pid_direction);
+    p.putDouble("rateKp", c.steering_rate_kp);
+    p.putDouble("rateKi", c.steering_rate_ki);
+    p.putDouble("rateKd", c.steering_rate_kd);
+    p.putInt("rateDir", c.steering_rate_pid_direction);
+    p.putDouble("rateMax", c.steering_rate_max_dps);
     p.putBool("enS2",      c.enable_sensor_2);
     p.putFloat("stThresh", c.stuck_threshold_mm);
     p.putFloat("stTout",   c.stuck_timeout_ms);
@@ -373,6 +390,11 @@ static bool prefs_load(DeviceConfig& c)
     c.ki                    = p.getDouble("ki",      c.ki);
     c.kd                    = p.getDouble("kd",      c.kd);
     c.pid_direction         = p.getInt("pidDir",     c.pid_direction);
+    c.steering_rate_kp = p.getDouble("rateKp", c.steering_rate_kp);
+    c.steering_rate_ki = p.getDouble("rateKi", c.steering_rate_ki);
+    c.steering_rate_kd = p.getDouble("rateKd", c.steering_rate_kd);
+    c.steering_rate_pid_direction = p.getInt("rateDir", c.steering_rate_pid_direction);
+    c.steering_rate_max_dps = p.getDouble("rateMax", c.steering_rate_max_dps);
     c.enable_sensor_2       = p.getBool("enS2",      c.enable_sensor_2);
     c.stuck_threshold_mm    = p.getFloat("stThresh", c.stuck_threshold_mm);
     c.stuck_timeout_ms      = p.getFloat("stTout",   c.stuck_timeout_ms);
@@ -620,6 +642,11 @@ static bool config_write_json(const DeviceConfig& c)
     doc["ki"]                    = c.ki;
     doc["kd"]                    = c.kd;
     doc["pid_direction"]         = (bool)c.pid_direction;   // false=NORMAL, true=REVERSE
+    doc["steering_rate_kp"] = c.steering_rate_kp;
+    doc["steering_rate_ki"] = c.steering_rate_ki;
+    doc["steering_rate_kd"] = c.steering_rate_kd;
+    doc["steering_rate_pid_direction"] = (bool)c.steering_rate_pid_direction;
+    doc["steering_rate_max_dps"] = c.steering_rate_max_dps;
     doc["enable_sensor_2"]       = c.enable_sensor_2;
     doc["stuck_threshold_mm"]    = c.stuck_threshold_mm;
     doc["stuck_timeout_ms"]      = c.stuck_timeout_ms;
@@ -680,6 +707,8 @@ static bool config_write_json(const DeviceConfig& c)
 // Parse s_config_path on the mounted FAT volume into cfg.
 // Unknown / invalid fields are silently ignored; previously valid fields keep
 // their current (NVS-loaded) value.
+static bool s_rate_config_missing = false;
+
 static bool config_read_json(DeviceConfig& c)
 {
     FIL fil;
@@ -798,10 +827,17 @@ static bool config_read_json(DeviceConfig& c)
     JSON_GET_INT("PWM_OUT_4_DEFAULT",       PWM_OUT_4_DEFAULT);
     JSON_GET_INT("PWM_OUT_4_MIN",           PWM_OUT_4_MIN);
     JSON_GET_INT("PWM_OUT_4_MAX",           PWM_OUT_4_MAX);
+    s_rate_config_missing = doc["steering_rate_kp"].isNull() || doc["steering_rate_ki"].isNull() || doc["steering_rate_kd"].isNull() || doc["steering_rate_pid_direction"].isNull() || doc["steering_rate_max_dps"].isNull();
+
     JSON_GET_DBL("kp",                      kp);
     JSON_GET_DBL("ki",                      ki);
     JSON_GET_DBL("kd",                      kd);
     JSON_GET_BOOL("pid_direction",          pid_direction);
+    JSON_GET_DBL("steering_rate_kp", steering_rate_kp);
+    JSON_GET_DBL("steering_rate_ki", steering_rate_ki);
+    JSON_GET_DBL("steering_rate_kd", steering_rate_kd);
+    JSON_GET_BOOL("steering_rate_pid_direction", steering_rate_pid_direction);
+    JSON_GET_DBL("steering_rate_max_dps", steering_rate_max_dps);
     JSON_GET_BOOL("enable_sensor_2",        enable_sensor_2);
     JSON_GET_FLT("stuck_threshold_mm",      stuck_threshold_mm);
     JSON_GET_FLT("stuck_timeout_ms",        stuck_timeout_ms);
@@ -971,6 +1007,7 @@ void msc_fat_init(DeviceConfig* cfg)
                 validate_config(file_cfg);
                 *cfg = file_cfg;
                 prefs_save(*cfg);
+                if (s_rate_config_missing) config_write_json(*cfg);
             }
         }
         record_config_stamp();
