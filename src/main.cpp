@@ -1176,7 +1176,8 @@ void loop() {
 
     //Btx Logic -----------------------------------------------------------------------
     // Creep Speed -------------------------------
-    bool btx_user_override_active = (millis() < btx_user_override_until_ms);
+    // Manual mode always gives RC throttle priority and clears BTx override state.
+    bool btx_user_override_active = (drive_mode_status == 0 || millis() < btx_user_override_until_ms);
 
     if(BTxFollowChannel == 0){ //if BTx follow is turned off, use BTx 0 for creep speed
       int base_throttle = throttle;
@@ -1283,18 +1284,16 @@ void loop() {
 
     throttle = constrain(throttle, PWM_OUT_2_MIN, PWM_OUT_2_MAX);
 
-    // In manual mode, disable PID steering contribution when user steering is beyond +/-100us from center.
+    // Manual steering sets the yaw-rate request directly; wire following applies only in modes 1/2.
     int manual_steer_offset = 0;
     double pid_steer_contribution = pid_output;
 
     if(drive_mode_status == 0 ){  // Manual mode
+      pid_steer_contribution = 0.0;
       uint32_t steering_input = pwm_read_rmt_dur(0);
       bool steering_valid = (steering_input >= 500 && steering_input <= 2500);
       if(steering_valid){
         manual_steer_offset = (int)steering_input - 1500;
-        if(abs(manual_steer_offset) >= 100){
-          pid_steer_contribution = 0.0;
-        }
       }
     }
 
@@ -1401,8 +1400,8 @@ void loop() {
     //Serial.printf("Chrg stat:%12d\n\r", (charge_status));  // charge status
     //Serial.printf("Chrg cool:%12d\n\r", (WFRX_STATUS_GET_BIT(stmPacket.items.status_bits, WFRX_STATUS_CP_COOLDOWN)));  // charge cooldown
     //Serial.printf("Chrg Code:%12lu\n\r", (stmPacket.items.charge_code));  // charge code
-    // Serial.printf("Re(S1C1): %12.4f\n\r", (stmPacket.items.coil_data[0][0]));
-    // Serial.printf("Im(S1C1): %12.4f\n\r", (stmPacket.items.coil_data[0][1]));
+    //Serial.printf("Re(S1C1): %12.4f\n\r", (stmPacket.items.coil_data[0][0]));
+    //Serial.printf("Im(S1C1): %12.4f\n\r", (stmPacket.items.coil_data[0][1]));
     // Serial.printf("Re(S1C2): %12.4f\n\r", (stmPacket.items.coil_data[0][2]));
     // Serial.printf("Im(S1C2): %12.4f\n\r", (stmPacket.items.coil_data[0][3]));
     // Serial.printf("Re(S2C1): %12.4f\n\r", (stmPacket.items.coil_data[1][0]));
@@ -1411,6 +1410,22 @@ void loop() {
     // Serial.printf("Im(S2C2): %12.4f\n\r", (stmPacket.items.coil_data[1][3]));
     // Serial.println(mpu.getGyroZ(), 3);  // Yaw rate in degrees/second
     // Serial.printf(" GPIO35: %d GPIO37: %d\n", digitalRead(MOTOR_ARM_SWITCH_PIN), digitalRead(BUZZER_PIN));
+
+
+    Serial.print(stmPacket.items.s1_x);
+    Serial.print(" ");
+    Serial.print(stmPacket.items.s1_y);
+    Serial.print(" ");
+    Serial.print(stmPacket.items.s1_radius);
+    Serial.print(" ");
+    Serial.print(stmPacket.items.coil_data[0][0]);
+    Serial.print(" ");
+    Serial.print(stmPacket.items.coil_data[0][1]);
+    Serial.print(" ");
+    Serial.print(stmPacket.items.coil_data[0][2]);
+    Serial.print(" ");
+    Serial.print(stmPacket.items.coil_data[0][3]);
+    Serial.println();
 
     data_sent = 1;
   }

@@ -4,6 +4,9 @@ The command path is wire-position PID -> existing low-pass filter and manual
 steering arbitration -> yaw-rate request (degrees/second) -> gyro rate PID ->
 ODrive differential motor mixer. Manual (0), cruise (1), and autonomous (2)
 modes all use the rate loop, including reverse driving and zero-throttle pivots.
+Manual mode uses only RC steering for the rate request, with no wire-position
+PID contribution even when the stick is centered. RC throttle also takes
+priority over BTx creep/follow in manual mode.
 The rate loop runs at the existing 12 ms motor update interval, independently
 of the wire-position PID updates. Fresh STM32 commands are still required.
 
