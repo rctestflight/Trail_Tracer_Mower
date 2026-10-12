@@ -34,6 +34,14 @@ button.offer b { color: var(--accent); } button.offer span { color: var(--dim); 
 .bar { height: 10px; background: var(--line); border-radius: 5px; overflow: hidden; margin-top: 4px; }
 .bar > div { height: 100%; background: var(--accent); transition: width 0.3s; }
 .result { margin-top: 6px; font-size: 14px; }
+.refbox { position: relative; margin: 10px 0; max-width: 640px; }
+.refbtn, .refopt { display: grid; gap: 2px; width: 100%; text-align: left; padding: 8px 12px; margin-top: 4px; }
+.refbtn::after { content: "change"; position: absolute; right: 12px; top: 34px; color: var(--accent); font-size: 12px; }
+.refbtn b, .refopt b { font-size: 14px; }
+.rdesc { color: var(--text); } .rgit { color: var(--dim); font-size: 11px; }
+.reflist { position: absolute; z-index: 5; left: 0; right: 0; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px; max-height: 70vh; overflow: auto; box-shadow: 0 6px 24px rgba(0,0,0,.35); }
+.rgroup { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; margin: 8px 4px 2px; }
+.refopt.on { border-color: var(--accent); }
 details summary { cursor: pointer; color: var(--dim); margin-top: 8px; }
 .refused .ref { display: grid; gap: 2px; padding: 6px 12px; margin-top: 6px; border: 1px dashed var(--line); border-radius: 4px; color: var(--dim); }
 </style>
@@ -45,7 +53,7 @@ details summary { cursor: pointer; color: var(--dim); margin-top: 8px; }
   <p>Plug an Rx into this PC, then press "Connect an Rx" and choose it. After each restart or replug of the board, press "Connect an Rx" and choose it again (the Rx has no USB serial number, so the browser forgets it).</p>
   <p id="release" class="note"></p>
   <button id="connectBtn">Connect an Rx</button>
-  <label id="refBox" hidden style="margin-left: 12px">Firmware from <select id="refMenu" style="font: inherit; max-width: 100%"></select></label>
+  <div id="refBox" class="refbox" hidden><span class="note">Firmware to offer</span><button id="refBtn" class="refbtn"></button><div id="refList" class="reflist" hidden></div></div>
   <div id="steps" class="card steps" hidden></div>
   <div id="job" class="card" hidden></div>
   <div id="boards"></div>

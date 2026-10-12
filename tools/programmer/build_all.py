@@ -28,6 +28,7 @@ KEEP = 10
 OPT_IN = "programmer.json"
 HERE = Path(__file__).resolve().parent
 LABEL = re.compile(r"^[A-Za-z0-9 .,:()+/_-]{1,60}$")        # a plain label: shown on the page as text
+DESC = re.compile(r"^[A-Za-z0-9 .,:;()+/'_-]{1,160}$")      # a plain description of the branch or tag
 ENV = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 PATH = re.compile(r"^(?!/)(?!.*\.\.)[A-Za-z0-9._/-]{1,200}$")
 
@@ -46,11 +47,15 @@ def default_env(ini):
 
 
 def read_opt_in(text):
-    """programmer.json, checked: {"esp32": {"env", "label"}, "stm32": [{"header", "image", "label"}]};
-    both parts optional, every label plain text. Raises ValueError on anything else."""
+    """programmer.json, checked: {"title", "description", "esp32": {"env", "label"}, "stm32": [{"header", "image",
+    "label"}]}; every part optional, all text plain. Raises ValueError on anything else."""
     cfg = json.loads(text)
-    if not isinstance(cfg, dict) or set(cfg) - {"esp32", "stm32"}:
-        raise ValueError("keys: esp32, stm32")
+    if not isinstance(cfg, dict) or set(cfg) - {"title", "description", "esp32", "stm32"}:
+        raise ValueError("keys: title, description, esp32, stm32")
+    if "title" in cfg and not LABEL.match(str(cfg["title"])):
+        raise ValueError("title: plain text, 60 characters at most")
+    if "description" in cfg and not DESC.match(str(cfg["description"])):
+        raise ValueError("description: plain text, 160 characters at most")
     e = cfg.get("esp32")
     if e is not None and not (isinstance(e, dict) and ENV.match(str(e.get("env", ""))) and LABEL.match(str(e.get("label", ""))) and set(e) <= {"env", "label"}):
         raise ValueError("esp32: {env, label}")
@@ -189,6 +194,10 @@ def main():
                 print(f"   failed: {ex}", flush=True)
         reach = {repo: set(git("-C", str(d), "rev-list", "--all").stdout.split()) for repo, d in cl.items()}
         prune(out, {(r, ref) for r, ref, *_ in tg}, reach)
+    # refs.json: the offered branches and tags with their menu title and description (programmer.json).
+    refs = [{"repo": repo, "ref": ref, "tag": tag, **{k: cfg[k] for k in ("title", "description") if cfg and k in cfg}}
+            for repo, ref, sha, cfg, tag in tg]
+    (out / "refs.json").write_text(json.dumps({"refs": refs}, indent=2) + "\n")
     # releases.json: the tagged commits; the page marks those builds as releases.
     rel = {sha: ref for repo, ref, sha, cfg, tag in tg if tag}
     (out / "releases.json").write_text(json.dumps({"commits": rel}, indent=2) + "\n")
