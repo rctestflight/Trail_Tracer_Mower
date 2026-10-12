@@ -377,6 +377,24 @@ const srcLine = (m, rel) => rel && rel === m.source.branch
   + (rel ? `, release ${rel}` : rel === false ? ', development branch' : '');
 let refSel = (() => { try { return JSON.parse(localStorage.getItem('tt.ref') || 'null'); } catch { return null; } })();
 let refInfo = {};
+let allBuilds = [];
+function refFromUrl() {
+  const q = new URLSearchParams(location.search), fw = q.get('fw');
+  if (!fw || !fw.includes('/')) return null;
+  const i = fw.indexOf('/'), short = fw.slice(0, i), ref = fw.slice(i + 1), commit = (q.get('commit') || '').toLowerCase();
+  const b = allBuilds.find(x => x.m.source.repo.split('/').pop() === short && x.m.source.branch === ref);
+  return b ? { repo: b.m.source.repo, ref, ...(/^[0-9a-f]{7,40}$/.test(commit) ? { commit } : {}) } : null;
+}
+function urlFor(sel, pin) {
+  const u = new URL(location.href), enc = s => s.split('/').map(encodeURIComponent).join('/');
+  u.search = `?fw=${enc(sel.repo.split('/').pop() + '/' + sel.ref)}` + (pin ? `&commit=${encodeURIComponent(pin)}` : '');
+  return u.toString();
+}
+function offerBuilds(sel) {
+  if (sel === '*' || !sel.commit) return builds;
+  const pinned = allBuilds.filter(x => x.m.source.repo === sel.repo && x.m.source.branch === sel.ref && x.m.source.commit.startsWith(sel.commit));
+  return pinned.length ? [...pinned, ...builds.filter(x => !(x.m.source.repo === sel.repo && x.m.source.branch === sel.ref))] : builds;
+}
 const stmOnly = repo => builds.filter(x => x.m.source.repo === repo).every(x => x.m.chip === 'stm32g070');
 const repoName = repo => ({ Trail_Tracer_Mower: 'Trail Tracer Mower', 'Trail-Tracer': 'Trail Tracer V1.0' })[repo.split('/').pop()]
   || repo.split('/').pop().replace(/[_-]+/g, ' ');
@@ -408,7 +426,8 @@ function refsOf() {
 }
 function currentRef() {
   if (refSel === '*') return '*';
-  const refs = refsOf();
+  const refs = refsOf(), fromUrl = refFromUrl();
+  if (fromUrl) return fromUrl;
   if (refSel && refs.some(r => r.repo === refSel.repo && r.ref === refSel.ref)) return refSel;
   const newest = list => [...list].sort((a, b) => b.t.localeCompare(a.t));
   const rel = newest(refs.filter(r => r.kind === 'release')), mains = newest(refs.filter(r => r.ref === 'main'));
@@ -420,8 +439,19 @@ const refHtml = r => `<b>${esc(r.title)}</b><span class="rdesc">${esc(r.descript
 function drawRefMenu() {
   const refs = refsOf(), sel = currentRef(), list = $('refList');
   $('refBox').hidden = !refs.length || sel === '*';
-  const cur = sel !== '*' && refs.find(r => r.repo === sel.repo && r.ref === sel.ref);
+  let cur = sel !== '*' && refs.find(r => r.repo === sel.repo && r.ref === sel.ref);
+  if (cur && sel.commit) {
+    const pb = offerBuilds(sel).find(x => x.m.source.repo === sel.repo && x.m.source.branch === sel.ref);
+    if (pb) cur = { ...cur, git: `${sel.ref}, ${pb.m.source.commit.slice(0, 7)} (this exact version)` };
+  }
   if (cur) { const h = refHtml(cur); if ($('refBtn').dataset.h !== h) { $('refBtn').dataset.h = h; $('refBtn').innerHTML = h; } }
+  if (cur) {
+    const newest = builds.find(x => x.m.source.repo === cur.repo && x.m.source.branch === cur.ref);
+    const pinC = sel.commit ? (offerBuilds(sel).find(x => x.m.source.repo === cur.repo && x.m.source.branch === cur.ref) || newest) : newest;
+    const link = urlFor(cur, pinC && pinC.m.source.commit.slice(0, 12));
+    if ($('refLink').href !== link) $('refLink').href = link;
+    if (!window.PROGRAM_TEST) { const want = urlFor(cur, sel.commit); if (location.href !== want) history.replaceState(null, '', want); }
+  }
   const key = refs.map(r => [r.repo, r.ref, r.commit, r.title, r.description].join(' ')).join('|') + (cur ? cur.repo + cur.ref : '');
   if (list.dataset.key === key) return;
   list.dataset.key = key;
@@ -431,6 +461,7 @@ function drawRefMenu() {
 }
 function chooseRef(v) {
   refSel = JSON.parse(v); $('refList').hidden = true;
+  if (!window.PROGRAM_TEST) history.replaceState(null, '', urlFor(refSel));
   try { localStorage.setItem('tt.ref', v); } catch { /* no storage */ }
   render();
 }
@@ -440,7 +471,7 @@ function offersFor(b) {
   const stmVer = (b.stm || '').match(/^app (\d+\.\d+\.\d+)/), stmV2 = stmVer && +stmVer[1].split('.')[0] >= 2;
   const rev = b.board || 'RX_REVA', full = 'You unplug and plug in the board once at the end.';
   const sel = currentRef();
-  for (const build of builds) {
+  for (const build of offerBuilds(sel)) {
     const m = build.m, l2 = srcLine(m, build.release), name = m.chip === 'stm32g070' ? `${m.label || 'STM32 app'} ${m.version}` : m.esp32.usb_update ? `${m.label || 'ESP32 rover firmware'} ${m.version}` : `${m.label || m.source.repo.split('/').pop() + ' firmware'}, ${m.version}`;
     if (!inSel(build, sel)) continue;
     const refuse = reason => no.push({ l1: name, l2, reason });
@@ -487,6 +518,7 @@ async function start() {
       }
     }
     builds.sort((a, b) => b.m.source.built_utc.localeCompare(a.m.source.built_utc));
+    allBuilds = [...builds];
     const seen = new Set();
     builds = builds.filter(x => { const k = [x.m.source.repo, x.m.source.branch, x.m.chip].join(' '); return !seen.has(k) && seen.add(k); });
   } catch (ex) { console.error(ex); }

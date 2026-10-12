@@ -5,7 +5,9 @@ This repo publishes it on its GitHub Pages: https://rctestflight.github.io/Trail
 
 The workflow `.github/workflows/programmer-pages.yml` builds the firmware the page offers and publishes the
 page. It runs on each push to `main`, on each tag, every 30 minutes (for opt-in branches) and by hand.
-Which branches appear: `docs/programmer-json.md`. Files: `tools/programmer/` (page, build, check).
+Which branches appear: `docs/programmer-json.md`.
+
+Links: `?fw=<repo>/<branch or tag>` opens the page with that firmware chosen (it follows the branch or tag); `&commit=<sha>` pins one exact build. The page shows the link for the current choice under the menu. Files: `tools/programmer/` (page, build, check).
 
 ## One-time setup (repo owner)
 
