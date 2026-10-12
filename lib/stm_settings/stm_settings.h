@@ -49,7 +49,7 @@ const uint8_t MAX_TRIES = 3;             // sends of one command, the first incl
 const uint32_t CHECK_PERIOD_MS = 2000;   // one read-back each 2 s: the five settings in 10 s
 const uint32_t CHECK_PERIOD_MAX_MS = 60000;  // a read-back with no answer doubles the period, to this
 const uint32_t GAP_MS = 500;             // no valid packet this long, then packets again: send all five
-const int QUEUE_LEN = 50;                // as the old command FIFO; layout 2 adds 11 at start
+const int QUEUE_LEN = 96;                // at start: calibration reads (32), v1 settings, layout 2 reads, DSP settings (16)
 const int EVENT_LEN = 8;
 
 // Event kinds (vehicle log event 18, field a)

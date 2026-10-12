@@ -362,7 +362,8 @@ class LineOut : public Print {
 LineOut ota_out;
 
 void restart_with_detach() {
-  delay(150);  // the last answer ("OTA done") reaches the host before the detach
+  msc_fat_eject();  // the PC stops its drive reads first (a PC that read the drive at the detach lost USB ports)
+  delay(500);  // also: the last answer ("OTA done") reaches the host before the detach
   usb_guard::restart();
 }
 

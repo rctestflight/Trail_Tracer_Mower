@@ -95,7 +95,24 @@ struct DeviceConfig {
                                      // Sent in clear: it guards against mistakes and other monitors, not attacks.
     bool    imu_required;            // true (default, as the main-branch baseline): a failed MPU6050 stops the drive at start-up.
                                      // false: a board with no IMU (bench) runs without one.
+    // DSP of the STM32 v2 app. The ESP32 holds these and writes them at each STM32 start and after a change
+    // (the STM32 keeps none of them over a restart). A v1 STM32 app ignores them.
+    int     dsp_frame_period_us;     // CID 18: frame period request, us (2000..655350); the STM32 answers the period in effect
+    int     dsp_sensors;             // CID 38: 1 or 2 sensors
+    double  dsp_bin_hz[8];           // CID 20: bin frequency, Hz; 0 = bin off
+    int     dsp_xy_mask;             // CID 25: bit n = bin n in xy mode
+    int     dsp_slow_adc;            // CID 39: 1 on, 0 off (off: no charging, no MEAS page)
+    int     dsp_pga;                 // CID 29: -1 auto, 0..2 a fixed step for both sensors
+    int     dsp_lanes;               // CID 13: lane map 0..3 (with dsp_sensors 1, bit 0 selects the sensor)
+    bool    usb_drive;               // true (default): config.json as a USB drive; false: no drive, settings by command only
+                                     // (from the next start). A PC that read the drive when the board left USB lost ports.
 };
+
+// DSP values in effect, from the STM32 answers (NaN = no answer yet). "list" and "get" show them as the
+// read-only keys <key>_eff; config.json does not hold them.
+enum { DSP_EFF_PERIOD, DSP_EFF_SENSORS, DSP_EFF_BIN0, DSP_EFF_XY = DSP_EFF_BIN0 + 8, DSP_EFF_SLOW, DSP_EFF_PGA,
+       DSP_EFF_LANES, DSP_EFF_N };
+extern double g_dsp_eff[DSP_EFF_N];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public API
@@ -143,13 +160,18 @@ void msc_fat_save_nvs(const DeviceConfig* cfg);
  * NVS save is always attempted first.
  */
 void msc_fat_media_service();  // the medium back after msc_fat_save_all (also in the monitor role)
+// Before a planned USB detach (restart, ROM download mode, update, the power-off after "stm iaphold"):
+// the drive reports "no medium" and stays so, and the PC stops its reads. A PC that still read the
+// drive when the board left the bus lost USB ports until its own restart (Windows, 2026-10-12).
+// Wait about 500 ms after it before the detach.
+void msc_fat_eject();
 bool msc_fat_save_all(const DeviceConfig* cfg);
 
 /**
  * Single config keys by their config.json name, for config commands over ESP-NOW.
  * get: the value as a JSON literal; false for an unknown key.
  * set: 0 ok (validated and clamped as for a config.json edit), 1 unknown key,
- *      2 bad value (not a JSON literal, or the wrong type for the key).
+ *      2 bad value (not a JSON literal, or the wrong type for the key), 4 read-only (a _eff key).
  *      The caller applies the result with applyDeviceConfig().
  * key_at: "key=value" for the index-th key; false past the last key.
  */

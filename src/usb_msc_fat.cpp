@@ -78,6 +78,7 @@ static BYTE  s_pdrv = FF_DRV_NOT_USED;
 // USB MSC
 static USBMSC s_msc;
 static uint32_t s_media_back_ms = 0;  // msc_fat_save_all: the drive shows "no medium" until this time
+static bool     s_ejected = false;    // msc_fat_eject: "no medium" until the restart
 static volatile uint32_t s_last_write_ms  = 0;
 static volatile bool     s_ever_written   = false; // at least one write since boot
 
@@ -264,6 +265,16 @@ static void populate_defaults(DeviceConfig& c,
     c.espnow_tx_power_dbm      = 19.5;
     c.cmd_key                  = 0;
     c.imu_required             = true;
+    // DSP: the STM32 v2 app defaults (bins 0-4 = Tx CH 1-5, then 62.5 kHz, 46.875 kHz, off)
+    static const double BIN_HZ[8] = {53333.3, 55315.5, 51323.2, 57347.7, 49344.6, 62500.0, 46875.0, 0.0};
+    c.dsp_frame_period_us      = 10000;
+    c.dsp_sensors              = 2;
+    for (int b = 0; b < 8; b++) c.dsp_bin_hz[b] = BIN_HZ[b];
+    c.dsp_xy_mask              = 0;
+    c.dsp_slow_adc             = 1;
+    c.dsp_pga                  = -1;
+    c.dsp_lanes                = 2;
+    c.usb_drive                = true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -348,6 +359,17 @@ static void validate_config(DeviceConfig& c)
     if (c.rover_lost_timeout_s < 0) c.rover_lost_timeout_s = 0;
     c.rover_speed_limit_mps   = constrain(c.rover_speed_limit_mps, 0.0, 5.0);
     c.espnow_tx_power_dbm     = round(constrain(c.espnow_tx_power_dbm, 2.0, 19.5) * 4.0) / 4.0;
+
+    // DSP: the widest ranges of the STM32 v2 apps; the STM32 clamps to its own and answers the value in effect
+    c.dsp_frame_period_us = constrain(c.dsp_frame_period_us, 2000, 655350);
+    c.dsp_sensors         = constrain(c.dsp_sensors, 1, 2);
+    for (int b = 0; b < 8; b++)
+        if (!isfinite(c.dsp_bin_hz[b]) || c.dsp_bin_hz[b] < 0.0) c.dsp_bin_hz[b] = 0.0;
+        else if (c.dsp_bin_hz[b] != 0.0) c.dsp_bin_hz[b] = constrain(c.dsp_bin_hz[b], 42500.0, 120000.0);
+    c.dsp_xy_mask         = constrain(c.dsp_xy_mask, 0, 255);
+    c.dsp_slow_adc        = constrain(c.dsp_slow_adc, 0, 1);
+    c.dsp_pga             = constrain(c.dsp_pga, -1, 2);
+    c.dsp_lanes           = constrain(c.dsp_lanes, 0, 3);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -412,6 +434,14 @@ static void prefs_save(const DeviceConfig& c)
     p.putDouble("txDbm",   c.espnow_tx_power_dbm);
     p.putLong("cmdKey",    c.cmd_key);
     p.putBool("imuReq",    c.imu_required);
+    p.putInt("dspPer",     c.dsp_frame_period_us);
+    p.putInt("dspSens",    c.dsp_sensors);
+    for (int b = 0; b < 8; b++) { char k[8]; snprintf(k, sizeof(k), "dspBin%d", b); p.putDouble(k, c.dsp_bin_hz[b]); }
+    p.putInt("dspXy",      c.dsp_xy_mask);
+    p.putInt("dspSlow",    c.dsp_slow_adc);
+    p.putInt("dspPga",     c.dsp_pga);
+    p.putInt("dspLanes",   c.dsp_lanes);
+    p.putBool("usbDrive",  c.usb_drive);
     p.end();
 }
 
@@ -476,6 +506,14 @@ static bool prefs_load(DeviceConfig& c)
     c.espnow_tx_power_dbm      = p.getDouble("txDbm",   c.espnow_tx_power_dbm);
     c.cmd_key                  = p.getLong("cmdKey",    c.cmd_key);
     c.imu_required             = p.getBool("imuReq",    c.imu_required);
+    c.dsp_frame_period_us      = p.getInt("dspPer",     c.dsp_frame_period_us);
+    c.dsp_sensors              = p.getInt("dspSens",    c.dsp_sensors);
+    for (int b = 0; b < 8; b++) { char k[8]; snprintf(k, sizeof(k), "dspBin%d", b); c.dsp_bin_hz[b] = p.getDouble(k, c.dsp_bin_hz[b]); }
+    c.dsp_xy_mask              = p.getInt("dspXy",      c.dsp_xy_mask);
+    c.dsp_slow_adc             = p.getInt("dspSlow",    c.dsp_slow_adc);
+    c.dsp_pga                  = p.getInt("dspPga",     c.dsp_pga);
+    c.dsp_lanes                = p.getInt("dspLanes",   c.dsp_lanes);
+    c.usb_drive                = p.getBool("usbDrive",  c.usb_drive);
     p.end();
     return true;
 }
@@ -684,8 +722,18 @@ static void fatfs_unmount()
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Build a pretty-printed JSON document from cfg and write it to s_config_path.
+double g_dsp_eff[DSP_EFF_N] = {NAN, NAN, NAN, NAN, NAN, NAN, NAN, NAN, NAN, NAN, NAN, NAN, NAN, NAN};
+
+static const char* dsp_bin_key(int b)
+{
+    static const char* const K[8] = {"dsp_bin_hz_0", "dsp_bin_hz_1", "dsp_bin_hz_2", "dsp_bin_hz_3",
+                                     "dsp_bin_hz_4", "dsp_bin_hz_5", "dsp_bin_hz_6", "dsp_bin_hz_7"};
+    return K[b];
+}
+
 // Every config.json key with its value, as one JSON object (the file, and CMD get/list over ESP-NOW).
-static void config_to_doc(const DeviceConfig& c, JsonDocument& doc)
+// with_eff: also the read-only DSP values in effect (<key>_eff; null = no STM32 answer yet), for get and list.
+static void config_to_doc(const DeviceConfig& c, JsonDocument& doc, bool with_eff = false)
 {
     doc["vehicleID"]             = c.vehicleID;
     doc["rx_channel"]            = c.rx_channel;
@@ -742,6 +790,27 @@ static void config_to_doc(const DeviceConfig& c, JsonDocument& doc)
     doc["espnow_tx_power_dbm"]      = c.espnow_tx_power_dbm;
     doc["cmd_key"]                  = c.cmd_key;
     doc["imu_required"]             = c.imu_required;
+    doc["dsp_frame_period_us"]      = c.dsp_frame_period_us;
+    doc["dsp_sensors"]              = c.dsp_sensors;
+    for (int b = 0; b < 8; b++) doc[dsp_bin_key(b)] = c.dsp_bin_hz[b];
+    doc["dsp_xy_mask"]              = c.dsp_xy_mask;
+    doc["dsp_slow_adc"]             = c.dsp_slow_adc;
+    doc["dsp_pga"]                  = c.dsp_pga;
+    doc["dsp_lanes"]                = c.dsp_lanes;
+    doc["usb_drive"]                = c.usb_drive;
+    if (!with_eff) return;
+    auto eff = [&](const String& key, int i, bool is_int) {
+        if (isnan(g_dsp_eff[i])) doc[key] = nullptr;
+        else if (is_int) doc[key] = (long)g_dsp_eff[i];
+        else doc[key] = g_dsp_eff[i];
+    };
+    eff("dsp_frame_period_us_eff", DSP_EFF_PERIOD, true);
+    eff("dsp_sensors_eff", DSP_EFF_SENSORS, true);
+    for (int b = 0; b < 8; b++) eff(String(dsp_bin_key(b)) + "_eff", DSP_EFF_BIN0 + b, false);
+    eff("dsp_xy_mask_eff", DSP_EFF_XY, true);
+    eff("dsp_slow_adc_eff", DSP_EFF_SLOW, true);
+    eff("dsp_pga_eff", DSP_EFF_PGA, true);
+    eff("dsp_lanes_eff", DSP_EFF_LANES, true);
 }
 
 static bool config_write_json(const DeviceConfig& c)
@@ -966,6 +1035,14 @@ static bool config_from_json_text(DeviceConfig& c, const String& json_no_comment
     JSON_GET_DBL("espnow_tx_power_dbm",      espnow_tx_power_dbm);
     if (doc["cmd_key"].is<long>()) c.cmd_key = doc["cmd_key"].as<long>();
     JSON_GET_BOOL("imu_required",           imu_required);
+    JSON_GET_INT("dsp_frame_period_us",     dsp_frame_period_us);
+    JSON_GET_INT("dsp_sensors",             dsp_sensors);
+    for (int b = 0; b < 8; b++) JSON_GET_DBL(dsp_bin_key(b), dsp_bin_hz[b]);
+    JSON_GET_INT("dsp_xy_mask",             dsp_xy_mask);
+    JSON_GET_INT("dsp_slow_adc",            dsp_slow_adc);
+    JSON_GET_INT("dsp_pga",                 dsp_pga);
+    JSON_GET_INT("dsp_lanes",               dsp_lanes);
+    JSON_GET_BOOL("usb_drive",              usb_drive);
 
 #undef JSON_GET_INT
 #undef JSON_GET_UINT8
@@ -1130,7 +1207,8 @@ void msc_fat_init(DeviceConfig* cfg)
         ESP_LOGE(TAG, "FAT mount/format failed");
     }
 
-    // 6. Configure and start USB MSC.
+    // 6. Configure and start USB MSC (setting usb_drive; false: no drive on USB).
+    if (!cfg->usb_drive) { ESP_LOGI(TAG, "usb_drive false: no USB drive"); return; }
     s_msc.vendorID("WFRX");
     s_msc.productID("CONFIG_DRIVE");
     s_msc.productRevision("1.0");
@@ -1146,6 +1224,13 @@ void msc_fat_init(DeviceConfig* cfg)
 // ─────────────────────────────────────────────────────────────────────────────
 // msc_fat_loop
 // ─────────────────────────────────────────────────────────────────────────────
+void msc_fat_eject()
+{
+    s_ejected = true;
+    s_media_back_ms = 0;
+    s_msc.mediaPresent(false);
+}
+
 void msc_fat_media_service()
 {
     if (s_media_back_ms && (int32_t)((uint32_t)millis() - s_media_back_ms) >= 0) {
@@ -1230,8 +1315,9 @@ bool msc_fat_save_all(const DeviceConfig* cfg)
 
     // A PC that has the drive mounted keeps its own copy of the FAT. The drive shows "no medium"
     // during the write and for 2 s after it, so the PC drops that copy and reads the drive again.
+    // After msc_fat_eject the medium stays away.
     s_msc.mediaPresent(false);
-    s_media_back_ms = (uint32_t)millis() + 2000;
+    s_media_back_ms = s_ejected ? 0 : (uint32_t)millis() + 2000;
     if (!fatfs_mount()) {
         ESP_LOGE(TAG, "FAT mount failed while saving config.json");
         return false;
@@ -1253,9 +1339,12 @@ bool msc_fat_save_all(const DeviceConfig* cfg)
 bool msc_fat_get_key(const DeviceConfig* cfg, const char* key, String* value_json)
 {
     JsonDocument doc;
-    config_to_doc(*cfg, doc);
+    config_to_doc(*cfg, doc, true);
+    JsonObject o = doc.as<JsonObject>();
+    bool known = false;  // a _eff key with no STM32 answer yet holds null: it exists all the same
+    for (JsonPair kv : o) if (!strcmp(kv.key().c_str(), key)) { known = true; break; }
+    if (!known) return false;
     JsonVariant v = doc[key];
-    if (v.isNull()) return false;
     value_json->clear();
     serializeJson(v, *value_json);
     return true;
@@ -1263,6 +1352,8 @@ bool msc_fat_get_key(const DeviceConfig* cfg, const char* key, String* value_jso
 
 int msc_fat_set_key(DeviceConfig* cfg, const char* key, const char* value_json)
 {
+    const size_t n = strlen(key);
+    if (n > 4 && !strcmp(key + n - 4, "_eff")) return 4;  // read-only: the value in effect, from the STM32
     JsonDocument cur;
     config_to_doc(*cfg, cur);
     JsonVariant old = cur[key];
@@ -1291,7 +1382,7 @@ int msc_fat_set_key(DeviceConfig* cfg, const char* key, const char* value_json)
 bool msc_fat_key_at(const DeviceConfig* cfg, int index, String* line)
 {
     JsonDocument doc;
-    config_to_doc(*cfg, doc);
+    config_to_doc(*cfg, doc, true);
     int i = 0;
     for (JsonPair kv : doc.as<JsonObject>()) {
         if (i++ != index) continue;

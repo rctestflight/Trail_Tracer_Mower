@@ -153,9 +153,9 @@ UsbOut usbOut;
 
 static const char* TAG = "wfrx";
 #ifdef BENCH_FAKE_IMU
-#define ROVER_FW_VERSION "0.5.55+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.5.56+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #else
-#define ROVER_FW_VERSION "0.5.55"  // board= in the BOOT lines; table= and table_crc= in "ota status"
+#define ROVER_FW_VERSION "0.5.56"  // DSP settings dsp_* in config.json, applied to the STM32; read-only dsp_*_eff
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
 
@@ -470,6 +470,8 @@ static uint16_t crc16_ibm(const uint8_t *data, size_t len);  // CRC-16/IBM: poly
 int stmFrameLen();     // bytes of one STM32 frame for the link version (unknown: the v2 length, the shorter)
 bool stmReadFrame();   // one STM32 frame (v1 or v2) into stmPacket; false: bad CRC or version (counted)
 void stmV2Config();    // v2: lane inputs and detail formats to the link
+void dspApply();       // v2: the DSP settings (config.json dsp_*) to the STM32, then run
+void dspOnAnswer(const stmv2::Answer& a);  // v2: a DSP write answer -> g_dsp_eff
 void stmCaptureService();  // bench: paced print of captured v2 frames
 void stm32_boot_handshake();  // IAP hello/boot handshake — call once after Serial1.begin()
 int stm32_iap_boot(int hello_tries, char* hello_text, size_t text_len, uint8_t* hello_len);  // HELLO, BOOT, first nDATA_READY
@@ -750,7 +752,7 @@ volatile uint32_t sim_dropped_tx = 0, sim_dropped_rx = 0;
 #define ESPNOW_TYPE_CMD     0x10
 #define ESPNOW_TYPE_ACK     0x11
 #define ESPNOW_TYPE_STOP    0x12  // u8 type, u16 seq, u32 fleet key: stop at once (docs/espnow_protocol.md)
-#define SETTINGS_DEF_VERSION 5  // docs/settings_def.json version (5: the 5 yaw-rate settings of main f10cd31)
+#define SETTINGS_DEF_VERSION 6  // docs/settings_def.json version (6: DSP settings dsp_*, groups for users)
 #define ESPNOW_TYPE_RESTART 0x7F
 #define ESPNOW_TYPE_MON     0x44  // monitor broadcast, once a second: u8 type, u8 version, u32 monitor ms, u64 PC unix ms (0 = unknown), u8 n
 // The last MON frame (set in the Wi-Fi task, read in loop()).
@@ -1009,7 +1011,9 @@ uint8_t configCommandRun(const char* t, bool over_espnow, String& reply);
 // restart, so the board looks silent. Detach first, and give the PC time to see it.
 // Not yet verified on a board.
 void usbDetachForRestart(){
+  msc_fat_eject();  // the PC stops its drive reads first (a PC that read the drive at the detach lost USB ports)
   usbOut.drain(200);
+  delay(500);
   tud_disconnect();  // D+ pull-up off: the PC sees a removal
   delay(300);
 }
@@ -1135,6 +1139,7 @@ static const char* const STATIONARY_KEYS[] = {
   "rover_entry_btx", "rover_exit_btx", "imu_required",
 };
 bool stationaryKey(const char* key){
+  if (!strncmp(key, "dsp_", 4)) return true;  // a DSP change stops the STM32 run for a moment
   for (const char* k : STATIONARY_KEYS) if (!strcmp(k, key)) return true;
   return false;
 }
@@ -1315,6 +1320,7 @@ bool stmIapHoldTake(){  // read and clear the one-shot flag
   return hold;
 }
 void stmIapHoldSet(){
+  msc_fat_eject();  // a power-off follows: the PC stops its drive reads now
   Preferences p;
   const bool ok = p.begin("wfrx_bench", false) && p.putBool("iaphold", true);
   p.end();
@@ -1779,7 +1785,10 @@ void benchSerial(){
     } else if (!strcmp(line, "list")) {
       String kv;
       int n_keys = 0;
-      for (; msc_fat_key_at(&g_deviceConfig, n_keys, &kv); n_keys++) usbOut.printf("CFG 0 %s\n", kv.c_str());
+      for (; msc_fat_key_at(&g_deviceConfig, n_keys, &kv); n_keys++) {
+        if (usbOut.room() < 200) usbOut.drain(100);  // 84 lines overrun the USB text queue: let it empty
+        usbOut.printf("CFG 0 %s\n", kv.c_str());
+      }
       usbOut.printf("CFG 0 end %d def %d\n", n_keys, SETTINGS_DEF_VERSION);  // key count; settings_def.json version
     } else if (!strncmp(line, "get ", 4) || !strncmp(line, "set ", 4) || !strcmp(line, "save")
                || !strcmp(line, "run start") || !strcmp(line, "run stop")) {
@@ -3403,6 +3412,7 @@ void espPacketFifo_sendCmd(){
       stm_rtt_wait = false;
     }
     stmCalOnAnswer(stmAns);
+    dspOnAnswer(stmAns);
     if (stmAns.present && (stmAns.cid & 0x7F) == 20 && stmAns.index < WFRX_BINS && (stmAns.status == RSP_OK || stmAns.status == RSP_OK_CLAMPED))
       memcpy(&stm_bin_hz[stmAns.index], &stmAns.value, 4);  // the bin frequency in effect, for STMCOIL8
     stmLink.onAnswerV2(now, stmDec.status_bits, stmAns.present, stmAns.seq, stmAns.cid, stmAns.index, stmAns.status, stmAns.value);
@@ -3411,10 +3421,7 @@ void espPacketFifo_sendCmd(){
     // set it (bench test 2026-10-11), and each run command restarts the STM32 tracking state and PGA steps.
     static bool reset_prev = false;
     const bool reset_now = (stmDec.status_bits & WFRX_STATUS_STM_RESET) != 0;
-    if (reset_now && !reset_prev && stm_v2_autorun && now - stm_v2_run_ms >= 1000) {
-      stmLink.pushInt(STM_RUN_CMD | 0x80000000, 1);
-      stm_v2_run_ms = now;
-    }
+    if (reset_now && !reset_prev && stm_v2_autorun && now - stm_v2_run_ms >= 1000) dspApply();  // DSP settings, then run
     reset_prev = reset_now;
     stmCalService(now);
   } else {
@@ -3497,12 +3504,46 @@ void stmCaptureService(){
 // Set and get are for setup and checks only: here the lanes (tracked) and 4 setup reads, the radius and
 // angle calibration of each sensor (27, 28). Bin gains stay 1 (the magnitudes are PGA-calibrated). The
 // wire bin of each sensor follows rx_channel and enable_sensor_2, as v1 CID 1 and 2.
+// DSP settings (config.json dsp_*) to the STM32 v2 app, at each STM32 start and after a change. The STM32
+// takes 38 and 39 only while idle, so: run 0, sensors (38), slow ADC (39), period (18; 39 changes its step),
+// bins (20), lanes (13), PGA (29), xy mask (25), run 1 (TrailTracer-Rx-STM32 rctf_wfrx_comms_v2.h). The
+// answers fill g_dsp_eff (dspOnAnswer): the values in effect, shown as the read-only <key>_eff settings.
+void dspApply(){
+  if (stm_link_ver != 2) return;
+  const DeviceConfig& c = g_deviceConfig;
+  for (double& v : g_dsp_eff) v = NAN;
+  stmLink.pushInt(STM_RUN_CMD | 0x80000000, 0);
+  stmLink.pushInt(38 | 0x80000000, c.dsp_sensors);
+  stmLink.pushInt(39 | 0x80000000, c.dsp_slow_adc);
+  stmLink.pushInt(18 | 0x80000000, c.dsp_frame_period_us);
+  for (int b = 0; b < 8; b++) stmLink.pushFloat(20 | 0x80000000, (float)c.dsp_bin_hz[b], (uint8_t)b);
+  stm_v2_lanes = (uint8_t)c.dsp_lanes;
+  stmLink.pushInt(13 | 0x80000000, c.dsp_lanes);
+  stmLink.pushInt(29 | 0x80000000, c.dsp_pga);
+  stmLink.pushInt(25 | 0x80000000, c.dsp_xy_mask);
+  if (stm_v2_autorun) { stmLink.pushInt(STM_RUN_CMD | 0x80000000, 1); stm_v2_run_ms = millis(); }  // app 2.0.6: boots idle
+}
+
+// One v2 answer to a DSP write: the value in effect (the period in effect for 18, the bin frequency for 20).
+void dspOnAnswer(const stmv2::Answer& a){
+  if (!a.present || !(a.cid & 0x80) || (a.status != RSP_OK && a.status != RSP_OK_CLAMPED)) return;
+  const int32_t v = (int32_t)a.value;
+  switch (a.cid & 0x7F) {
+    case 18: g_dsp_eff[DSP_EFF_PERIOD] = v; break;
+    case 38: g_dsp_eff[DSP_EFF_SENSORS] = v; break;
+    case 39: g_dsp_eff[DSP_EFF_SLOW] = v; break;
+    case 13: g_dsp_eff[DSP_EFF_LANES] = v; break;
+    case 29: g_dsp_eff[DSP_EFF_PGA] = v; break;
+    case 25: g_dsp_eff[DSP_EFF_XY] = v; break;
+    case 20: if (a.index < 8) { float f; memcpy(&f, &a.value, 4); g_dsp_eff[DSP_EFF_BIN0 + a.index] = f; } break;
+  }
+}
+
 void stmV2Config(){
   stmDec.setWireBin(0, (int)rx_channel - 1);
   stmDec.setWireBin(1, enable_sensor_2 ? 0 : -1);
-  stmLink.pushInt(13 | 0x80000000, stm_v2_lanes);
   for (int sn = 0; sn < 2; sn++) { stmLink.push(27, 0, (uint8_t)sn); stmLink.push(28, 0, (uint8_t)sn); }
-  if (stm_v2_autorun) { stmLink.pushInt(STM_RUN_CMD | 0x80000000, 1); stm_v2_run_ms = millis(); }  // app 2.0.6: boots idle
+  dspApply();  // lanes, the DSP settings, then run
   if (stm_cal_valid && stm_cal_phase == CAL_IDLE && stmCalPending()) {  // an IAP update ran: the calibration copy goes back
     usbOut.println("STM cal restore: started");
     stmCalStart(CAL_WRITE);
@@ -3768,6 +3809,17 @@ int BTxFollow(int base_throttle, double &btx_throttle, bool &btx_throttle_init, 
 // -----------------------------------------------------------------------------
 void applyDeviceConfig(const DeviceConfig& cfg)
 {
+  // DSP settings: a change goes to the STM32 at once (a set, or a config.json edit on the USB drive)
+  static bool dsp_known = false;
+  static DeviceConfig dsp_last;
+  const bool dsp_changed = !dsp_known || dsp_last.dsp_frame_period_us != cfg.dsp_frame_period_us
+      || dsp_last.dsp_sensors != cfg.dsp_sensors || memcmp(dsp_last.dsp_bin_hz, cfg.dsp_bin_hz, sizeof(cfg.dsp_bin_hz))
+      || dsp_last.dsp_xy_mask != cfg.dsp_xy_mask || dsp_last.dsp_slow_adc != cfg.dsp_slow_adc
+      || dsp_last.dsp_pga != cfg.dsp_pga || dsp_last.dsp_lanes != cfg.dsp_lanes;
+  if (dsp_known && dsp_changed) dspApply();  // the first call (boot) leaves it to stmV2Config
+  dsp_last = cfg;
+  dsp_known = true;
+
   // Identification
   vehicleID           = cfg.vehicleID;
   rx_channel          = cfg.rx_channel;
