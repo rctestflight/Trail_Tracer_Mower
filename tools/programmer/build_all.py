@@ -59,12 +59,29 @@ def read_opt_in(text):
     e = cfg.get("esp32")
     if e is not None and not (isinstance(e, dict) and ENV.match(str(e.get("env", ""))) and LABEL.match(str(e.get("label", ""))) and set(e) <= {"env", "label"}):
         raise ValueError("esp32: {env, label}")
-    for s in cfg.get("stm32", []):
+    for s in [] if cfg.get("stm32") == "latest" else cfg.get("stm32", []):
         if not (isinstance(s, dict) and set(s) <= {"header", "image", "label"} and PATH.match(str(s.get("header", "")))
                 and str(s["header"]).endswith(".commit_header") and PATH.match(str(s.get("image", "")))
                 and str(s["image"]).endswith(".bin.encrypted") and LABEL.match(str(s.get("label", "")))):
             raise ValueError("stm32: [{header .commit_header, image .bin.encrypted, label}]")
     return cfg
+
+
+def newest_pair(names):
+    """(header, image, version) of the newest STM32 update pair among file paths in stm32/: a .commit_header and
+    a .bin.encrypted with the same name before the suffix, newest by the version vX.Y.Z in the name; or None."""
+    names = set(names)
+    best = None
+    for h in names:
+        if not (h.startswith("stm32/") and h.endswith(".commit_header")):
+            continue
+        img = h[:-len(".commit_header")] + ".bin.encrypted"
+        m = re.search(r"v(\d+)\.(\d+)\.(\d+)", h.rsplit("/", 1)[-1])
+        if img in names and m:
+            v = tuple(int(x) for x in m.groups())
+            if not best or v > best[2]:
+                best = (h, img, v)
+    return best
 
 
 def clones(work):
@@ -98,6 +115,13 @@ def targets(cl):
                 except ValueError as ex:
                     print(f"{repo} {ref}: {OPT_IN} not valid ({ex}): not offered", flush=True)
                     continue
+                if cfg.get("stm32") == "latest":       # the newest encrypted pair in stm32/, by the version in the name
+                    files = git("-C", str(d), "ls-tree", "-r", "--name-only", sha, "stm32/", check=False).stdout.split()
+                    pair = newest_pair(files)
+                    if not pair:
+                        print(f"{repo} {ref}: {OPT_IN} asks the latest STM32 pair, stm32/ has none: not offered", flush=True)
+                        continue
+                    cfg = {**cfg, "stm32": [{"header": pair[0], "image": pair[1], "label": "STM32 app"}]}
             out.append((repo, ref, sha, cfg, tag))
     return out
 

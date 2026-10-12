@@ -26,6 +26,7 @@ when it holds a file `programmer.json` at its root. No file: the branch is not o
 | `esp32.label` | the name on the page button (the page adds the version) |
 | `stm32[].header`, `stm32[].image` | the signed, encrypted STM32 update pair, paths from the repository root |
 | `stm32[].label` | the name on the page button (the page adds the version from the header) |
+| `"stm32": "latest"` | in place of the list: the page offers the newest encrypted pair in `stm32/` (newest by the version `vX.Y.Z` in the file name; the `.commit_header` and the `.bin.encrypted` must have the same name). An STM32 update then needs only the new files in `stm32/`, no edit of this file. No pair in `stm32/`: the branch is not offered |
 
 Every key is optional. Without a title, the menu says "Release vX.Y.Z" for a tag, "Test release vX.Y.Z" for a
 tag that ends in `-test.N`, and "Development build" for `main`. The menu lists releases first, then test
