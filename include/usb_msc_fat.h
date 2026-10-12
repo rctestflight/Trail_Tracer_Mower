@@ -71,10 +71,30 @@ struct DeviceConfig {
     double CHARGE_VBATT_STOP;    // V
     double CHARGE_MAX_CURRENT;   // A
     int    CHARGE_MAX_SECONDS;
+    uint8_t battery_cells;       // series cells (2 = 2S); the station scales its voltage graphs from it
 
     // Features
     bool   espnow_enabled;
+    bool   telemetry_enabled;  // binary telemetry log over ESP-NOW (starts ESP-NOW by itself)
+    int    telemetry_rate_hz;  // log sample rate: 100, 50, 25, 20, 10, 5, 4, 2 or 1 (anti-alias filter below 100)
 
+    // Rover autopilot (lib/rover_autopilot): replaces wire following in mode 2 when enabled
+    bool    rover_enabled;
+    bool    rover_goal_cw;           // dock direction along the wire, seen from above
+    double  rover_sensor_height_mm;  // sensor centre above the wire
+    double  rover_full_speed_mps;    // ground speed at full throttle command
+    double  rover_full_yaw_rate_dps; // pivot rate at full steering command
+    double  rover_seek_vbatt;        // V: go home below this battery voltage (0 = off)
+    int     rover_seek_after_s;      // s since the last charge before going home (0 = off)
+    uint8_t rover_entry_btx;         // BTx channel before the dock: creep (0 = none)
+    uint8_t rover_exit_btx;          // BTx channel after the dock: wrong-way guard (0 = none)
+    int     rover_lost_timeout_s;    // stop for good after this long without the wire (0 = never)
+    double  rover_speed_limit_mps;   // m/s, cap on every autopilot speed (0 = the autopilot's own speeds)
+    double  espnow_tx_power_dbm;     // radio transmit power, 2..19.5 dBm in 0.25 dB steps (19.5 = the radio's maximum)
+    long    cmd_key;                 // fleet key carried by CMD 0x10, STOP 0x12 and RESTART 0x7F; must match; 0 (default) = blank, accepts key 0.
+                                     // Sent in clear: it guards against mistakes and other monitors, not attacks.
+    bool    imu_required;            // true (default, as the main-branch baseline): a failed MPU6050 stops the drive at start-up.
+                                     // false: a board with no IMU (bench) runs without one.
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -122,4 +142,17 @@ void msc_fat_save_nvs(const DeviceConfig* cfg);
  * Returns true when both saves succeed, false if JSON save fails.
  * NVS save is always attempted first.
  */
+void msc_fat_media_service();  // the medium back after msc_fat_save_all (also in the monitor role)
 bool msc_fat_save_all(const DeviceConfig* cfg);
+
+/**
+ * Single config keys by their config.json name, for config commands over ESP-NOW.
+ * get: the value as a JSON literal; false for an unknown key.
+ * set: 0 ok (validated and clamped as for a config.json edit), 1 unknown key,
+ *      2 bad value (not a JSON literal, or the wrong type for the key).
+ *      The caller applies the result with applyDeviceConfig().
+ * key_at: "key=value" for the index-th key; false past the last key.
+ */
+bool msc_fat_get_key(const DeviceConfig* cfg, const char* key, String* value_json);
+int  msc_fat_set_key(DeviceConfig* cfg, const char* key, const char* value_json);
+bool msc_fat_key_at(const DeviceConfig* cfg, int index, String* line);

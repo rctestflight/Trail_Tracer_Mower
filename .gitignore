@@ -3,3 +3,11 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+test/sim_harness/build
+__pycache__/
+.dev/
+archive/
+release/
+test/bench/
+test/sim_harness/
+test/telemetry_host/

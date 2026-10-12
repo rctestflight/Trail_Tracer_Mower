@@ -1,0 +1,519 @@
+{
+  "version": 5,
+  "about": "Rover settings definition, owned by Trail_Tracer_Mower (docs/settings_def.json). The PC uses an unchanged copy. Words from the PC draft (Trail-Tracer-PC-Telemetry 22deeea); values checked against src/usb_msc_fat.cpp (defaults, limits) and src/main.cpp (STATIONARY_KEYS). Format: Trail-Tracer-PC-Telemetry docs/control_api.md, section 3. 'list' ends 'end <n> def 1'.",
+  "settings": {
+    "vehicleID": {
+      "type": "int",
+      "min": 0,
+      "max": 255,
+      "default": 1,
+      "live": true,
+      "group": "Rx",
+      "description": "Vehicle number on the screen"
+    },
+    "rx_channel": {
+      "type": "int",
+      "min": 1,
+      "max": 5,
+      "default": 1,
+      "live": false,
+      "group": "Rx",
+      "description": "Transmitter channel that the Rx listens to"
+    },
+    "enable_sensor_2": {
+      "type": "bool",
+      "default": false,
+      "live": false,
+      "group": "Rx",
+      "description": "Use sensor 2 (it always listens on transmitter channel 1)"
+    },
+    "pid_direction": {
+      "type": "bool",
+      "default": false,
+      "live": false,
+      "group": "steering",
+      "description": "Steering direction: true reverses it"
+    },
+    "steering_rate_kp": {
+      "type": "float",
+      "min": 0,
+      "default": 0.02,
+      "live": true,
+      "group": "steering",
+      "description": "Proportional part of the yaw-rate steering PID (gyro feedback; output -1..1)"
+    },
+    "steering_rate_ki": {
+      "type": "float",
+      "min": 0,
+      "default": 0.01,
+      "live": true,
+      "group": "steering",
+      "description": "Integral part of the yaw-rate steering PID"
+    },
+    "steering_rate_kd": {
+      "type": "float",
+      "min": 0,
+      "default": 0.0,
+      "live": true,
+      "group": "steering",
+      "description": "Derivative part of the yaw-rate steering PID"
+    },
+    "steering_rate_pid_direction": {
+      "type": "bool",
+      "default": false,
+      "live": true,
+      "group": "steering",
+      "description": "Yaw-rate PID direction: true reverses it"
+    },
+    "steering_rate_max_dps": {
+      "type": "float",
+      "min": 0.001,
+      "max": 500,
+      "default": 90.0,
+      "live": true,
+      "group": "steering",
+      "description": "Yaw rate in deg/s at full steering command"
+    },
+    "kp": {
+      "type": "float",
+      "min": 0,
+      "default": 3.0,
+      "live": true,
+      "group": "steering",
+      "description": "Proportional part of the steering PID"
+    },
+    "ki": {
+      "type": "float",
+      "min": 0,
+      "default": 0.0,
+      "live": true,
+      "group": "steering",
+      "description": "Integral part of the steering PID"
+    },
+    "kd": {
+      "type": "float",
+      "min": 0,
+      "default": 0.0,
+      "live": true,
+      "group": "steering",
+      "description": "Derivative part of the steering PID"
+    },
+    "CRUISE_THROTTLE": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 1650,
+      "live": true,
+      "group": "drive",
+      "description": "Throttle pulse when the vehicle follows the wire"
+    },
+    "CREEP_THROTTLE": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 1620,
+      "live": true,
+      "group": "drive",
+      "description": "Throttle pulse for the slow approach"
+    },
+    "PWM_OUT_1_DEFAULT": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 1500,
+      "live": false,
+      "group": "outputs",
+      "description": "Centre pulse of output 1"
+    },
+    "PWM_OUT_1_MIN": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 1000,
+      "live": false,
+      "group": "outputs",
+      "description": "Lowest pulse of output 1"
+    },
+    "PWM_OUT_1_MAX": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 2000,
+      "live": false,
+      "group": "outputs",
+      "description": "Highest pulse of output 1"
+    },
+    "PWM_OUT_2_DEFAULT": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 1500,
+      "live": false,
+      "group": "outputs",
+      "description": "Centre pulse of output 2"
+    },
+    "PWM_OUT_2_MIN": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 1000,
+      "live": false,
+      "group": "outputs",
+      "description": "Lowest pulse of output 2"
+    },
+    "PWM_OUT_2_MAX": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 2000,
+      "live": false,
+      "group": "outputs",
+      "description": "Highest pulse of output 2"
+    },
+    "PWM_OUT_3_DEFAULT": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 1500,
+      "live": false,
+      "group": "outputs",
+      "description": "Centre pulse of output 3"
+    },
+    "PWM_OUT_3_MIN": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 1000,
+      "live": false,
+      "group": "outputs",
+      "description": "Lowest pulse of output 3"
+    },
+    "PWM_OUT_3_MAX": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 2000,
+      "live": false,
+      "group": "outputs",
+      "description": "Highest pulse of output 3"
+    },
+    "PWM_OUT_4_DEFAULT": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 1500,
+      "live": false,
+      "group": "outputs",
+      "description": "Centre pulse of output 4"
+    },
+    "PWM_OUT_4_MIN": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 1000,
+      "live": false,
+      "group": "outputs",
+      "description": "Lowest pulse of output 4"
+    },
+    "PWM_OUT_4_MAX": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 2000,
+      "live": false,
+      "group": "outputs",
+      "description": "Highest pulse of output 4"
+    },
+    "stuck_threshold_mm": {
+      "type": "float",
+      "unit": "mm",
+      "min": 1.0,
+      "default": 1.0,
+      "live": true,
+      "group": "stuck detector",
+      "description": "Smallest movement that counts as not stuck"
+    },
+    "stuck_timeout_ms": {
+      "type": "float",
+      "unit": "ms",
+      "min": 1000,
+      "default": 20000,
+      "live": true,
+      "group": "stuck detector",
+      "description": "Time below that movement before the vehicle is stuck"
+    },
+    "BTxFollowChannel": {
+      "type": "int",
+      "min": 0,
+      "default": 0,
+      "live": false,
+      "group": "beacons",
+      "description": "Beacon channel to follow (0 = none)",
+      "max": 2
+    },
+    "BTxThreshold": {
+      "type": "int",
+      "default": 170,
+      "live": true,
+      "group": "beacons",
+      "description": "Beacon detection threshold",
+      "min": 11,
+      "max": 2000
+    },
+    "BTxAccelRate": {
+      "type": "float",
+      "default": 0.5,
+      "live": true,
+      "group": "beacons",
+      "description": "Acceleration after a beacon",
+      "min": 0.3
+    },
+    "BTxCreepDuration": {
+      "type": "int",
+      "unit": "s",
+      "min": 1,
+      "default": 4,
+      "live": true,
+      "group": "beacons",
+      "description": "Time of the slow approach after a beacon"
+    },
+    "SineSwerveAmplitude": {
+      "type": "int",
+      "min": 0,
+      "default": 0,
+      "live": true,
+      "group": "swerve",
+      "description": "Swerve size to each side (0 = off)",
+      "unit": "mm",
+      "max": 255
+    },
+    "SineSwerveFrequency": {
+      "type": "int",
+      "min": 1,
+      "default": 15,
+      "live": true,
+      "group": "swerve",
+      "description": "Seconds for one swerve cycle",
+      "unit": "s",
+      "max": 255
+    },
+    "CHARGE_VBATT_STOP": {
+      "type": "float",
+      "unit": "V",
+      "min": 6,
+      "default": 11.9,
+      "live": false,
+      "group": "charge",
+      "description": "End the charge at this battery voltage. STM32 limit 16.0 V",
+      "max": 16
+    },
+    "CHARGE_MAX_CURRENT": {
+      "type": "float",
+      "unit": "A",
+      "min": 0.1,
+      "default": 6.0,
+      "live": false,
+      "group": "charge",
+      "description": "Stop the charge above this current, then wait 10 s. STM32 limit 6.0 A",
+      "max": 6
+    },
+    "CHARGE_MAX_SECONDS": {
+      "type": "int",
+      "unit": "s",
+      "min": 5,
+      "default": 180,
+      "live": false,
+      "group": "charge",
+      "description": "Half the longest charge: the STM32 stops a charge after 2 x this value (at most 3600 s)",
+      "max": 1800
+    },
+    "battery_cells": {
+      "type": "int",
+      "min": 1,
+      "max": 12,
+      "default": 2,
+      "live": true,
+      "group": "Rx",
+      "description": "Battery cells in series (2 for a 2S battery); the power graph scales from it"
+    },
+    "espnow_enabled": {
+      "type": "bool",
+      "default": false,
+      "live": false,
+      "group": "radio",
+      "description": "Telemetry messages over ESP-NOW. If telemetry_enabled is also false, the vehicle takes no commands. The vehicle refuses false over ESP-NOW",
+      "refuse": [
+        false
+      ]
+    },
+    "telemetry_rate_hz": {
+      "type": "int",
+      "min": 1,
+      "max": 100,
+      "values": [
+        100,
+        50,
+        25,
+        20,
+        10,
+        5,
+        4,
+        2,
+        1
+      ],
+      "default": 20,
+      "live": true,
+      "group": "radio",
+      "description": "Vehicle log sample rate in Hz. Below 100 Hz an anti-alias filter (two moving averages) runs first. Other values go to the nearest allowed rate"
+    },
+    "espnow_tx_power_dbm": {
+      "type": "float",
+      "min": 2,
+      "max": 19.5,
+      "default": 19.5,
+      "live": true,
+      "group": "radio",
+      "description": "Radio transmit power in dBm, 0.25 dB steps. 19.5 is the radio's maximum. A low power over the radio can lose the link to this vehicle"
+    },
+    "telemetry_enabled": {
+      "type": "bool",
+      "default": true,
+      "live": false,
+      "group": "radio",
+      "description": "Vehicle log over ESP-NOW. If espnow_enabled is also false, the vehicle takes no commands. The vehicle refuses false over ESP-NOW",
+      "refuse": [
+        false
+      ]
+    },
+    "rover_enabled": {
+      "type": "bool",
+      "default": false,
+      "live": false,
+      "group": "autopilot",
+      "description": "In autonomous drive mode, the autopilot drives, not the wire follower"
+    },
+    "rover_goal_cw": {
+      "type": "bool",
+      "default": true,
+      "live": false,
+      "group": "autopilot",
+      "description": "Direction along the wire into the charger: true = clockwise seen from above"
+    },
+    "rover_sensor_height_mm": {
+      "type": "float",
+      "unit": "mm",
+      "min": 30,
+      "default": 150,
+      "live": false,
+      "group": "autopilot",
+      "description": "Distance of the sensor centre above the wire",
+      "max": 500
+    },
+    "rover_full_speed_mps": {
+      "type": "float",
+      "unit": "m/s",
+      "min": 0.1,
+      "default": 1.0,
+      "live": false,
+      "group": "autopilot",
+      "description": "Ground speed at full drive command (measure it)",
+      "max": 5
+    },
+    "rover_full_yaw_rate_dps": {
+      "type": "float",
+      "unit": "\u00b0/s",
+      "min": 10,
+      "default": 115,
+      "live": false,
+      "group": "autopilot",
+      "description": "Turn rate in place at full steer command (measure it)",
+      "max": 720
+    },
+    "rover_seek_vbatt": {
+      "type": "float",
+      "unit": "V",
+      "min": 0,
+      "default": 0,
+      "live": true,
+      "group": "autopilot",
+      "description": "Go to the charger below this battery voltage (0 = off, else 6 to 26)",
+      "max": 26
+    },
+    "rover_seek_after_s": {
+      "type": "int",
+      "unit": "s",
+      "min": 0,
+      "default": 600,
+      "live": true,
+      "group": "autopilot",
+      "description": "Go to the charger this long after the last charge (0 = off)"
+    },
+    "rover_entry_btx": {
+      "type": "int",
+      "min": 0,
+      "default": 1,
+      "live": false,
+      "group": "autopilot",
+      "description": "Beacon channel before the charger: slow approach (0 = none)",
+      "max": 2
+    },
+    "rover_exit_btx": {
+      "type": "int",
+      "min": 0,
+      "default": 2,
+      "live": false,
+      "group": "autopilot",
+      "description": "Beacon channel after the charger exit: the vehicle turns back if it meets this beacon first (0 = none)",
+      "max": 2
+    },
+    "rover_lost_timeout_s": {
+      "type": "int",
+      "unit": "s",
+      "min": 0,
+      "default": 30,
+      "live": true,
+      "group": "autopilot",
+      "description": "The autopilot halts after this long without the wire (0 = never)"
+    },
+    "rover_speed_limit_mps": {
+      "type": "float",
+      "unit": "m/s",
+      "min": 0,
+      "default": 0.5,
+      "live": true,
+      "group": "autopilot",
+      "description": "Highest autopilot speed (0 = the simulator speeds)",
+      "max": 5
+    },
+    "cmd_key": {
+      "type": "int",
+      "min": 0,
+      "default": 0,
+      "live": false,
+      "remote": false,
+      "group": "radio",
+      "description": "Fleet password; 0 = blank (accepts key 0); USB or config.json only"
+    },
+    "imu_required": {
+      "type": "bool",
+      "default": true,
+      "live": false,
+      "group": "Rx",
+      "description": "No effect since firmware 0.5.40: with no working IMU, the gyro lock keeps the motors off (the main branch f10cd31). Kept for old config files"
+    }
+  }
+}

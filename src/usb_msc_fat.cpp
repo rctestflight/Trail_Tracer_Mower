@@ -16,6 +16,7 @@
 //    stored in config.json on the FAT volume so the user can edit them.
 // ─────────────────────────────────────────────────────────────────────────────
 
+#include "decimator.h"  // rec::rateNearest
 #include "usb_msc_fat.h"
 
 #include "USB.h"
@@ -76,6 +77,7 @@ static BYTE  s_pdrv = FF_DRV_NOT_USED;
 
 // USB MSC
 static USBMSC s_msc;
+static uint32_t s_media_back_ms = 0;  // msc_fat_save_all: the drive shows "no medium" until this time
 static volatile uint32_t s_last_write_ms  = 0;
 static volatile bool     s_ever_written   = false; // at least one write since boot
 
@@ -244,7 +246,24 @@ static void populate_defaults(DeviceConfig& c,
     c.CHARGE_VBATT_STOP     = 11.9;
     c.CHARGE_MAX_CURRENT    = 6.0;
     c.CHARGE_MAX_SECONDS    = 180;
+    c.battery_cells         = 2;
     c.espnow_enabled        = false;
+    c.telemetry_enabled     = true;
+    c.telemetry_rate_hz     = 20;
+    c.rover_enabled            = false;
+    c.rover_goal_cw            = true;
+    c.rover_sensor_height_mm   = 150.0;
+    c.rover_full_speed_mps     = 1.0;
+    c.rover_full_yaw_rate_dps  = 115.0;
+    c.rover_seek_vbatt         = 0.0;
+    c.rover_seek_after_s       = 600;
+    c.rover_entry_btx          = 1;
+    c.rover_exit_btx           = 2;
+    c.rover_lost_timeout_s     = 30;
+    c.rover_speed_limit_mps    = 0.5;
+    c.espnow_tx_power_dbm      = 19.5;
+    c.cmd_key                  = 0;
+    c.imu_required             = true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -260,6 +279,8 @@ static void validate_config(DeviceConfig& c)
 {
     // Channel
     if (c.rx_channel < 1 || c.rx_channel > 5) c.rx_channel = 1;
+    c.telemetry_rate_hz = rec::rateNearest(c.telemetry_rate_hz);  // 100/N Hz only
+    if (c.battery_cells < 1 || c.battery_cells > 12) c.battery_cells = 2;
 
     // Throttle range sanity
     c.CRUISE_THROTTLE   = constrain(c.CRUISE_THROTTLE, 1000, 2000);
@@ -306,14 +327,27 @@ static void validate_config(DeviceConfig& c)
     // Sine
     if (c.SineSwerveFrequency < 1) c.SineSwerveFrequency = 1;
 
-    // Charging
+    // Charging: the STM32 application limits (TrailTracer-Rx-STM32 rctf_wfrx_dsp.h): stop voltage
+    // 16.0 V, current 6.0 A, charge time 3600 s. The ESP32 sends 2 x CHARGE_MAX_SECONDS (as shipped
+    // units do), so 1800 is the highest setting with an effect. Above a limit the STM32 used the limit.
     if (c.CHARGE_VBATT_STOP  < 6.0)  c.CHARGE_VBATT_STOP  = 6.0;
-    if (c.CHARGE_VBATT_STOP  > 26.0) c.CHARGE_VBATT_STOP  = 26.0;
+    if (c.CHARGE_VBATT_STOP  > 16.0) c.CHARGE_VBATT_STOP  = 16.0;
     if (c.CHARGE_MAX_CURRENT < 0.1)  c.CHARGE_MAX_CURRENT = 0.1;
-    if (c.CHARGE_MAX_CURRENT > 8.0) c.CHARGE_MAX_CURRENT = 8.0;
+    if (c.CHARGE_MAX_CURRENT > 6.0) c.CHARGE_MAX_CURRENT = 6.0;
     if (c.CHARGE_MAX_SECONDS < 5)   c.CHARGE_MAX_SECONDS = 5;
-    if (c.CHARGE_MAX_SECONDS > 3600) c.CHARGE_MAX_SECONDS = 3600;
+    if (c.CHARGE_MAX_SECONDS > 1800) c.CHARGE_MAX_SECONDS = 1800;
 
+    // Rover autopilot
+    c.rover_sensor_height_mm  = constrain(c.rover_sensor_height_mm, 30.0, 500.0);
+    c.rover_full_speed_mps    = constrain(c.rover_full_speed_mps, 0.1, 5.0);
+    c.rover_full_yaw_rate_dps = constrain(c.rover_full_yaw_rate_dps, 10.0, 720.0);
+    if (c.rover_seek_vbatt != 0.0) c.rover_seek_vbatt = constrain(c.rover_seek_vbatt, 6.0, 26.0);
+    if (c.rover_seek_after_s < 0)   c.rover_seek_after_s = 0;
+    if (c.rover_entry_btx > 2)      c.rover_entry_btx = 0;
+    if (c.rover_exit_btx > 2)       c.rover_exit_btx = 0;
+    if (c.rover_lost_timeout_s < 0) c.rover_lost_timeout_s = 0;
+    c.rover_speed_limit_mps   = constrain(c.rover_speed_limit_mps, 0.0, 5.0);
+    c.espnow_tx_power_dbm     = round(constrain(c.espnow_tx_power_dbm, 2.0, 19.5) * 4.0) / 4.0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -360,7 +394,24 @@ static void prefs_save(const DeviceConfig& c)
     p.putDouble("chgVStp", c.CHARGE_VBATT_STOP);
     p.putDouble("chgIMax", c.CHARGE_MAX_CURRENT);
     p.putInt("chgTSec",    c.CHARGE_MAX_SECONDS);
+    p.putUChar("batCells", c.battery_cells);
     p.putBool("espNow",    c.espnow_enabled);
+    p.putBool("telEn",     c.telemetry_enabled);
+    p.putInt("telHz",      c.telemetry_rate_hz);
+    p.putBool("rvEn",      c.rover_enabled);
+    p.putBool("rvCW",      c.rover_goal_cw);
+    p.putDouble("rvH",     c.rover_sensor_height_mm);
+    p.putDouble("rvVmax",  c.rover_full_speed_mps);
+    p.putDouble("rvWmax",  c.rover_full_yaw_rate_dps);
+    p.putDouble("rvSeekV", c.rover_seek_vbatt);
+    p.putInt("rvSeekS",    c.rover_seek_after_s);
+    p.putUChar("rvEntBtx", c.rover_entry_btx);
+    p.putUChar("rvExtBtx", c.rover_exit_btx);
+    p.putInt("rvLostS",    c.rover_lost_timeout_s);
+    p.putDouble("rvVlim",  c.rover_speed_limit_mps);
+    p.putDouble("txDbm",   c.espnow_tx_power_dbm);
+    p.putLong("cmdKey",    c.cmd_key);
+    p.putBool("imuReq",    c.imu_required);
     p.end();
 }
 
@@ -407,7 +458,24 @@ static bool prefs_load(DeviceConfig& c)
     c.CHARGE_VBATT_STOP     = p.getDouble("chgVStp", c.CHARGE_VBATT_STOP);
     c.CHARGE_MAX_CURRENT    = p.getDouble("chgIMax", c.CHARGE_MAX_CURRENT);
     c.CHARGE_MAX_SECONDS    = p.getInt("chgTSec",    c.CHARGE_MAX_SECONDS);
+    c.battery_cells         = p.getUChar("batCells", c.battery_cells);
     c.espnow_enabled        = p.getBool("espNow",    c.espnow_enabled);
+    c.telemetry_enabled     = p.getBool("telEn",     c.telemetry_enabled);
+    c.telemetry_rate_hz     = p.getInt("telHz",      c.telemetry_rate_hz);
+    c.rover_enabled            = p.getBool("rvEn",      c.rover_enabled);
+    c.rover_goal_cw            = p.getBool("rvCW",      c.rover_goal_cw);
+    c.rover_sensor_height_mm   = p.getDouble("rvH",     c.rover_sensor_height_mm);
+    c.rover_full_speed_mps     = p.getDouble("rvVmax",  c.rover_full_speed_mps);
+    c.rover_full_yaw_rate_dps  = p.getDouble("rvWmax",  c.rover_full_yaw_rate_dps);
+    c.rover_seek_vbatt         = p.getDouble("rvSeekV", c.rover_seek_vbatt);
+    c.rover_seek_after_s       = p.getInt("rvSeekS",    c.rover_seek_after_s);
+    c.rover_entry_btx          = p.getUChar("rvEntBtx", c.rover_entry_btx);
+    c.rover_exit_btx           = p.getUChar("rvExtBtx", c.rover_exit_btx);
+    c.rover_lost_timeout_s     = p.getInt("rvLostS",    c.rover_lost_timeout_s);
+    c.rover_speed_limit_mps    = p.getDouble("rvVlim",  c.rover_speed_limit_mps);
+    c.espnow_tx_power_dbm      = p.getDouble("txDbm",   c.espnow_tx_power_dbm);
+    c.cmd_key                  = p.getLong("cmdKey",    c.cmd_key);
+    c.imu_required             = p.getBool("imuReq",    c.imu_required);
     p.end();
     return true;
 }
@@ -616,12 +684,9 @@ static void fatfs_unmount()
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Build a pretty-printed JSON document from cfg and write it to s_config_path.
-static bool config_write_json(const DeviceConfig& c)
+// Every config.json key with its value, as one JSON object (the file, and CMD get/list over ESP-NOW).
+static void config_to_doc(const DeviceConfig& c, JsonDocument& doc)
 {
-    // Use a statically-sized document to avoid heap fragmentation.
-    // The document holds approximately 40 key-value pairs; 2048 bytes is ample.
-    JsonDocument doc;
-
     doc["vehicleID"]             = c.vehicleID;
     doc["rx_channel"]            = c.rx_channel;
     doc["CRUISE_THROTTLE"]       = c.CRUISE_THROTTLE;
@@ -659,7 +724,31 @@ static bool config_write_json(const DeviceConfig& c)
     doc["CHARGE_VBATT_STOP"]     = c.CHARGE_VBATT_STOP;
     doc["CHARGE_MAX_CURRENT"]    = c.CHARGE_MAX_CURRENT;
     doc["CHARGE_MAX_SECONDS"]    = c.CHARGE_MAX_SECONDS;
+    doc["battery_cells"]         = c.battery_cells;
     doc["espnow_enabled"]        = c.espnow_enabled;
+    doc["telemetry_enabled"]     = c.telemetry_enabled;
+    doc["telemetry_rate_hz"]     = c.telemetry_rate_hz;
+    doc["rover_enabled"]            = c.rover_enabled;
+    doc["rover_goal_cw"]            = c.rover_goal_cw;
+    doc["rover_sensor_height_mm"]   = c.rover_sensor_height_mm;
+    doc["rover_full_speed_mps"]     = c.rover_full_speed_mps;
+    doc["rover_full_yaw_rate_dps"]  = c.rover_full_yaw_rate_dps;
+    doc["rover_seek_vbatt"]         = c.rover_seek_vbatt;
+    doc["rover_seek_after_s"]       = c.rover_seek_after_s;
+    doc["rover_entry_btx"]          = c.rover_entry_btx;
+    doc["rover_exit_btx"]           = c.rover_exit_btx;
+    doc["rover_lost_timeout_s"]     = c.rover_lost_timeout_s;
+    doc["rover_speed_limit_mps"]    = c.rover_speed_limit_mps;
+    doc["espnow_tx_power_dbm"]      = c.espnow_tx_power_dbm;
+    doc["cmd_key"]                  = c.cmd_key;
+    doc["imu_required"]             = c.imu_required;
+}
+
+static bool config_write_json(const DeviceConfig& c)
+{
+    // The document holds approximately 50 key-value pairs.
+    JsonDocument doc;
+    config_to_doc(c, doc);
 
     // Measure serialised size first
     size_t json_len = measureJsonPretty(doc);
@@ -703,6 +792,8 @@ static bool config_write_json(const DeviceConfig& c)
     }
     return true;
 }
+
+static bool config_from_json_text(DeviceConfig& c, const String& json_no_comments);
 
 // Parse s_config_path on the mounted FAT volume into cfg.
 // Unknown / invalid fields are silently ignored; previously valid fields keep
@@ -797,6 +888,12 @@ static bool config_read_json(DeviceConfig& c)
         json_no_comments += ch;
     }
 
+    return config_from_json_text(c, json_no_comments);
+}
+
+// Apply the keys present in a JSON object to c (config.json content, or one CMD set over ESP-NOW).
+static bool config_from_json_text(DeviceConfig& c, const String& json_no_comments)
+{
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, json_no_comments);
     if (err) {
@@ -851,7 +948,24 @@ static bool config_read_json(DeviceConfig& c)
     JSON_GET_DBL("CHARGE_VBATT_STOP",       CHARGE_VBATT_STOP);
     JSON_GET_DBL("CHARGE_MAX_CURRENT",      CHARGE_MAX_CURRENT);
     JSON_GET_INT("CHARGE_MAX_SECONDS",      CHARGE_MAX_SECONDS);
+    JSON_GET_UINT8("battery_cells",         battery_cells);
     JSON_GET_BOOL("espnow_enabled",         espnow_enabled);
+    JSON_GET_BOOL("telemetry_enabled",      telemetry_enabled);
+    JSON_GET_INT("telemetry_rate_hz",       telemetry_rate_hz);
+    JSON_GET_BOOL("rover_enabled",           rover_enabled);
+    JSON_GET_BOOL("rover_goal_cw",           rover_goal_cw);
+    JSON_GET_DBL("rover_sensor_height_mm",   rover_sensor_height_mm);
+    JSON_GET_DBL("rover_full_speed_mps",     rover_full_speed_mps);
+    JSON_GET_DBL("rover_full_yaw_rate_dps",  rover_full_yaw_rate_dps);
+    JSON_GET_DBL("rover_seek_vbatt",         rover_seek_vbatt);
+    JSON_GET_INT("rover_seek_after_s",       rover_seek_after_s);
+    JSON_GET_UINT8("rover_entry_btx",        rover_entry_btx);
+    JSON_GET_UINT8("rover_exit_btx",         rover_exit_btx);
+    JSON_GET_INT("rover_lost_timeout_s",     rover_lost_timeout_s);
+    JSON_GET_DBL("rover_speed_limit_mps",    rover_speed_limit_mps);
+    JSON_GET_DBL("espnow_tx_power_dbm",      espnow_tx_power_dbm);
+    if (doc["cmd_key"].is<long>()) c.cmd_key = doc["cmd_key"].as<long>();
+    JSON_GET_BOOL("imu_required",           imu_required);
 
 #undef JSON_GET_INT
 #undef JSON_GET_UINT8
@@ -1032,8 +1146,17 @@ void msc_fat_init(DeviceConfig* cfg)
 // ─────────────────────────────────────────────────────────────────────────────
 // msc_fat_loop
 // ─────────────────────────────────────────────────────────────────────────────
+void msc_fat_media_service()
+{
+    if (s_media_back_ms && (int32_t)((uint32_t)millis() - s_media_back_ms) >= 0) {
+        s_media_back_ms = 0;
+        s_msc.mediaPresent(true);  // a PC that holds the drive reads the new config.json
+    }
+}
+
 bool msc_fat_loop(DeviceConfig* cfg)
 {
+    msc_fat_media_service();
     if (!s_ever_written) return false;
 
     uint32_t now = (uint32_t)millis();
@@ -1105,6 +1228,10 @@ bool msc_fat_save_all(const DeviceConfig* cfg)
     // Always persist to NVS first so settings survive reboot even if FAT write fails.
     prefs_save(tmp);
 
+    // A PC that has the drive mounted keeps its own copy of the FAT. The drive shows "no medium"
+    // during the write and for 2 s after it, so the PC drops that copy and reads the drive again.
+    s_msc.mediaPresent(false);
+    s_media_back_ms = (uint32_t)millis() + 2000;
     if (!fatfs_mount()) {
         ESP_LOGE(TAG, "FAT mount failed while saving config.json");
         return false;
@@ -1118,4 +1245,62 @@ bool msc_fat_save_all(const DeviceConfig* cfg)
     }
     fatfs_unmount();
     return ok;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Single keys, for config commands over ESP-NOW (docs/espnow_protocol.md, CMD 0x10)
+// ─────────────────────────────────────────────────────────────────────────────
+bool msc_fat_get_key(const DeviceConfig* cfg, const char* key, String* value_json)
+{
+    JsonDocument doc;
+    config_to_doc(*cfg, doc);
+    JsonVariant v = doc[key];
+    if (v.isNull()) return false;
+    value_json->clear();
+    serializeJson(v, *value_json);
+    return true;
+}
+
+int msc_fat_set_key(DeviceConfig* cfg, const char* key, const char* value_json)
+{
+    JsonDocument cur;
+    config_to_doc(*cfg, cur);
+    JsonVariant old = cur[key];
+    if (old.isNull()) return 1;                       // unknown key
+    JsonDocument val;
+    if (deserializeJson(val, value_json)) return 2;   // not a JSON literal
+    JsonVariant nv = val.as<JsonVariant>();
+    // The value must have the key's type, or the parse below would ignore it silently.
+    bool type_ok;
+    if (old.is<bool>())      type_ok = nv.is<bool>();
+    else if (old.is<long>()) type_ok = nv.is<long>();
+    else                     type_ok = nv.is<double>() && !nv.is<bool>();
+    if (!type_ok) return 2;
+    String text = "{\"";
+    text += key;
+    text += "\":";
+    text += value_json;
+    text += "}";
+    DeviceConfig tmp = *cfg;
+    if (!config_from_json_text(tmp, text)) return 2;
+    validate_config(tmp);                             // the same clamps as a config.json edit
+    *cfg = tmp;
+    return 0;
+}
+
+bool msc_fat_key_at(const DeviceConfig* cfg, int index, String* line)
+{
+    JsonDocument doc;
+    config_to_doc(*cfg, doc);
+    int i = 0;
+    for (JsonPair kv : doc.as<JsonObject>()) {
+        if (i++ != index) continue;
+        String value;
+        serializeJson(kv.value(), value);  // ArduinoJson 7 replaces a String's content, so not into *line
+        *line = kv.key().c_str();
+        *line += "=";
+        *line += value;
+        return true;
+    }
+    return false;
 }
