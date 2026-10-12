@@ -1,6 +1,6 @@
 'use strict';
 const ESPRESSIF = 0x303A, ROM_PID = 0x0002, APP_PID = 0x80C2;
-const PAGE_VERSION = '1.4.0';
+const PAGE_VERSION = '1.4.1';
 let pageVer = `Page v${PAGE_VERSION} (local copy)`;
 const ESPTOOL = 'https://unpkg.com/esptool-js@0.4.7/bundle.js';
 const ESPTOOL_SRI = 'sha384-esoYAtcIwSlHrIf+6+uZc/SPs/S8v44K26De13juLayamqHofUvCPscyHBXPxVIc';
@@ -473,6 +473,7 @@ function chooseRef(v) {
   render();
 }
 
+const named = (label, v, sep = ' ') => `${label.replace(/\s*\bv?\d+\.\d+\.\d+[^\s,()]*/g, '').trim()}${sep}${v}`;
 function offersFor(b) {
   const out = [], no = [], sel = currentRef(), rev = b.board || 'RX_REVA';
   const pool = offerBuilds(sel).filter(x => inSel(x, sel));
@@ -488,8 +489,8 @@ function offersFor(b) {
   for (const g of groups.values()) {
     if (!g.esp) continue;
     const m = g.esp.m, rover = !!m.esp32.usb_update, stm = rover ? (g.stm || stmExtra[0]) : null;
-    const what = `${rover ? `${m.label || 'ESP32 rover firmware'} ${m.version}` : `${m.label || m.source.repo.split('/').pop() + ' firmware'}, ${m.version}`}`
-      + (stm ? ` + ${stm.m.label || 'STM32 app'} ${stm.m.version}` : '') + ` (${srcLine(m, g.esp.release)})`;
+    const what = `${rover ? named(m.label || 'ESP32 rover firmware', m.version) : named(m.label || m.source.repo.split('/').pop() + ' firmware', m.version, ', ')}`
+      + (stm ? ` + ${named(stm.m.label || 'STM32 app', stm.m.version)}` : '') + ` (${srcLine(m, g.esp.release)})`;
     const bad = [g.esp, stm].filter(Boolean).find(x => !x.m.boards.includes(rev));
     if (bad) { no.push({ l1: 'Full install', l2: what, reason: `This firmware is for board revision ${bad.m.boards.join(', ')}. This board is revision ${rev}.` }); continue; }
     out.push({ l1: 'Full install', l2: what,
