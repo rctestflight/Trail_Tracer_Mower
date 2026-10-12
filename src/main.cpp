@@ -2627,7 +2627,15 @@ void odrive_printErrorNames(uint32_t errors) {
 #ifdef BOOT_TRACE
 // Diagnostic build (env boot_trace): USB serial first, the reset reason, then one line per start-up
 // step, each flushed, so the last line before an early restart shows the step.
-#define TRACE(n) do { Serial.printf("TRACE %d ms=%lu\n", (n), (unsigned long)millis()); Serial.flush(); delay(20); } while (0)
+// The step in progress is also kept in RTC memory (kept over a crash restart, not over a power loss), so the
+// next start prints "TRACE previous start died during step <n> <name>".
+static const char* const TRACE_NAMES[] = {"start", "USB drive and config.json", "apply config, telemetry log", "USB serial",
+  "debug UART", "MPU6050 set-up", "CAN (TWAI) start", "RC PWM inputs (RMT)", "STM32 UART and data-ready interrupt",
+  "STM32 boot handshake", "ESP-NOW and Wi-Fi start", "loop watchdog", "loop pass 1", "loop pass 2", "loop pass 3", "running"};
+static RTC_NOINIT_ATTR uint32_t trace_magic;
+static RTC_NOINIT_ATTR uint32_t trace_step;
+#define TRACE(n) do { trace_magic = 0x7EACE001u; trace_step = (n); \
+  Serial.printf("TRACE %d %s ms=%lu\n", (n), TRACE_NAMES[(n) < 16 ? (n) : 0], (unsigned long)millis()); Serial.flush(); delay(20); } while (0)
 #else
 #define TRACE(n) do {} while (0)
 #endif
@@ -2639,8 +2647,14 @@ void setup() {
   digitalWrite(17, HIGH);
 #ifdef BOOT_TRACE
   Serial.begin(115200);
-  for (uint32_t t0 = millis(); !tud_cdc_connected() && millis() - t0 < 4000;) delay(10);
-  Serial.printf("TRACE start reset=%d\n", (int)esp_reset_reason());
+  for (uint32_t t0 = millis(); !tud_cdc_connected() && millis() - t0 < 8000;) delay(10);  // up to 8 s for a terminal
+  Serial.printf("TRACE start firmware %s reset=%d (1 power-on, 3 software, 4 crash, 5/6/7 watchdog, 9 brownout)\n",
+                ROVER_FW_VERSION, (int)esp_reset_reason());
+  if (trace_magic == 0x7EACE001u && trace_step < 15)
+    Serial.printf("TRACE previous start died during step %lu %s\n", (unsigned long)trace_step, TRACE_NAMES[trace_step]);
+  else if (trace_magic == 0x7EACE001u)
+    Serial.printf("TRACE previous start reached the running loop\n");
+  trace_magic = 0;
   Serial.flush();
 #endif
   cpuprof::begin();  // CPU profiler: loopTask is the task that runs setup()
@@ -2809,6 +2823,13 @@ void setup() {
 
 // Main Loop ---------------------------------------------------------------------------------------------------------------
 void loop() {
+#ifdef BOOT_TRACE
+  {
+    static uint8_t pass = 0;
+    if (pass < 3) { pass++; TRACE(11 + pass); }   // the first 3 loop passes: steps 12, 13, 14
+    else if (pass == 3) { pass++; TRACE(15); }    // "running": the start-up finished
+  }
+#endif
   if (monitor_role_on) { mark(SEC_MONITOR); monitor_role::loop(); return; }
   stage(ST_USB);
   mark(SEC_USB);
