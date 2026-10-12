@@ -1,5 +1,7 @@
 # Trail Tracer Rx firmware (ESP32-S2)
 
+**Install firmware in your browser:** https://rctestflight.github.io/Trail_Tracer_Mower/ (Chrome or Edge on a computer, Rx board on USB).
+
 This firmware runs on the ESP32-S2 of the Trail Tracer Rx board. One image has two roles. Every boot starts in the rover role, which drives the vehicle. The USB command `monitor` gives the monitor role for one boot. In the monitor role, the board is the PC radio link to the vehicles.
 
 ## Release
