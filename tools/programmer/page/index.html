@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trail Tracer Rx programmer</title>
+<link rel="icon" type="image/png" sizes="32x32" href="icon-32.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root { --bg: #0d1117; --panel: #161b22; --line: #30363d; --text: #e6edf3; --dim: #8b949e; --accent: #58a6ff;
+  --good: #3fb950; --warn: #d29922; --bad: #f85149; }
+@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { --bg: #ffffff; --panel: #f6f8fa; --line: #d0d7de;
+  --text: #1f2328; --dim: #656d76; --accent: #0969da; --good: #1a7f37; --warn: #9a6700; --bad: #cf222e; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.5 "Roboto Mono", monospace; }
+header { display: flex; gap: 12px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+h1 { font-size: 15px; margin: 0; color: var(--accent); }
+main { padding: 16px; max-width: 980px; }
+button { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 5px 12px; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+.note { color: var(--dim); }
+.warn { color: var(--warn); } .bad { color: var(--bad); } .good { color: var(--good); }
+.card { border: 1px solid var(--line); border-radius: 6px; background: var(--panel); padding: 12px 14px; margin: 12px 0; }
+.kv { display: grid; grid-template-columns: 16ch 1fr; gap: 2px 12px; }
+.kv .k { color: var(--dim); }
+pre { margin: 8px 0 0; max-height: 260px; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 8px; font: 12px/1.4 "Roboto Mono", monospace; white-space: pre-wrap; }
+pre.log { height: 260px; max-height: none; overflow-y: scroll; }
+.offers { display: grid; gap: 8px; margin-top: 10px; }
+button.offer { display: grid; gap: 2px; text-align: left; padding: 8px 12px; }
+button.offer b { color: var(--accent); } button.offer span { color: var(--dim); }
+.steps { border-color: var(--warn); color: var(--warn); font-size: 15px; }
+.stage { font-size: 16px; margin: 6px 0; }
+.bar { height: 10px; background: var(--line); border-radius: 5px; overflow: hidden; margin-top: 4px; }
+.bar > div { height: 100%; background: var(--accent); transition: width 0.3s; }
+.result { margin-top: 6px; font-size: 14px; }
+details summary { cursor: pointer; color: var(--dim); margin-top: 8px; }
+.refused .ref { display: grid; gap: 2px; padding: 6px 12px; margin-top: 6px; border: 1px dashed var(--line); border-radius: 4px; color: var(--dim); }
+</style>
+</head>
+<body>
+<header><h1>Trail Tracer Rx programmer</h1><span class="note">Chrome or Edge, on the PC with the Rx on USB</span><span style="flex: 1"></span></header>
+<main>
+  <div id="noSerial" class="card bad" hidden></div>
+  <p>Plug an Rx into this PC, then press "Connect an Rx" and choose it. After each restart or replug of the board, press "Connect an Rx" and choose it again (the Rx has no USB serial number, so the browser forgets it).</p>
+  <p id="release" class="note"></p>
+  <button id="connectBtn">Connect an Rx</button>
+  <label id="refBox" hidden style="margin-left: 12px">Firmware from <select id="refMenu" style="font: inherit; max-width: 100%"></select></label>
+  <div id="steps" class="card steps" hidden></div>
+  <div id="job" class="card" hidden></div>
+  <div id="boards"></div>
+</main>
+<script src="program.js"></script>
+</body>
+</html>
