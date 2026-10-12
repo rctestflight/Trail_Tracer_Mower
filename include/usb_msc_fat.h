@@ -97,7 +97,7 @@ struct DeviceConfig {
                                      // false: a board with no IMU (bench) runs without one.
     // DSP of the STM32 v2 app. The ESP32 holds these and writes them at each STM32 start and after a change
     // (the STM32 keeps none of them over a restart). A v1 STM32 app ignores them.
-    int     dsp_frame_period_us;     // CID 18: frame period request, us (2000..655350); the STM32 answers the period in effect
+    int     dsp_frame_period_us;     // CID 18: frame period request, us (DSP_FRAME_PERIOD_MIN_US..655350); the STM32 answers the period in effect
     int     dsp_sensors;             // CID 38: 1 or 2 sensors
     double  dsp_bin_hz[8];           // CID 20: bin frequency, Hz; 0 = bin off
     int     dsp_xy_mask;             // CID 25: bit n = bin n in xy mode
@@ -107,6 +107,10 @@ struct DeviceConfig {
     bool    usb_drive;               // true (default): config.json as a USB drive; false: no drive, settings by command only
                                      // (from the next start). A PC that read the drive when the board left USB lost ports.
 };
+
+// The shortest frame period setting: the fastest STM32 period (2336 us, set-up S2N) plus 50 %, rounded up.
+// The ESP32 then has margin to serve the radio, the log and USB between frames.
+#define DSP_FRAME_PERIOD_MIN_US 3600
 
 // DSP values in effect, from the STM32 answers (NaN = no answer yet). "list" and "get" show them as the
 // read-only keys <key>_eff; config.json does not hold them.

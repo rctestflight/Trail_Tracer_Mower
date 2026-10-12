@@ -520,14 +520,14 @@
     },
     "dsp_frame_period_us": {
       "type": "int",
-      "min": 2000,
+      "min": 3600,
       "max": 655350,
       "unit": "us",
       "default": 10000,
       "live": false,
       "group": "Signal processing",
       "label": "Update period",
-      "description": "Time between two position updates from the sensor board. A longer period averages more signal: less noise, slower response. The board uses the nearest period that it can make. Default 10000 us (10 ms).",
+      "description": "Time between two position updates from the sensor board. A longer period averages more signal: less noise, slower response. The board uses the nearest period that it can make. Default 10000 us (10 ms); the shortest setting is 3600 us.",
       "effect": "dsp_frame_period_us_eff"
     },
     "dsp_frame_period_us_eff": {

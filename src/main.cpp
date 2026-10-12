@@ -153,9 +153,9 @@ UsbOut usbOut;
 
 static const char* TAG = "wfrx";
 #ifdef BENCH_FAKE_IMU
-#define ROVER_FW_VERSION "0.5.56+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.5.57+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #else
-#define ROVER_FW_VERSION "0.5.56"  // DSP settings dsp_* in config.json, applied to the STM32; read-only dsp_*_eff
+#define ROVER_FW_VERSION "0.5.57"  // boot guard for a fast STM32 frame period; safe mode after 2 crash resets; period floor
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
 
@@ -474,6 +474,8 @@ void dspApply();       // v2: the DSP settings (config.json dsp_*) to the STM32,
 void dspOnAnswer(const stmv2::Answer& a);  // v2: a DSP write answer -> g_dsp_eff
 void stmCaptureService();  // bench: paced print of captured v2 frames
 void stm32_boot_handshake();  // IAP hello/boot handshake — call once after Serial1.begin()
+void stmFastFrameGuard();     // boot: a v2 STM32 with frames faster than 100 a second gets the 10 ms period
+size_t serial1Drain();        // the STM32 UART input bytes there now, read in blocks; returns the count
 int stm32_iap_boot(int hello_tries, char* hello_text, size_t text_len, uint8_t* hello_len);  // HELLO, BOOT, first nDATA_READY
 void writePwmMicros(uint8_t ch, uint32_t micros); // Write PWM output pulse width in microseconds
 void mainLoopCounter();  // increment main loop counter
@@ -793,7 +795,7 @@ RTC_NOINIT_ATTR uint32_t crash_count;
 // to the vehicle log (event 14) and to USB. stage: the part of loop() that ran last.
 enum : uint8_t { ST_SETUP = 0, ST_USB = 1, ST_UPDATE = 2, ST_PACKET = 3, ST_RADIO = 4, ST_LOG = 5, ST_BENCH = 6, ST_IDLE = 7 };
 const char* const STAGE_NAMES[] = {"setup", "usb", "update", "packet", "radio", "log", "bench", "idle"};
-struct LastState { uint32_t magic, uptime_ms, heap_min; uint8_t stage, drive_mode, ap_state, pad; };
+struct LastState { uint32_t magic, uptime_ms, heap_min; uint8_t stage, drive_mode, ap_state, section; };  // section: the last mark()
 RTC_NOINIT_ATTR LastState last_state;
 const uint32_t LAST_STATE_MAGIC = 0x4C535431;  // "LST1"
 inline void stage(uint8_t st) { last_state.stage = st; last_state.uptime_ms = millis(); }
@@ -801,7 +803,7 @@ inline void stage(uint8_t st) { last_state.stage = st; last_state.uptime_ms = mi
 enum : uint8_t { SEC_USB = 0, SEC_UPDATE, SEC_BRIDGE, SEC_MONITOR, SEC_DRIVE, SEC_MSC, SEC_PACKET, SEC_ROVER, SEC_SAMPLE,
                  SEC_STMCMD, SEC_RADIO, SEC_LOG, SEC_BENCH, SEC_DEBUG, SEC_MPU, SEC_N };
 // One mark per loop part: the CPU profiler (shares) and the real-time path timing (wall time per part and pass).
-inline void mark(uint8_t s) { cpuprof::section(s); rtprof::part(s); }
+inline void mark(uint8_t s) { cpuprof::section(s); rtprof::part(s); last_state.section = s; }
 const char* const SEC_NAMES[SEC_N] = {"usb", "update", "bridge", "monitor", "drive", "msc", "packet", "rover", "sample",
                                       "stmcmd", "radio", "log", "bench", "debug", "mpu"};
 bool safe_mode = false;
@@ -1472,7 +1474,7 @@ void stmBridgeService(){
     usbOut.printf("STM bridge: HELLO/BOOT result %d, %s\n", r, t);
     telemetryEvent(rec::EV_STM32, 1, plen, t);
   }
-  while (Serial1.available()) Serial1.read();
+  serial1Drain();
   data_ready = 0;
 }
 void stmRawService(){
@@ -1490,7 +1492,7 @@ void stmRawCommand(const char* arg){
     detachInterrupt(digitalPinToInterrupt(STM_nDATA_READY));
     Serial1.end();
     Serial1.begin(115200, SERIAL_8E1);
-    while (Serial1.available()) Serial1.read();
+    serial1Drain();
     stm_raw = true;
     stm_rom_used = true;
     usbOut.println("STM rom link on: 115200 8E1");
@@ -1855,7 +1857,7 @@ void stm32_boot_handshake() {
     uint16_t cid = 0;
     bool ok = false;
     for (int i = 0; i < IAP_HELLO_RETRIES && !ok; i++) {
-      while (Serial1.available()) Serial1.read();
+      serial1Drain();
       iap_encode_frame(IAP_CID_HELLO, frame);
       Serial1.write(frame, 6);
       ok = iap_read_frame(IAP_HELLO_TIMEOUT_MS, &cid, payload, &plen) && cid == IAP_CID_HELLO;
@@ -1863,7 +1865,7 @@ void stm32_boot_handshake() {
     usbOut.printf("STM bridge on: STM32 held in its boot checker (HELLO %s); USB is now the STM32 UART, no text until it ends\n",
                   ok ? "answered" : "not answered");
     usbOut.drain(500);
-    while (Serial1.available()) Serial1.read();
+    serial1Drain();
     data_ready = 0;  // edges from the STM32 power-up are not an application
     stm_bridge = true;
     stm_bridge_start_ms = millis();
@@ -1902,6 +1904,43 @@ void stm32_boot_handshake() {
   else usbOut.println("STM32 boot OK");
 }
 
+// Drain the STM32 UART input: only the bytes there now, read in blocks. A byte-by-byte drain
+// ("while available: read") never ends when frames arrive faster than one read() per byte (bench:
+// 2.3 ms frames, a byte each 18 us): loop() hung and the task watchdog reset the board.
+size_t serial1Drain(){
+  uint8_t tmp[128];
+  size_t total = 0;
+  int n = Serial1.available();
+  while (n > 0) {
+    const size_t k = Serial1.read(tmp, n < (int)sizeof(tmp) ? (size_t)n : sizeof(tmp));
+    if (k == 0) break;
+    total += k;
+    n -= (int)k;
+  }
+  return total;
+}
+
+// Boot guard. The STM32 keeps its frame period over an ESP32 reset. At frames below about 2.7 ms the loop
+// did not keep up (task watchdog reset, set-up S2N), so the next boot would reset again. Before loop()
+// starts: more than 100 frames a second (more than about 1500 B in 50 ms) can only come from a v2 STM32;
+// it gets a write of the frame period 10000 us. A v1 STM32 sends 100 packets a second and gets nothing.
+void stmFastFrameGuard(){
+  for (int attempt = 0; attempt < 3; attempt++) {
+    const uint32_t t0 = millis();
+    uint32_t n = 0;
+    while (millis() - t0 < 50) {
+      n += serial1Drain();
+      delay(1);
+    }
+    if (n < 1500) return;
+    uint8_t f[ESP_FRAME_LEN];
+    stmv2::encodeCmd((uint8_t)esp_random(), 18 | ESP_CID_WRITE, 0, 10000, f);
+    Serial1.write(f, ESP_FRAME_LEN);
+    usbOut.printf("STM32 fast frames at boot (%lu B in 50 ms): frame period 10000 us sent\n", (unsigned long)n);
+    delay(30);
+  }
+}
+
 // HELLO (up to hello_tries sends), then BOOT, then the first nDATA_READY of the STM32 application.
 // Result: 0 ok, 1 no HELLO answer, 2 BOOT failed, 3 nDATA_READY timeout. hello_text: the HELLO
 // answer as it came, "hello <n> B: xx ..." (IAP and application versions, image state).
@@ -1916,7 +1955,7 @@ int stm32_iap_boot(int hello_tries, char* hello_text, size_t text_len, uint8_t* 
   // Flush, send HELLO, wait for HELLO response; retry on flush-race or garbled frame
   bool hello_ok = false;
   for (int i = 0; i < hello_tries && !hello_ok; i++) {
-    while (Serial1.available()) Serial1.read();
+    serial1Drain();
     iap_encode_frame(IAP_CID_HELLO, frame);
     Serial1.write(frame, 6);
     if (!iap_read_frame(IAP_HELLO_TIMEOUT_MS, &cid, payload, &plen)) continue;
@@ -1964,7 +2003,7 @@ void stmRecoveryService(){
   stm_recover_tries++;
   stm_recover_ms = now;
   const int pending = Serial1.available();  // the boot checker's own HELLO frame at its start: 13 bytes
-  while (Serial1.available()) Serial1.read();
+  serial1Drain();
   data_ready = 0;
   delay(50);
   char t[72];
@@ -1978,7 +2017,7 @@ void stmRecoveryService(){
   char hello[72];
   uint8_t plen = 0;
   const int r = stm32_iap_boot(3, hello, sizeof(hello), &plen);
-  while (Serial1.available()) Serial1.read();
+  serial1Drain();
   data_ready = 0;
   if (r == 0) stm_iap_boots++; else stm_iap_fails++;
   static const char* const RESULT[] = {"boot ok", "no HELLO answer", "BOOT failed", "no nDATA_READY"};
@@ -2443,7 +2482,7 @@ void setup() {
     const bool crash = rr == ESP_RST_PANIC || rr == ESP_RST_INT_WDT || rr == ESP_RST_TASK_WDT || rr == ESP_RST_WDT;
     if (crash_magic != 0x5AFE0001u || !crash) { crash_magic = 0x5AFE0001u; crash_count = 0; }
     if (crash) crash_count++;
-    safe_mode = crash_count >= 3;
+    safe_mode = crash_count >= 2;  // two crash resets, each within 60 s of its start: no telemetry, no rover mode, STM32 at 10 ms
     prev_state = last_state;  // the state before this reset (no power loss: RTC memory kept it)
     if (rr == ESP_RST_POWERON || rr == ESP_RST_BROWNOUT) prev_state.magic = 0;
     last_state = LastState{LAST_STATE_MAGIC, 0, 0xFFFFFFFFu, ST_SETUP, 0, 0, 0};
@@ -2473,8 +2512,9 @@ void setup() {
   usbOut.printf("BOOT rover-firmware %s reset=%d board=%s\n", ROVER_FW_VERSION, (int)esp_reset_reason(), RX_BOARD);  // banner: shows each reboot
   if (prev_state.magic == LAST_STATE_MAGIC) {  // what the board did before this reset
     char t[80];
-    snprintf(t, sizeof(t), "stage=%s mode=%u ap=%u heap_min=%lu crashes=%lu",
-             STAGE_NAMES[prev_state.stage < 8 ? prev_state.stage : 0], prev_state.drive_mode, prev_state.ap_state,
+    snprintf(t, sizeof(t), "stage=%s sec=%s mode=%u ap=%u heap_min=%lu crashes=%lu",
+             STAGE_NAMES[prev_state.stage < 8 ? prev_state.stage : 0],
+             prev_state.section < SEC_N ? SEC_NAMES[prev_state.section] : "?", prev_state.drive_mode, prev_state.ap_state,
              (unsigned long)prev_state.heap_min, (unsigned long)crash_count);
     usbOut.printf("PREV reset=%d uptime_ms=%lu %s\n", (int)esp_reset_reason(), (unsigned long)prev_state.uptime_ms, t);
     if (!safe_mode) telemetryEvent(rec::EV_PREV_BOOT, (int32_t)esp_reset_reason(), (int32_t)prev_state.uptime_ms, t);
@@ -2572,6 +2612,7 @@ void setup() {
 
   TRACE(9);
   stm32_boot_handshake();
+  stmFastFrameGuard();  // a fast STM32 frame period left from before this reset: back to 10 ms first
 
   data_ready = 0;  // Clear any pending data ready flags that may have been set during boot
   stmLink.setSeq((uint8_t)esp_random());  // v2: an ESP32 restart cannot repeat the last seq
@@ -2658,7 +2699,7 @@ void loop() {
   last_state.ap_state = telemetryApByte();
   if (stm_raw) stmRawService();  // bench: STM32 ROM loader link, no packets
   else if (stm_link_ver == 2 && stm_v2_resync && data_ready && Serial1.available() != (int)STM_FRAME_LEN) {
-    while (Serial1.available()) Serial1.read();  // resync: wait for an edge with exactly one frame waiting
+    serial1Drain();  // resync: wait for an edge with exactly one frame waiting
     data_ready = 0;
     rtprof::resync();
     uart_overrun_count++;
@@ -2670,7 +2711,7 @@ void loop() {
     // previous cycle.  Drain and skip this cycle; the next interrupt will bring a
     // fresh, complete packet that is guaranteed to be aligned. Layout 2 keeps late frames (see stm_v2_backlog).
     if(stm_link_ver != 2 && (data_ready > 1 || (stm_link_ver && Serial1.available() > stmFrameLen()))){
-      while(Serial1.available()) Serial1.read();  // drain stale bytes first
+      serial1Drain();  // drain stale bytes first
       data_ready = 0;                             // then reset (ISR during drain → clean next cycle)
       rtprof::resync();
       uart_overrun_count++;
@@ -3515,7 +3556,7 @@ void dspApply(){
   stmLink.pushInt(STM_RUN_CMD | 0x80000000, 0);
   stmLink.pushInt(38 | 0x80000000, c.dsp_sensors);
   stmLink.pushInt(39 | 0x80000000, c.dsp_slow_adc);
-  stmLink.pushInt(18 | 0x80000000, c.dsp_frame_period_us);
+  stmLink.pushInt(18 | 0x80000000, safe_mode ? 10000 : c.dsp_frame_period_us);  // safe mode: the default period
   for (int b = 0; b < 8; b++) stmLink.pushFloat(20 | 0x80000000, (float)c.dsp_bin_hz[b], (uint8_t)b);
   stm_v2_lanes = (uint8_t)c.dsp_lanes;
   stmLink.pushInt(13 | 0x80000000, c.dsp_lanes);
@@ -3576,7 +3617,7 @@ bool stmReadFrame(){
       if (stm_v2_backlog) stm_backlog_frames++;
       if (data_ready) data_ready--;
       stm_v2_resync = !ok;
-      if (!ok) { while (Serial1.available()) Serial1.read(); data_ready = 0; rtprof::resync(); }
+      if (!ok) { serial1Drain(); data_ready = 0; rtprof::resync(); }
     }
     if (ok && stm_cap && stm_cap_n < stm_cap_want) memcpy(stm_cap + (size_t)STM_FRAME_LEN * stm_cap_n++, f, STM_FRAME_LEN);
     if (ok && stm_acc_want) stmAccFrame();
@@ -3593,7 +3634,7 @@ bool stmReadFrame(){
       return false;
     }
   } else {
-    while (Serial1.available()) Serial1.read();  // neither length: wait for the next frame
+    serial1Drain();  // neither length: wait for the next frame
   }
   data_ready = 0;
   rtprof::resync();
@@ -3909,7 +3950,7 @@ void applyDeviceConfig(const DeviceConfig& cfg)
   last_s2 = enable_sensor_2;
 
   // Rover autopilot
-  rover_enabled               = cfg.rover_enabled;
+  rover_enabled               = cfg.rover_enabled && !safe_mode;  // safe mode (crash resets): no rover mode
   rover_seek_vbatt            = cfg.rover_seek_vbatt;
   rover_seek_after_s          = cfg.rover_seek_after_s;
   rover_entry_btx             = cfg.rover_entry_btx;

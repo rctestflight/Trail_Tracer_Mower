@@ -361,7 +361,7 @@ static void validate_config(DeviceConfig& c)
     c.espnow_tx_power_dbm     = round(constrain(c.espnow_tx_power_dbm, 2.0, 19.5) * 4.0) / 4.0;
 
     // DSP: the widest ranges of the STM32 v2 apps; the STM32 clamps to its own and answers the value in effect
-    c.dsp_frame_period_us = constrain(c.dsp_frame_period_us, 2000, 655350);
+    c.dsp_frame_period_us = constrain(c.dsp_frame_period_us, DSP_FRAME_PERIOD_MIN_US, 655350);
     c.dsp_sensors         = constrain(c.dsp_sensors, 1, 2);
     for (int b = 0; b < 8; b++)
         if (!isfinite(c.dsp_bin_hz[b]) || c.dsp_bin_hz[b] < 0.0) c.dsp_bin_hz[b] = 0.0;
