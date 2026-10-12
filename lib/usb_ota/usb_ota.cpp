@@ -3,7 +3,9 @@
 #include <Preferences.h>
 #include <Update.h>
 
+#include "esp_flash.h"
 #include "esp_ota_ops.h"
+#include "esp_rom_crc.h"
 #include "mbedtls/sha256.h"
 
 // arduino-esp32 (C): true = the app marks the image valid itself (usb_ota::service), not initArduino()
@@ -148,8 +150,17 @@ void command(const char* arg) {
     const esp_partition_t* run = esp_ota_get_running_partition();
     esp_ota_img_states_t st = ESP_OTA_IMG_UNDEFINED;
     esp_ota_get_state_partition(run, &st);
-    o.printf("OTA status running=%s state=%d gate=%d active=%d written=%lu of %lu\n", run->label, (int)st, (int)(gate && !done),
-             (int)active, (unsigned long)written, (unsigned long)size_);
+    // table: the partition table this firmware is built for (partitions.csv); table_crc: CRC-32 of the table
+    // in flash (0x8000, 3072 B), equal to the CRC-32 of the release partitions.bin
+    uint8_t buf[256];
+    uint32_t crc = 0;
+    for (uint32_t off = 0; off < 3072; off += sizeof(buf)) {
+      if (esp_flash_read(NULL, buf, 0x8000 + off, sizeof(buf)) != ESP_OK) { crc = 0; break; }
+      crc = esp_rom_crc32_le(crc, buf, sizeof(buf));
+    }
+    o.printf("OTA status running=%s state=%d gate=%d active=%d written=%lu of %lu table=rover-4mb-1 table_crc=%08lx\n",
+             run->label, (int)st, (int)(gate && !done), (int)active, (unsigned long)written, (unsigned long)size_,
+             (unsigned long)crc);
     return;
   }
   o.println("OTA usage: ota begin <size> <sha256> [confirm] | ota w <offset> <hex> | ota end | ota abort | ota status | ota confirm");

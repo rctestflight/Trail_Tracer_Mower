@@ -7,7 +7,7 @@ This guide tells you how to load this branch on a rover with the PlatformIO Uplo
 > 2. Connect the rover by USB. Push the PlatformIO **Upload** button (the arrow in the status bar).
 > 3. Do what the terminal asks. Over V1.0 it asks for the 0 button once (section 3).
 > 4. If the terminal shows `Full power-off now`: USB and vehicle power off, 5 s, on.
-> 5. Open the PlatformIO serial monitor (the plug in the status bar). Type `boot`: the answer starts with `BOOT rover-firmware 0.5.54`.
+> 5. Open the PlatformIO serial monitor (the plug in the status bar). Type `boot`: the answer starts with `BOOT rover-firmware 0.5.55`.
 > 6. Later updates: push **Upload** again. Details: sections [3](#3-what-the-upload-button-does), [6](#6-field-workflow-laptop-rover-usb-cable), [7](#7-back-to-v10).
 
 ## 1. What changes, what stays
@@ -45,7 +45,7 @@ The Upload button builds the firmware, then looks at the board on the USB port (
 
 ## 4. Confirm the load
 
-Open the PlatformIO serial monitor. Type `boot` and push Enter. The answer starts with `BOOT rover-firmware 0.5.54`. Each second the board sends a `HB` line. `packets=100` in that line shows that the STM32 app sends 100 packets a second. The start lines show `STM link v1` for a v1 STM32 app.
+Open the PlatformIO serial monitor. Type `boot` and push Enter. The answer starts with `BOOT rover-firmware 0.5.55`. Each second the board sends a `HB` line. `packets=100` in that line shows that the STM32 app sends 100 packets a second. The start lines show `STM link v1` for a v1 STM32 app.
 
 Close the monitor before you push Upload or use a tool from section 6.
 

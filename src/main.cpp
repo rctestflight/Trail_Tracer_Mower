@@ -153,10 +153,11 @@ UsbOut usbOut;
 
 static const char* TAG = "wfrx";
 #ifdef BENCH_FAKE_IMU
-#define ROVER_FW_VERSION "0.5.54+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.5.55+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #else
-#define ROVER_FW_VERSION "0.5.54"  // flash erase only while the motors are disarmed or charging (never on stationary alone)
+#define ROVER_FW_VERSION "0.5.55"  // board= in the BOOT lines; table= and table_crc= in "ota status"
 #endif
+#define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
 
 // Rover autopilot (lib/rover_autopilot): bounce inside the perimeter, go home on low battery,
 // follow the wire to the dock in rover_goal_cw direction, depart. Runs in drive mode 2 when
@@ -1715,9 +1716,9 @@ void benchSerial(){
     } else if (!strncmp(line, "stm ", 4)) {
       stmRawCommand(line + 4);
     } else if (!strcmp(line, "boot")) {
-      usbOut.printf("BOOT rover-firmware %s reset=%d setup_ms=%lu first_packet_ms=%lu espnow_start_ms=%lu espnow=%d mac=%s\n",
+      usbOut.printf("BOOT rover-firmware %s reset=%d setup_ms=%lu first_packet_ms=%lu espnow_start_ms=%lu espnow=%d mac=%s board=%s\n",
         ROVER_FW_VERSION, (int)esp_reset_reason(), (unsigned long)boot_setup_ms, (unsigned long)boot_first_packet_ms,
-        (unsigned long)boot_espnow_ms, (int)espnow_started, WiFi.macAddress().c_str());
+        (unsigned long)boot_espnow_ms, (int)espnow_started, WiFi.macAddress().c_str(), RX_BOARD);
     } else if (!strcmp(line, "drv")) {
       // bench: the drive chain for the PC Start/Stop trace: mode, rover state, the ODrive commands (CAN)
       // The commanded values come before the motor locks (gyro, arm switch, CAN): a bench board with no
@@ -2460,7 +2461,7 @@ void setup() {
   Serial.setRxBufferSize(2048);  // STM32 bridge: one IAP chunk frame is 1048 B
   Serial.begin(115200);  // Start USB VCP
   Serial.setTxTimeoutMs(0);  // Never block if no CDC host is connected
-  usbOut.printf("BOOT rover-firmware %s reset=%d\n", ROVER_FW_VERSION, (int)esp_reset_reason());  // banner: shows each reboot
+  usbOut.printf("BOOT rover-firmware %s reset=%d board=%s\n", ROVER_FW_VERSION, (int)esp_reset_reason(), RX_BOARD);  // banner: shows each reboot
   if (prev_state.magic == LAST_STATE_MAGIC) {  // what the board did before this reset
     char t[80];
     snprintf(t, sizeof(t), "stage=%s mode=%u ap=%u heap_min=%lu crashes=%lu",
