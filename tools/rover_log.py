@@ -3,9 +3,9 @@ r"""Decoder for the rover telemetry log (docs/espnow_protocol.md, "Telemetry log
 Library use:  decode_frame(bytes) -> dict
 Commands:
   decode  <file>         decode a file of lines that hold one frame in hex each ("LOG <hex>" from the
-                         USB "log dump" command, or "R <us> <mac> <len> <hex>" from the Rx-B monitor)
-  usbdump <rxportd url or COM port> [--stream S] [--from N] [--count C] [--out file]
-                         ask the rover for "log dump" (through its RxPortd daemon, or a COM port
+                         USB "log dump" command, or "R <us> <mac> <len> <hex>" from the monitor)
+  usbdump <bench daemon url or COM port> [--stream S] [--from N] [--count C] [--out file]
+                         ask the rover for "log dump" (through a bench daemon, or a COM port
                          directly: needs pyserial and tools/directport.py) and decode it
 Writes one JSON object per line to stdout or --out. Python 3.8+, no packages beyond the standard library.
 """
@@ -153,7 +153,7 @@ def decode_frame(fr):
 
 
 def frames_from_lines(lines):
-    """Yields (source, bytes) from "LOG <hex>" lines and Rx-B "R <us> <mac> <len> <hex>" lines."""
+    """Yields (source, bytes) from "LOG <hex>" lines and monitor "R <us> <mac> <len> <hex>" lines."""
     for ln in lines:
         p = ln.split()
         try:  # "LOG end", "LOG off ..." and other text lines are not frames
@@ -173,7 +173,7 @@ def cmd_decode(a):
 
 def cmd_usbdump(a):
     if a.url.upper().startswith("COM"):
-        # A PC with no RxPortd daemon: the COM port directly (directport.py, needs pyserial).
+        # A PC with no bench daemon: the COM port directly (directport.py, needs pyserial).
         from directport import DirectPort
         port = DirectPort(a.url.upper())
         t0 = time.time()

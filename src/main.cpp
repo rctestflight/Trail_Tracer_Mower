@@ -24,7 +24,7 @@ bool imu_halt = false;  // retired at the merge of f10cd31: the main-branch gyro
 #define SCL_PIN 40
 
 bool gyro_ready = false;
-void mpuReport(bool ok, unsigned status);  // merge 2026-10-11: his MPU messages through our USB text queue and log
+void mpuReport(bool ok, unsigned status);  // main-branch MPU messages through the USB text queue and the log
 uint32_t gyro_sample_ms = 0;
 
 // Take one calibration sample per loop, leaving STM32 packet handling active.
@@ -102,7 +102,7 @@ static void serviceMpu() {
 #include "usb_guard.h"  // no bootloader from DTR/RTS, USB transmit-stall re-enumeration (lib/usb_guard)
 #include "monitor_role.h"  // USB command "monitor": this boot only, the same image runs as the PC monitor
 #include "esp_partition.h"
-#include "telemlog.h"       // numbered telemetry log: rings, live broadcast, backfill (Rx-B Monitor)
+#include "telemlog.h"       // numbered telemetry log: rings, live broadcast, backfill (monitor role)
 #include "rover_records.h"  // record bodies: 100 Hz samples, status, events
 #include "decimator.h"     // anti-alias filter and decimation of the samples
 #include "stm_settings.h"  // STM32 commands: answer check, retry, read-back of the settings (lib/stm_settings)
@@ -118,7 +118,7 @@ static void serviceMpu() {
 // 0.5.2: back to Serial (the Arduino USB lock). 0.5.1 called tud_cdc_write() and
 // tud_cdc_write_flush() from loop() without that lock, beside the Arduino USB task; after each
 // warm restart (OTA end) the host disabled the port 1.3 s into enumeration and the board never
-// came back on USB (bench Pi, 2026-10-10 11:00 and 11:08). A cold start worked.
+// came back on USB (bench test). A cold start worked.
 class UsbOut : public Print {
  public:
   size_t write(uint8_t c) override { return write(&c, 1); }
@@ -574,7 +574,7 @@ void stmCoilFrame(){
   stm_coil_n = 0;
   stm_coil_t0 = now;
 }
-// Channel scan (method CHANNEL_SCAN.md, 2026-10-12): with the Tx off, the operator drives in
+// Channel scan: with the Tx off, the user drives in
 // manual mode over the full throttle range and the ESP32 ranks the bins by interference. Per frame and bin: level
 // I = sqrt(S1^2 + S2^2) of each lane (int24 S units), the larger lane counts; sign and bin status are ignored. One
 // histogram per bin in 1.5 dB steps (heap, 3 kB, no samples). 'scan start' / 'scan stop' / 'scan' (report) /
@@ -708,9 +708,9 @@ void formatMacAddress(const uint8_t *macAddr, char *buffer, int maxLength) // Fo
   snprintf(buffer, maxLength, "%02x:%02x:%02x:%02x:%02x:%02x", macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5]);
 }
 
-// ESP-NOW bench link (protocol agreed with the Rx-B monitor, little-endian, byte 0 = type):
+// ESP-NOW bench link (protocol agreed with the monitor role, little-endian, byte 0 = type):
 //   0x01 THRU  u8 type, u32 seq, u32 sender_us, zero padding to the test size (the rover broadcasts)
-//   0x02 PING  u8 type, u32 seq, u32 rxb_us (Rx-B sends it to this board)
+//   0x02 PING  u8 type, u32 seq, u32 rxb_us (the monitor sends it to this board)
 //   0x03 PONG  the PING bytes with byte 0 set to 0x03, sent back to the PING's source
 // The callbacks run in the Wi-Fi task at priority 23 and interrupt loop(): they only copy
 // and count. loop() sends the PONG and the THRU frames (espnowService()).
@@ -736,7 +736,7 @@ bool bench_erase_block = false;  // bench "erase off": no flash ring erase (thro
 bool bench_sim_armed = false;    // bench "armed sim on": the erase rule treats the motors as armed (simulated run, no ODrive)
 bool update_mode = false;        // from "ota begin": loop() serves only USB and the update (see loop())
 bool monitor_role_on = false;    // this boot runs the monitor role: monitor_role::loop(), no vehicle code
-// USB command "monitor": the next boot only runs the monitor role (PC-tethered Rx-B role). The flag
+// USB command "monitor": the next boot only runs the monitor role (PC-tethered monitor role). The flag
 // is in RTC memory and is cleared at once at boot, so every board starts as a vehicle, and any later
 // restart, crash or power cycle returns it to the vehicle role. The PC side sends "monitor" again.
 static RTC_NOINIT_ATTR uint32_t monitor_once;
@@ -1005,7 +1005,7 @@ void espnowSendAck(const uint8_t* mac, uint16_t seq, uint8_t result, const char*
 uint8_t configCommand(const char* t, bool over_espnow, String& reply);
 uint8_t configCommandRun(const char* t, bool over_espnow, String& reply);
 
-// Restarts that the PC sees (RxPortd archive/2026-10-10_history/USB_INCIDENTS.md, incidents 7 and 8). With USB persist off
+// Restarts that the PC sees (bench tests). With USB persist off
 // (arduino-esp32 2.0.17), usb_persist_restart() resets the USB core but leaves the D+ pull-up on:
 // the PC never sees the board leave the bus, and never addresses the new USB device after the
 // restart, so the board looks silent. Detach first, and give the PC time to see it.
@@ -1038,7 +1038,7 @@ bool otaMayStart(){
   writePwmMicros(4, PWM_OUT_4_DEFAULT);
   if (!update_mode) {
     usbOut.println("UPDATE mode on: USB and the update only; loop watchdog paused");
-    disableLoopWDT();  // the image check at "ota end" ran past 5 s once (Rx-B reset=6, 2026-10-10 12:08)
+    disableLoopWDT();  // the image check at "ota end" can run past 5 s (bench test)
   }
   update_mode = true;
   update_last_ms = millis();
@@ -1274,7 +1274,7 @@ void benchPrintCounters(const char* tag, uint32_t loops, uint32_t min_us, uint32
     (unsigned long)espnow_pong_count, (unsigned long)espnow_tx_ok, (unsigned long)espnow_tx_fail, (unsigned long)espnow_send_err);
 }
 
-// "send <mac> <hex>": one ESP-NOW frame, e.g. "send fc:01:2c:47:a7:f4 7f52535421" (RESTART "RST!").
+// "send <mac> <hex>": one ESP-NOW frame, e.g. "send 01:23:45:67:89:ab 7f52535421" (RESTART "RST!").
 void benchSend(const char* arg){
   unsigned m[6];
   char hex[2 * ESP_NOW_MAX_DATA_LEN + 1];
@@ -1297,12 +1297,12 @@ void benchSend(const char* arg){
 // the first load of a blank STM32. A blank STM32G0 starts its ROM loader by itself (empty check);
 // the Rx board has no BOOT0 or reset line. "stm rom" opens the link (only while the vehicle stands
 // still), "stm tx <hex>" sends bytes, the board prints "STM rx <hex>" for each read, and "stm off"
-// returns to the 2 Mbaud packet link. The PC tool RxPortd/stm32_romload.py runs the protocol.
+// returns to the 2 Mbaud packet link. A PC tool runs the protocol.
 bool stm_raw = false;
 // STM32 app update through the boot checker (IAP), bench and field: "stm iaphold" sets a one-shot
 // flag in NVS. At the next power-on the handshake sends HELLO only (no BOOT), so the STM32 stays in
 // its boot checker, and the board becomes a transparent bridge between USB and the STM32 UART
-// (2 Mbaud): the PC runs the IAP update (RxPortd/stm32_iap_update.py, protocol in TrailTracer-Rx-STM32
+// (2 Mbaud): the PC runs the IAP update (protocol in TrailTracer-Rx-STM32
 // iap_proto.h). No USB text in bridge mode. The bridge ends STM_BRIDGE_IDLE_MS after the last USB
 // byte (STM_BRIDGE_WAIT_MS if none came); then HELLO/BOOT if the STM32 is still silent. The board
 // then continues as usual, with no ESP32 restart.
@@ -1456,7 +1456,7 @@ void stmBridgeService(){
   const bool idle = stm_bridge_rx_ms ? now - stm_bridge_rx_ms >= STM_BRIDGE_IDLE_MS
                                      : now - stm_bridge_start_ms >= STM_BRIDGE_WAIT_MS;
   // nDATA_READY edges do not show a running application: the boot checker makes them too (bench
-  // test 2026-10-11 02:50). So the bridge ends only by time; send nothing to the board until "STM bridge off".
+  // test). So the bridge ends only by time; send nothing to the board until "STM bridge off".
   if (!idle) return;
   stm_bridge = false;
   stm_link_ver = 0;  // the STM32 app may be new: learn the link version again
@@ -2426,7 +2426,7 @@ void odrive_printErrorNames(uint32_t errors) {
 void setup() {
   LastState prev_state{};  // last_state of the boot before (valid when magic == LAST_STATE_MAGIC); stack, not static RAM
   // The ESP32 TX line to the STM32 (GPIO17) high at once: a low glitch while the ESP32 starts can
-  // lock a blank STM32's ROM loader on a wrong baud rate (STM32 bootload coordinator, Rx-B).
+  // lock a blank STM32's ROM loader on a wrong baud rate (bench test).
   pinMode(17, OUTPUT);
   digitalWrite(17, HIGH);
 #ifdef BOOT_TRACE
@@ -2542,8 +2542,8 @@ void setup() {
 
   TRACE(5);
   // MPU6050: the main-branch serviceMpu() (top of this file) owns it: init, calibration, one sample per
-  // loop. His gyro yaw-rate steering needs it; with no MPU his lock keeps the motors off. The log
-  // reads the same object (mpu_ok follows his gyro_ready). Merge of f10cd31, 2026-10-11.
+  // loop. The main-branch gyro yaw-rate steering needs it; with no MPU its lock keeps the motors off. The log
+  // reads the same object (mpu_ok follows gyro_ready). Main branch f10cd31.
 
   if (!imu_halt) {
   // Install TWAI before allocating RMT and STM32 GPIO interrupts.
@@ -2592,7 +2592,7 @@ void setup() {
     espnowStart();  // ESP-NOW Setup
   }
   TRACE(11);
-  enableLoopWDT();  // loop() must run at least each 5 s (task watchdog, panic restart), as on Rx-B
+  enableLoopWDT();  // loop() must run at least each 5 s (task watchdog, panic restart), as in the monitor role
   boot_setup_ms = millis();
   usbOut.printf("SETUP ms=%lu\n", (unsigned long)boot_setup_ms);  // startup time: nothing above waits for a peer
 }
@@ -2611,7 +2611,7 @@ void loop() {
     mark(SEC_UPDATE);
     // Update mode: from "ota begin" the board serves only USB and the update. No STM32 handling,
     // no telemetry, no radio, no flash log, no autopilot: a busy loop and a full output path made
-    // the upload fail and the host lose the board (2026-10-09 09:28). Ends with the restart into
+    // the upload fail and the host lose the board (bench test). Ends with the restart into
     // the new image, or 120 s after the last "ota" line.
     if (millis() - update_last_ms < 120000) {
       usb_ota::service();
@@ -2973,7 +2973,7 @@ void loop() {
       loop_exec_count = 0;
     } else {
       // Heartbeat: keeps the USB link busy (an idle ESP32-S2 USB link can stop for good, see
-      // RxPortd archive/2026-10-10_history/USB_INCIDENTS.md) and shows that loop() runs and STM32 packets arrive.
+      // bench tests) and shows that loop() runs and STM32 packets arrive.
       static uint32_t hb_last_packets = 0;
       if (safe_mode) usbOut.printf("SAFE MODE after %lu crash resets: no telemetry, no ESP-NOW\n", (unsigned long)crash_count);
       if (imu_halt) usbOut.println("IMU HALT: no drive (MPU6050 failed at start-up, imu_required=true)");
@@ -4369,7 +4369,7 @@ void telemetryService(){
   // only while the vehicle stands still; TELEMLOG_FLASH_ERASED_AHEAD sectors are kept ready for
   // driving. "erase off" (bench) blocks them, so that a test measures without the erase losses.
   // At most one erase each 2 s: 48 erases in a row after a boot kept loop() slow for a minute,
-  // and a USB host lost the busy board (bench test 09:28).
+  // and a USB host lost the busy board (bench test).
   static uint32_t last_erase_ok = 0;
   const uint32_t now_ms = millis();
   // 0.5.54 (design choice, 2026-10-12): a flash erase stalls the CPU about 50 ms. It runs only while the motors are

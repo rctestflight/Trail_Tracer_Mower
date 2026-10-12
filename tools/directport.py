@@ -1,7 +1,6 @@
-"""Copy of RxPortd/directport.py (the bench tools and the user tools share it; change it there first).
-A board's COM port opened directly, for a PC with no bench daemon. It answers the
+"""A board's COM port opened directly, for a PC with no bench daemon. It answers the
 same calls as the daemon's HTTP API (/status, /write?nl=1, /lines), so a tool runs unchanged on it.
-The rules are the daemon's (RxPortd archive/2026-10-10_history/USB_INCIDENTS.md 11-14):
+The rules (from bench tests):
   - open 2 s after the port appears; one open only: a failed open sets "fault" until the port
     leaves and returns (no retry runs: they made Windows stop enumerating the port);
   - after a port error (a board restart), one new open when the port is back;

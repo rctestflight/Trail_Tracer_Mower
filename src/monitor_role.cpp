@@ -1,14 +1,14 @@
 // Monitor role: PC-tethered ESP-NOW transceiver (from Trail-Tracer-Rx-Monitor 0.4.3, a633bff).
 // Entered by the USB command "monitor" in the vehicle role, for one boot: every restart (including
 // "restart", the USB guard and RST!) starts the vehicle role again, and the PC sends "monitor" again.
-// Rx-B to PC, one line per record, first token = type:
+// Monitor to PC, one line per record, first token = type:
 //   R <rx_us> <src_mac> <len> <hex>   each received frame
 //   Q <us> <dst_mac> <len> <err>      at the esp_now_send call (err 0 = ESP_OK)
 //   X <us> <dst_mac> <ok|fail>        from the send callback
 //   I <us> <text>                     banner, 1 s heartbeat, errors
 //   I <us> rssi <mac> n= avg= min= max=   each second, per sender heard: signal strength in dBm
 //   CFG <result> <text>               answer to get, set, save (as the vehicle role)
-// PC to Rx-B:
+// PC to monitor:
 //   S <dst_mac> <hex> [*<crc32>]      send one frame (ff:ff:ff:ff:ff:ff = broadcast); with the
 //                                     CRC-32 of "<dst_mac> <hex>", a damaged line is refused
 //   V                                 print the banner again
@@ -25,8 +25,8 @@
 // The board sends a MON broadcast (0x44) once a second: the rovers learn that a monitor hears them.
 // Update mode (as the vehicle role): from "ota begin" the board prints no R, Q or X lines (the
 // frames are counted as updskip) and serves only USB and the update, until the restart into the
-// new image or 120 s after the last "ota" line. Rx-B restarted in the middle of updates while it
-// printed about 10 KB/s of radio lines (2026-10-10 11:26, 11:32).
+// new image or 120 s after the last "ota" line. A monitor restarted in the middle of updates while it
+// printed about 10 KB/s of radio lines (bench test).
 // Back to the vehicle role by itself: a restart when the PC goes (USB not mounted or suspended for
 // 2 s, or USB never up within 10 s of the monitor start).
 // LED (GPIO1, active LOW): a 20 ms flash per received frame while a PC has the board enumerated;

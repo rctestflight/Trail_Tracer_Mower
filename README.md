@@ -22,7 +22,6 @@ Outside rover mode, the vehicle moves as on `main`. The guide lists each differe
 | `lib/rover_autopilot/README.md` | The rover mode autopilot and its simulator results |
 | `lib/rover_telemetry/README.md` | The telemetry records |
 | `test/` | Host tests, simulator test bench and bench results |
-| `archive/` | Old files and old bench results. History only |
 
 ## Build
 

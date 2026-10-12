@@ -208,7 +208,7 @@ Bench only: `timing on|off`, `thru`, `loss`, `send`, `erase off|on`, `flashtest`
 
 ## 11. Verified on the bench, and not verified
 
-Bench Rx boards with STM32s at 100 packets a second, no vehicle, no ODrive, no IMU (2026-10-10). Older results: `archive/2026-10-10_guide_bench_history.md`.
+Bench Rx boards with STM32s at 100 packets a second, no vehicle, no ODrive, no IMU.
 
 | Measurement | Value |
 |---|---|

@@ -1,21 +1,16 @@
-"""Copy of RxPortd/ota_upload.py (change it there first). On a PC with no bench daemon: python tools/ota_upload.py COM7
-firmware.bin --expect rover-firmware (needs pyserial; tools/directport.py and tools/benchlog.py).
-
-Update a board's firmware by itself (OTA over USB), through its RxPortd daemon. No ROM download
-mode, no button, no power cycle. Needs firmware with the "ota" commands (Trail_Tracer_Mower
-lib/usb_ota, or the rover's older built-in version).
+"""Update a rover's firmware over USB (OTA), on a COM port: python tools/ota_upload.py COM7 firmware.bin
+--expect rover-firmware (needs pyserial, tools/directport.py and tools/benchlog.py). The PlatformIO Upload
+button runs it for a board with this firmware (tools/upload_auto.py).
+No ROM download mode, no button, no power cycle. Needs firmware with the "ota" commands (lib/usb_ota).
   1 checks: ESP image magic, chip ID 2 (ESP32-S2), app descriptor; the --expect text is in the image
-  2 risk.risky(): no other risky action runs, and every other board works (the way back)
-  3 "ota begin <size> <sha256> confirm", then "ota w <offset> <hex>" lines of 512 bytes, one answer
+  2 "ota begin <size> <sha256> confirm", then "ota w <offset> <hex>" lines of 512 bytes, one answer
     each. A lost or bad answer: "ota status" gives the offset, and the upload continues from it; a
-    daemon reopen (USB re-enumeration) is waited for, then the same.
-  4 "ota end": the board checks size and SHA-256, selects the new slot, restarts with the USB detach
-  5 back on USB: "ota status", then "ota confirm" (proves the link both ways on the new image), then
+    port reopen (USB re-enumeration) is waited for, then the same.
+  3 "ota end": the board checks size and SHA-256, selects the new slot, restarts with the USB detach
+  4 back on USB: "ota status", then "ota confirm" (proves the link both ways on the new image), then
     "ota status" again. An image with the confirm gate that gets no confirm in 120 s returns to the
     previous image by itself.
-Usage: python ota_upload.py <board> <firmware.bin> [--expect rover-firmware]
-       <board>: a name in boards.json (through its RxPortd daemon), or a COM port (COM7) on a PC with
-       no RxPortd: directport.py opens it with the same rules; no risk lock (no second board)."""
+Usage: python ota_upload.py <COM port> <firmware.bin> [--expect rover-firmware]"""
 import argparse
 import hashlib
 import zlib
@@ -56,18 +51,12 @@ err = image_error()
 if err:
     post(f"{board}: OTA {fw.name} refused: {err}")
     raise SystemExit(1)
-direct = None
-if board.upper().startswith("COM"):
-    # A PC with no bench daemon: the COM port directly, with the daemon's open and close rules.
-    # No risk lock: there is no second board on such a PC.
-    from directport import DirectPort
-    direct = DirectPort(board.upper())
-    url = None
-    import contextlib
-    risky = lambda b, act: contextlib.nullcontext()  # noqa: E731
-else:
-    from risk import BOARDS, risky  # bench only: boards.json and the risk lock
-    url = f"http://127.0.0.1:{BOARDS[board]['http']}"
+from directport import DirectPort  # noqa: E402
+
+direct = DirectPort(board.upper() if board.lower().startswith("com") else board)  # the COM port, opened and closed with the safe rules of directport.py
+url = None
+import contextlib  # noqa: E402
+risky = lambda b, act: contextlib.nullcontext()  # noqa: E731
 
 
 def chunk_line(off, chunk):
@@ -141,7 +130,7 @@ def written_now():
 def quiet_check(sec=10.0):
     """The board must be regular before an update: at least 9 heartbeat lines (rover "HB", monitor
     "beat") in 10 s, no gap over 1.6 s. A busy board (flash erases after a boot) lost the upload and
-    then the host lost the board (2026-10-09 09:28)."""
+    then the host lost the board (bench test)."""
     n0 = api("/status")["next"]
     time.sleep(sec)
     lines = api(f"/lines?since={n0}&max=5000")["lines"]
@@ -163,7 +152,7 @@ with risky(board, f"OTA {fw.name}"):
     t0 = time.time()
     nxt = api("/status")["next"]
     # A line can lose bytes on the USB input and still be valid hex: the board then writes a short,
-    # wrong chunk (Rx-B 08:22: written counts 6656, 148992, 168960, then sha256 mismatch). So the
+    # wrong chunk (bench test: written counts off a chunk end, then a sha256 mismatch). So the
     # upload goes on only when the board's count is exactly at a chunk end that this tool sent:
     # count = off + chunk (answer lost) goes on; count = off (line lost) sends the chunk again;
     # any other count aborts, and the upload starts again from 0 (at most 3 attempts).
@@ -203,11 +192,11 @@ with risky(board, f"OTA {fw.name}"):
     post(f"{board}: {r} ({time.time() - t0:.0f} s, {resumes} resumes)")
     if r and not r.startswith("OTA done"):
         raise SystemExit("stop")
-    # No answer: the board can restart before its "OTA done" line reaches the PC (Rx-B 08:43).
+    # No answer: the board can restart before its "OTA done" line reaches the PC (bench test).
     # "ota status" after the restart tells: state=1 gate=1 is the new image waiting for confirm.
     t1 = time.time()
     # Back means: the new boot line, then fresh data. Fresh data alone can still come from the old
-    # image before its restart (2026-10-09 18:04: "back" after 1.0 s, the status went to the old image).
+    # image before its restart (bench test: "back" after 1.0 s, the status came from the old image).
     n_boot = nxt
     booted = False
     while time.time() - t1 < 30 and not booted:

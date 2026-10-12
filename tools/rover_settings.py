@@ -1,4 +1,4 @@
-r"""Rover settings over USB, for a PC with no station and no RxPortd (needs pyserial; tools/directport.py
+r"""Rover settings over USB, for a PC with no station and no bench daemon (needs pyserial; tools/directport.py
 opens the COM port with the bench's safe rules). The same commands as the station's settings page.
 
   python tools/rover_settings.py COM7 list                 all keys and values

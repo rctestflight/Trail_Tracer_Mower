@@ -68,7 +68,6 @@ A shipped Rx (`TrailTracer` `main`, d4f8135) sends the status text only, and onl
 - The monitor prints every frame as an R line, with no sender filter. A status text from a shipped unit is byte-identical to the rover role's status text (bench test 2026-10-10: 512 frames of a board on V1.0 and 518 frames of a board on 0.5.22, all 15 tokens in the same format).
 - The RSSI line covers every ESP-NOW sender, also one that sends only text.
 - Every shipped unit has vehicle ID 1 unless the owner changed it. The PC tells vehicles apart by MAC.
-- Rx-C on the bench is a shipped unit: production V1.0, vehicle ID 3, ESP-NOW on.
 
 ## CMD and ACK
 

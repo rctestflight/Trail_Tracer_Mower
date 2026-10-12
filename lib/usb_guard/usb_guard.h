@@ -1,18 +1,18 @@
 // usb_guard: USB CDC protection for ESP32-S2 Arduino firmware (arduino-esp32 2.0.17, TinyUSB 0.16).
 // 1. USBCDC::_onLineState runs a reboot state machine on DTR/RTS changes: a host close that leaves
 //    DTR off / RTS on is step 1 and clears Serial's "connected"; steps 3 and 4 enter the bootloader
-//    and left the USB dead (RxPortd archive/2026-10-10_history/USB_INCIDENTS.md 7, 8). begin() turns the machine off.
+//    and left the USB dead (bench tests). begin() turns the machine off.
 // 2. restart(): a restart with a 300 ms USB detach first, so the host sees the board leave.
 // 3. service(): the USB output stop. The board runs and takes PC input, the port is open (DTR on),
 //    but no USB transmit transfer completes, so the 64-byte TX FIFO stays full and all output is
-//    lost (monitor 0.5.9 diagnostics, Rx-B 2026-10-10 14:26: 0 TX-complete events in 17 s; a
+//    lost (monitor diagnostics: no TX-complete events for many seconds; a
 //    healthy board has about 200 a second). Detection: TX FIFO full, port open, mounted, not
 //    suspended, no TX-complete event for STUCK_MS. Action: a USB reconnect with no restart (D+
 //    pull-up off for DETACH_MS, then on; the host enumerates the board again). Non-blocking, so a
 //    moving vehicle keeps its drive commands. A host that opens the port and stops reading also
 //    fills the FIFO; it gets a reconnect each STUCK_MS + DETACH_MS + GRACE_MS.
 // Removed 2026-10-10 (0.5.8): the self-restarts after a transmit stall and after a lost host. They
-// restarted Rx-B during updates, and a parked vehicle after a USB unplug.
+// restarted a monitor board during updates, and a parked vehicle after a USB unplug.
 #pragma once
 #include <Arduino.h>
 #include "esp32-hal-tinyusb.h"

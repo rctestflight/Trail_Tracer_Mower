@@ -1,5 +1,4 @@
-"""Prints one time-stamped line. The bench copy of this module (RxPortd/benchlog.py) also writes the
-bench log; a PC with no bench daemon has no bench log."""
+"""Prints one time-stamped line (the progress lines of ota_upload.py)."""
 import datetime as dt
 
 
