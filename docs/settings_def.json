@@ -1,0 +1,932 @@
+{
+  "version": 6,
+  "about": "Rover settings definition, owned by Trail_Tracer_Mower (docs/settings_def.json). The PC uses an unchanged copy. Words from the PC draft (Trail-Tracer-PC-Telemetry 22deeea); values checked against src/usb_msc_fat.cpp (defaults, limits) and src/main.cpp (STATIONARY_KEYS). Format: Trail-Tracer-PC-Telemetry docs/control_api.md, section 3. 'list' ends 'end <n> def 6'. Version 6: groups in user order ('groups'), a 'label' per setting, DSP settings (dsp_*) with read-only values in effect (dsp_*_eff, 'readonly': true; 'effect' names the _eff key of a setting).",
+  "groups": [
+    {
+      "name": "Vehicle",
+      "advanced": false,
+      "description": "Vehicle number, battery and the motion sensor"
+    },
+    {
+      "name": "Wire and sensors",
+      "advanced": false,
+      "description": "Which wire signal the vehicle follows, and with which sensors"
+    },
+    {
+      "name": "Speed",
+      "advanced": false,
+      "description": "Throttle for wire following and for the slow approach"
+    },
+    {
+      "name": "Steering",
+      "advanced": false,
+      "description": "How hard the vehicle steers back to the wire"
+    },
+    {
+      "name": "Steering: gyro",
+      "advanced": false,
+      "description": "Turn-rate control with the gyro"
+    },
+    {
+      "name": "Beacons",
+      "advanced": false,
+      "description": "Beacon detection and the slow approach after a beacon"
+    },
+    {
+      "name": "Stuck detection",
+      "advanced": false,
+      "description": "When the vehicle counts as stuck"
+    },
+    {
+      "name": "Swerve",
+      "advanced": false,
+      "description": "Side-to-side swerve while the vehicle follows the wire"
+    },
+    {
+      "name": "Charging",
+      "advanced": false,
+      "description": "Charge limits"
+    },
+    {
+      "name": "Rover mode",
+      "advanced": false,
+      "description": "The autopilot: bounce inside the wire loop, go home to charge"
+    },
+    {
+      "name": "Radio and log",
+      "advanced": false,
+      "description": "Radio link, telemetry and the on-board log"
+    },
+    {
+      "name": "Signal processing",
+      "advanced": false,
+      "description": "Sensor board: update period, sensors and frequency slots"
+    },
+    {
+      "name": "Signal processing: advanced",
+      "advanced": true,
+      "description": "Sensor board details; change them only for a test"
+    },
+    {
+      "name": "Servo outputs",
+      "advanced": true,
+      "description": "Pulse limits of the four servo outputs"
+    }
+  ],
+  "settings": {
+    "vehicleID": {
+      "type": "int",
+      "min": 0,
+      "max": 255,
+      "default": 1,
+      "live": true,
+      "group": "Vehicle",
+      "description": "Vehicle number on the screen",
+      "label": "Vehicle number"
+    },
+    "battery_cells": {
+      "type": "int",
+      "min": 1,
+      "max": 12,
+      "default": 2,
+      "live": true,
+      "group": "Vehicle",
+      "description": "Battery cells in series (2 for a 2S battery); the power graph scales from it",
+      "label": "Battery cells"
+    },
+    "imu_required": {
+      "type": "bool",
+      "default": true,
+      "live": false,
+      "group": "Vehicle",
+      "description": "No effect since firmware 0.5.40: with no working IMU, the gyro lock keeps the motors off (the main branch f10cd31). Kept for old config files",
+      "label": "Motion sensor required"
+    },
+    "usb_drive": {
+      "type": "bool",
+      "default": true,
+      "live": false,
+      "group": "Vehicle",
+      "label": "USB drive for config.json",
+      "description": "true (default): the rover shows config.json as a USB drive on the PC. false: no USB drive; change settings by command or in the telemetry program. Takes effect at the next start."
+    },
+    "rx_channel": {
+      "type": "int",
+      "min": 1,
+      "max": 5,
+      "default": 1,
+      "live": false,
+      "group": "Wire and sensors",
+      "description": "Transmitter channel that the Rx listens to",
+      "label": "Wire channel"
+    },
+    "enable_sensor_2": {
+      "type": "bool",
+      "default": false,
+      "live": false,
+      "group": "Wire and sensors",
+      "description": "Use sensor 2 (it always listens on transmitter channel 1)",
+      "label": "Use sensor 2"
+    },
+    "CRUISE_THROTTLE": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 1650,
+      "live": true,
+      "group": "Speed",
+      "description": "Throttle pulse when the vehicle follows the wire",
+      "label": "Cruise throttle"
+    },
+    "CREEP_THROTTLE": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 1620,
+      "live": true,
+      "group": "Speed",
+      "description": "Throttle pulse for the slow approach",
+      "label": "Slow throttle"
+    },
+    "pid_direction": {
+      "type": "bool",
+      "default": false,
+      "live": false,
+      "group": "Steering",
+      "description": "Steering direction: true reverses it",
+      "label": "Reverse steering"
+    },
+    "kp": {
+      "type": "float",
+      "min": 0,
+      "default": 3.0,
+      "live": true,
+      "group": "Steering",
+      "description": "Proportional part of the steering PID",
+      "label": "Steering gain (P)"
+    },
+    "ki": {
+      "type": "float",
+      "min": 0,
+      "default": 0.0,
+      "live": true,
+      "group": "Steering",
+      "description": "Integral part of the steering PID",
+      "label": "Steering gain (I)"
+    },
+    "kd": {
+      "type": "float",
+      "min": 0,
+      "default": 0.0,
+      "live": true,
+      "group": "Steering",
+      "description": "Derivative part of the steering PID",
+      "label": "Steering gain (D)"
+    },
+    "steering_rate_kp": {
+      "type": "float",
+      "min": 0,
+      "default": 0.02,
+      "live": true,
+      "group": "Steering: gyro",
+      "description": "Proportional part of the yaw-rate steering PID (gyro feedback; output -1..1)",
+      "label": "Gyro steering gain (P)"
+    },
+    "steering_rate_ki": {
+      "type": "float",
+      "min": 0,
+      "default": 0.01,
+      "live": true,
+      "group": "Steering: gyro",
+      "description": "Integral part of the yaw-rate steering PID",
+      "label": "Gyro steering gain (I)"
+    },
+    "steering_rate_kd": {
+      "type": "float",
+      "min": 0,
+      "default": 0.0,
+      "live": true,
+      "group": "Steering: gyro",
+      "description": "Derivative part of the yaw-rate steering PID",
+      "label": "Gyro steering gain (D)"
+    },
+    "steering_rate_pid_direction": {
+      "type": "bool",
+      "default": false,
+      "live": true,
+      "group": "Steering: gyro",
+      "description": "Yaw-rate PID direction: true reverses it",
+      "label": "Reverse gyro steering"
+    },
+    "steering_rate_max_dps": {
+      "type": "float",
+      "min": 0.001,
+      "max": 500,
+      "default": 90.0,
+      "live": true,
+      "group": "Steering: gyro",
+      "description": "Yaw rate in deg/s at full steering command",
+      "label": "Turn rate at full steer"
+    },
+    "BTxFollowChannel": {
+      "type": "int",
+      "min": 0,
+      "default": 0,
+      "live": false,
+      "group": "Beacons",
+      "description": "Beacon channel to follow (0 = none)",
+      "max": 2,
+      "label": "Beacon channel to follow"
+    },
+    "BTxThreshold": {
+      "type": "int",
+      "default": 170,
+      "live": true,
+      "group": "Beacons",
+      "description": "Beacon detection threshold",
+      "min": 11,
+      "max": 2000,
+      "label": "Beacon threshold"
+    },
+    "BTxAccelRate": {
+      "type": "float",
+      "default": 0.5,
+      "live": true,
+      "group": "Beacons",
+      "description": "Acceleration after a beacon",
+      "min": 0.3,
+      "label": "Acceleration after a beacon"
+    },
+    "BTxCreepDuration": {
+      "type": "int",
+      "unit": "s",
+      "min": 1,
+      "default": 4,
+      "live": true,
+      "group": "Beacons",
+      "description": "Time of the slow approach after a beacon",
+      "label": "Slow approach time"
+    },
+    "stuck_threshold_mm": {
+      "type": "float",
+      "unit": "mm",
+      "min": 1.0,
+      "default": 1.0,
+      "live": true,
+      "group": "Stuck detection",
+      "description": "Smallest movement that counts as not stuck",
+      "label": "Stuck: smallest movement"
+    },
+    "stuck_timeout_ms": {
+      "type": "float",
+      "unit": "ms",
+      "min": 1000,
+      "default": 20000,
+      "live": true,
+      "group": "Stuck detection",
+      "description": "Time below that movement before the vehicle is stuck",
+      "label": "Stuck: time"
+    },
+    "SineSwerveAmplitude": {
+      "type": "int",
+      "min": 0,
+      "default": 0,
+      "live": true,
+      "group": "Swerve",
+      "description": "Swerve size to each side (0 = off)",
+      "unit": "mm",
+      "max": 255,
+      "label": "Swerve size"
+    },
+    "SineSwerveFrequency": {
+      "type": "int",
+      "min": 1,
+      "default": 15,
+      "live": true,
+      "group": "Swerve",
+      "description": "Seconds for one swerve cycle",
+      "unit": "s",
+      "max": 255,
+      "label": "Swerve cycle time"
+    },
+    "CHARGE_VBATT_STOP": {
+      "type": "float",
+      "unit": "V",
+      "min": 6,
+      "default": 11.9,
+      "live": false,
+      "group": "Charging",
+      "description": "End the charge at this battery voltage. STM32 limit 16.0 V",
+      "max": 16,
+      "label": "Charge end voltage"
+    },
+    "CHARGE_MAX_CURRENT": {
+      "type": "float",
+      "unit": "A",
+      "min": 0.1,
+      "default": 6.0,
+      "live": false,
+      "group": "Charging",
+      "description": "Stop the charge above this current, then wait 10 s. STM32 limit 6.0 A",
+      "max": 6,
+      "label": "Charge current limit"
+    },
+    "CHARGE_MAX_SECONDS": {
+      "type": "int",
+      "unit": "s",
+      "min": 5,
+      "default": 180,
+      "live": false,
+      "group": "Charging",
+      "description": "Half the longest charge: the STM32 stops a charge after 2 x this value (at most 3600 s)",
+      "max": 1800,
+      "label": "Charge time limit (half)"
+    },
+    "rover_enabled": {
+      "type": "bool",
+      "default": false,
+      "live": false,
+      "group": "Rover mode",
+      "description": "In autonomous drive mode, the autopilot drives, not the wire follower",
+      "label": "Rover mode on"
+    },
+    "rover_goal_cw": {
+      "type": "bool",
+      "default": true,
+      "live": false,
+      "group": "Rover mode",
+      "description": "Direction along the wire into the charger: true = clockwise seen from above",
+      "label": "Charger direction clockwise"
+    },
+    "rover_sensor_height_mm": {
+      "type": "float",
+      "unit": "mm",
+      "min": 30,
+      "default": 150,
+      "live": false,
+      "group": "Rover mode",
+      "description": "Distance of the sensor centre above the wire",
+      "max": 500,
+      "label": "Sensor height"
+    },
+    "rover_full_speed_mps": {
+      "type": "float",
+      "unit": "m/s",
+      "min": 0.1,
+      "default": 1.0,
+      "live": false,
+      "group": "Rover mode",
+      "description": "Ground speed at full drive command (measure it)",
+      "max": 5,
+      "label": "Speed at full drive"
+    },
+    "rover_full_yaw_rate_dps": {
+      "type": "float",
+      "unit": "\u00b0/s",
+      "min": 10,
+      "default": 115,
+      "live": false,
+      "group": "Rover mode",
+      "description": "Turn rate in place at full steer command (measure it)",
+      "max": 720,
+      "label": "Turn rate at full steer (rover)"
+    },
+    "rover_seek_vbatt": {
+      "type": "float",
+      "unit": "V",
+      "min": 0,
+      "default": 0,
+      "live": true,
+      "group": "Rover mode",
+      "description": "Go to the charger below this battery voltage (0 = off, else 6 to 26)",
+      "max": 26,
+      "label": "Go home below this voltage"
+    },
+    "rover_seek_after_s": {
+      "type": "int",
+      "unit": "s",
+      "min": 0,
+      "default": 600,
+      "live": true,
+      "group": "Rover mode",
+      "description": "Go to the charger this long after the last charge (0 = off)",
+      "label": "Go home after this time"
+    },
+    "rover_entry_btx": {
+      "type": "int",
+      "min": 0,
+      "default": 1,
+      "live": false,
+      "group": "Rover mode",
+      "description": "Beacon channel before the charger: slow approach (0 = none)",
+      "max": 2,
+      "label": "Beacon before the charger"
+    },
+    "rover_exit_btx": {
+      "type": "int",
+      "min": 0,
+      "default": 2,
+      "live": false,
+      "group": "Rover mode",
+      "description": "Beacon channel after the charger exit: the vehicle turns back if it meets this beacon first (0 = none)",
+      "max": 2,
+      "label": "Beacon after the charger"
+    },
+    "rover_lost_timeout_s": {
+      "type": "int",
+      "unit": "s",
+      "min": 0,
+      "default": 30,
+      "live": true,
+      "group": "Rover mode",
+      "description": "The autopilot halts after this long without the wire (0 = never)",
+      "label": "Stop after wire lost for"
+    },
+    "rover_speed_limit_mps": {
+      "type": "float",
+      "unit": "m/s",
+      "min": 0,
+      "default": 0.5,
+      "live": true,
+      "group": "Rover mode",
+      "description": "Highest autopilot speed (0 = the simulator speeds)",
+      "max": 5,
+      "label": "Rover speed limit"
+    },
+    "espnow_enabled": {
+      "type": "bool",
+      "default": false,
+      "live": false,
+      "group": "Radio and log",
+      "description": "Telemetry messages over ESP-NOW. If telemetry_enabled is also false, the vehicle takes no commands. The vehicle refuses false over ESP-NOW",
+      "refuse": [
+        false
+      ],
+      "label": "Radio messages"
+    },
+    "telemetry_rate_hz": {
+      "type": "int",
+      "min": 1,
+      "max": 100,
+      "values": [
+        100,
+        50,
+        25,
+        20,
+        10,
+        5,
+        4,
+        2,
+        1
+      ],
+      "default": 20,
+      "live": true,
+      "group": "Radio and log",
+      "description": "Vehicle log sample rate in Hz. Below 100 Hz an anti-alias filter (two moving averages) runs first. Other values go to the nearest allowed rate",
+      "label": "Log rate"
+    },
+    "espnow_tx_power_dbm": {
+      "type": "float",
+      "min": 2,
+      "max": 19.5,
+      "default": 19.5,
+      "live": true,
+      "group": "Radio and log",
+      "description": "Radio transmit power in dBm, 0.25 dB steps. 19.5 is the radio's maximum. A low power over the radio can lose the link to this vehicle",
+      "label": "Radio power"
+    },
+    "telemetry_enabled": {
+      "type": "bool",
+      "default": true,
+      "live": false,
+      "group": "Radio and log",
+      "description": "Vehicle log over ESP-NOW. If espnow_enabled is also false, the vehicle takes no commands. The vehicle refuses false over ESP-NOW",
+      "refuse": [
+        false
+      ],
+      "label": "Telemetry"
+    },
+    "cmd_key": {
+      "type": "int",
+      "min": 0,
+      "default": 0,
+      "live": false,
+      "remote": false,
+      "group": "Radio and log",
+      "description": "Fleet password; 0 = blank (accepts key 0); USB or config.json only",
+      "label": "Fleet password"
+    },
+    "dsp_frame_period_us": {
+      "type": "int",
+      "min": 3600,
+      "max": 655350,
+      "unit": "us",
+      "default": 10000,
+      "live": false,
+      "group": "Signal processing",
+      "label": "Update period",
+      "description": "Time between two position updates from the sensor board. A longer period averages more signal: less noise, slower response. The board uses the nearest period that it can make. Default 10000 us (10 ms); the shortest setting is 3600 us.",
+      "effect": "dsp_frame_period_us_eff"
+    },
+    "dsp_frame_period_us_eff": {
+      "type": "int",
+      "readonly": true,
+      "group": "Signal processing",
+      "label": "Update period (in effect)",
+      "description": "The value that the sensor board uses now (its answer). Empty until the board answers; it can differ from the setting when the board rounds or limits it.",
+      "unit": "us"
+    },
+    "dsp_sensors": {
+      "type": "int",
+      "values": [
+        1,
+        2
+      ],
+      "default": 2,
+      "live": false,
+      "group": "Signal processing",
+      "label": "Sensors on the board",
+      "description": "Number of wire sensors that the sensor board reads: 1 or 2. With 1 sensor, the board reads it faster.",
+      "effect": "dsp_sensors_eff"
+    },
+    "dsp_sensors_eff": {
+      "type": "int",
+      "readonly": true,
+      "group": "Signal processing",
+      "label": "Sensors on the board (in effect)",
+      "description": "The value that the sensor board uses now (its answer). Empty until the board answers; it can differ from the setting when the board rounds or limits it."
+    },
+    "dsp_bin_hz_0": {
+      "type": "float",
+      "min": 0,
+      "max": 120000,
+      "unit": "Hz",
+      "default": 53333.3,
+      "live": false,
+      "group": "Signal processing",
+      "label": "Frequency slot 1",
+      "description": "Frequency that slot 1 listens to, in Hz; 0 = slot off. Default: transmitter channel 1 (53333.3 Hz). Slots 1-5 are the transmitter channels 1-5.",
+      "effect": "dsp_bin_hz_0_eff"
+    },
+    "dsp_bin_hz_0_eff": {
+      "type": "float",
+      "readonly": true,
+      "group": "Signal processing",
+      "label": "Frequency slot 1 (in effect)",
+      "description": "The value that the sensor board uses now (its answer). Empty until the board answers; it can differ from the setting when the board rounds or limits it.",
+      "unit": "Hz"
+    },
+    "dsp_bin_hz_1": {
+      "type": "float",
+      "min": 0,
+      "max": 120000,
+      "unit": "Hz",
+      "default": 55315.5,
+      "live": false,
+      "group": "Signal processing",
+      "label": "Frequency slot 2",
+      "description": "Frequency that slot 2 listens to, in Hz; 0 = slot off. Default: transmitter channel 2 (55315.5 Hz). Slots 1-5 are the transmitter channels 1-5.",
+      "effect": "dsp_bin_hz_1_eff"
+    },
+    "dsp_bin_hz_1_eff": {
+      "type": "float",
+      "readonly": true,
+      "group": "Signal processing",
+      "label": "Frequency slot 2 (in effect)",
+      "description": "The value that the sensor board uses now (its answer). Empty until the board answers; it can differ from the setting when the board rounds or limits it.",
+      "unit": "Hz"
+    },
+    "dsp_bin_hz_2": {
+      "type": "float",
+      "min": 0,
+      "max": 120000,
+      "unit": "Hz",
+      "default": 51323.2,
+      "live": false,
+      "group": "Signal processing",
+      "label": "Frequency slot 3",
+      "description": "Frequency that slot 3 listens to, in Hz; 0 = slot off. Default: transmitter channel 3 (51323.2 Hz). Slots 1-5 are the transmitter channels 1-5.",
+      "effect": "dsp_bin_hz_2_eff"
+    },
+    "dsp_bin_hz_2_eff": {
+      "type": "float",
+      "readonly": true,
+      "group": "Signal processing",
+      "label": "Frequency slot 3 (in effect)",
+      "description": "The value that the sensor board uses now (its answer). Empty until the board answers; it can differ from the setting when the board rounds or limits it.",
+      "unit": "Hz"
+    },
+    "dsp_bin_hz_3": {
+      "type": "float",
+      "min": 0,
+      "max": 120000,
+      "unit": "Hz",
+      "default": 57347.7,
+      "live": false,
+      "group": "Signal processing",
+      "label": "Frequency slot 4",
+      "description": "Frequency that slot 4 listens to, in Hz; 0 = slot off. Default: transmitter channel 4 (57347.7 Hz). Slots 1-5 are the transmitter channels 1-5.",
+      "effect": "dsp_bin_hz_3_eff"
+    },
+    "dsp_bin_hz_3_eff": {
+      "type": "float",
+      "readonly": true,
+      "group": "Signal processing",
+      "label": "Frequency slot 4 (in effect)",
+      "description": "The value that the sensor board uses now (its answer). Empty until the board answers; it can differ from the setting when the board rounds or limits it.",
+      "unit": "Hz"
+    },
+    "dsp_bin_hz_4": {
+      "type": "float",
+      "min": 0,
+      "max": 120000,
+      "unit": "Hz",
+      "default": 49344.6,
+      "live": false,
+      "group": "Signal processing",
+      "label": "Frequency slot 5",
+      "description": "Frequency that slot 5 listens to, in Hz; 0 = slot off. Default: transmitter channel 5 (49344.6 Hz). Slots 1-5 are the transmitter channels 1-5.",
+      "effect": "dsp_bin_hz_4_eff"
+    },
+    "dsp_bin_hz_4_eff": {
+      "type": "float",
+      "readonly": true,
+      "group": "Signal processing",
+      "label": "Frequency slot 5 (in effect)",
+      "description": "The value that the sensor board uses now (its answer). Empty until the board answers; it can differ from the setting when the board rounds or limits it.",
+      "unit": "Hz"
+    },
+    "dsp_bin_hz_5": {
+      "type": "float",
+      "min": 0,
+      "max": 120000,
+      "unit": "Hz",
+      "default": 62500.0,
+      "live": false,
+      "group": "Signal processing",
+      "label": "Frequency slot 6",
+      "description": "Frequency that slot 6 listens to, in Hz; 0 = slot off. Default: 62500 Hz. Slots 1-5 are the transmitter channels 1-5.",
+      "effect": "dsp_bin_hz_5_eff"
+    },
+    "dsp_bin_hz_5_eff": {
+      "type": "float",
+      "readonly": true,
+      "group": "Signal processing",
+      "label": "Frequency slot 6 (in effect)",
+      "description": "The value that the sensor board uses now (its answer). Empty until the board answers; it can differ from the setting when the board rounds or limits it.",
+      "unit": "Hz"
+    },
+    "dsp_bin_hz_6": {
+      "type": "float",
+      "min": 0,
+      "max": 120000,
+      "unit": "Hz",
+      "default": 46875.0,
+      "live": false,
+      "group": "Signal processing",
+      "label": "Frequency slot 7",
+      "description": "Frequency that slot 7 listens to, in Hz; 0 = slot off. Default: 46875 Hz. Slots 1-5 are the transmitter channels 1-5.",
+      "effect": "dsp_bin_hz_6_eff"
+    },
+    "dsp_bin_hz_6_eff": {
+      "type": "float",
+      "readonly": true,
+      "group": "Signal processing",
+      "label": "Frequency slot 7 (in effect)",
+      "description": "The value that the sensor board uses now (its answer). Empty until the board answers; it can differ from the setting when the board rounds or limits it.",
+      "unit": "Hz"
+    },
+    "dsp_bin_hz_7": {
+      "type": "float",
+      "min": 0,
+      "max": 120000,
+      "unit": "Hz",
+      "default": 0.0,
+      "live": false,
+      "group": "Signal processing",
+      "label": "Frequency slot 8",
+      "description": "Frequency that slot 8 listens to, in Hz; 0 = slot off. Default: off. Slots 1-5 are the transmitter channels 1-5.",
+      "effect": "dsp_bin_hz_7_eff"
+    },
+    "dsp_bin_hz_7_eff": {
+      "type": "float",
+      "readonly": true,
+      "group": "Signal processing",
+      "label": "Frequency slot 8 (in effect)",
+      "description": "The value that the sensor board uses now (its answer). Empty until the board answers; it can differ from the setting when the board rounds or limits it.",
+      "unit": "Hz"
+    },
+    "dsp_slow_adc": {
+      "type": "int",
+      "values": [
+        0,
+        1
+      ],
+      "default": 1,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "label": "Battery and charge measurement",
+      "description": "1 = on (default). 0 = off: the board does not charge and does not measure the battery; the sensors get the time.",
+      "effect": "dsp_slow_adc_eff"
+    },
+    "dsp_slow_adc_eff": {
+      "type": "int",
+      "readonly": true,
+      "group": "Signal processing: advanced",
+      "label": "Battery and charge measurement (in effect)",
+      "description": "The value that the sensor board uses now (its answer). Empty until the board answers; it can differ from the setting when the board rounds or limits it."
+    },
+    "dsp_pga": {
+      "type": "int",
+      "values": [
+        -1,
+        0,
+        1,
+        2
+      ],
+      "default": -1,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "label": "Input gain",
+      "description": "-1 = automatic (default). 0, 1, 2 = a fixed gain step for both sensors.",
+      "effect": "dsp_pga_eff"
+    },
+    "dsp_pga_eff": {
+      "type": "int",
+      "readonly": true,
+      "group": "Signal processing: advanced",
+      "label": "Input gain (in effect)",
+      "description": "The value that the sensor board uses now (its answer). Empty until the board answers; it can differ from the setting when the board rounds or limits it."
+    },
+    "dsp_lanes": {
+      "type": "int",
+      "min": 0,
+      "max": 3,
+      "default": 2,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "label": "Sensor lanes",
+      "description": "Which sensor feeds which data lane: 2 (default) = lane 1 sensor 1, lane 2 sensor 2. With 1 sensor, bit 0 selects the sensor.",
+      "effect": "dsp_lanes_eff"
+    },
+    "dsp_lanes_eff": {
+      "type": "int",
+      "readonly": true,
+      "group": "Signal processing: advanced",
+      "label": "Sensor lanes (in effect)",
+      "description": "The value that the sensor board uses now (its answer). Empty until the board answers; it can differ from the setting when the board rounds or limits it."
+    },
+    "dsp_xy_mask": {
+      "type": "int",
+      "min": 0,
+      "max": 255,
+      "default": 0,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "label": "Position slots (bit mask)",
+      "description": "Slots that give x/y positions in place of signal strengths: bit 0 = slot 1, bit 1 = slot 2, ... bit 7 = slot 8. 0 (default) = none.",
+      "effect": "dsp_xy_mask_eff"
+    },
+    "dsp_xy_mask_eff": {
+      "type": "int",
+      "readonly": true,
+      "group": "Signal processing: advanced",
+      "label": "Position slots (bit mask) (in effect)",
+      "description": "The value that the sensor board uses now (its answer). Empty until the board answers; it can differ from the setting when the board rounds or limits it."
+    },
+    "PWM_OUT_1_DEFAULT": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 1500,
+      "live": false,
+      "group": "Servo outputs",
+      "description": "Centre pulse of output 1",
+      "label": "Output 1 centre pulse"
+    },
+    "PWM_OUT_1_MIN": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 1000,
+      "live": false,
+      "group": "Servo outputs",
+      "description": "Lowest pulse of output 1",
+      "label": "Output 1 lowest pulse"
+    },
+    "PWM_OUT_1_MAX": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 2000,
+      "live": false,
+      "group": "Servo outputs",
+      "description": "Highest pulse of output 1",
+      "label": "Output 1 highest pulse"
+    },
+    "PWM_OUT_2_DEFAULT": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 1500,
+      "live": false,
+      "group": "Servo outputs",
+      "description": "Centre pulse of output 2",
+      "label": "Output 2 centre pulse"
+    },
+    "PWM_OUT_2_MIN": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 1000,
+      "live": false,
+      "group": "Servo outputs",
+      "description": "Lowest pulse of output 2",
+      "label": "Output 2 lowest pulse"
+    },
+    "PWM_OUT_2_MAX": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 2000,
+      "live": false,
+      "group": "Servo outputs",
+      "description": "Highest pulse of output 2",
+      "label": "Output 2 highest pulse"
+    },
+    "PWM_OUT_3_DEFAULT": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 1500,
+      "live": false,
+      "group": "Servo outputs",
+      "description": "Centre pulse of output 3",
+      "label": "Output 3 centre pulse"
+    },
+    "PWM_OUT_3_MIN": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 1000,
+      "live": false,
+      "group": "Servo outputs",
+      "description": "Lowest pulse of output 3",
+      "label": "Output 3 lowest pulse"
+    },
+    "PWM_OUT_3_MAX": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 2000,
+      "live": false,
+      "group": "Servo outputs",
+      "description": "Highest pulse of output 3",
+      "label": "Output 3 highest pulse"
+    },
+    "PWM_OUT_4_DEFAULT": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 1500,
+      "live": false,
+      "group": "Servo outputs",
+      "description": "Centre pulse of output 4",
+      "label": "Output 4 centre pulse"
+    },
+    "PWM_OUT_4_MIN": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 1000,
+      "live": false,
+      "group": "Servo outputs",
+      "description": "Lowest pulse of output 4",
+      "label": "Output 4 lowest pulse"
+    },
+    "PWM_OUT_4_MAX": {
+      "type": "int",
+      "unit": "\u00b5s",
+      "min": 1000,
+      "max": 2000,
+      "default": 2000,
+      "live": false,
+      "group": "Servo outputs",
+      "description": "Highest pulse of output 4",
+      "label": "Output 4 highest pulse"
+    }
+  }
+}

@@ -1,0 +1,1 @@
+{"esp32": {"env": "lolin_s2_mini", "label": "ESP32 Rx firmware 0.5.60 (rover and monitor)"}, "stm32": [{"header": "stm32/2026-10-12_17-03-08_RCTF_TT_RX_REVA_G070CBx_v2.0.24.commit_header", "image": "stm32/2026-10-12_17-03-08_RCTF_TT_RX_REVA_G070CBx_v2.0.24.bin.encrypted", "label": "STM32 app 2.0.24"}]}
