@@ -208,7 +208,7 @@ bool odrive_rc_active = false;
 uint32_t odrive_rc_update_millis = 0;
 #define ODRIVE_OUTPUT_TIMEOUT_MS 250
 #define ODRIVE_DRIVE_SCALE_RPS 1.5f // Full throttle [rev/s].
-#define ODRIVE_TURN_SCALE_RPS  0.8f // Full steering [rev/s]; combined maximum is 2.3 rev/s.
+#define ODRIVE_TURN_SCALE_RPS  1.5f // Full steering [rev/s]; combined maximum is 2.3 rev/s.
 float odrive_drive_command = 0.0f;
 float odrive_steer_command = 0.0f;
 bool odrive_output_enabled = false;
@@ -383,6 +383,13 @@ uint32_t esp_packet_fifo_tail = 0;  // index for reading data out of buffer
 void espPacketFifo_addCmdInt32(uint32_t cid, int32_t cmd);  // Add a command with a int32 payload to the queue
 void espPacketFifo_addCmdFloat(uint32_t cid, float cmd);  //  add a command with a float payload to the queue
 void espPacketFifo_sendCmd();  // Send up to one command from the queue, call after each new STM32 packet is received
+
+// Signal strength of one coil: DFT magnitude in counts (before the STM32 gain calibration).
+// sensor: 0 or 1. coil: 0 or 1.
+float coilStrength(const StmTxPacket& p, uint8_t sensor, uint8_t coil) {
+  const float* c = &p.items.coil_data[sensor][coil * 2]; // re, im
+  return hypotf(c[0], c[1]);
+}
 
 // ESP-NOW Stuff ---------------------------------------------------------------------
 void broadcastTelemetry();
@@ -1412,19 +1419,18 @@ void loop() {
     // Serial.printf(" GPIO35: %d GPIO37: %d\n", digitalRead(MOTOR_ARM_SWITCH_PIN), digitalRead(BUZZER_PIN));
 
 
-    Serial.print(stmPacket.items.s1_x);
+    //Serial.print(stmPacket.items.s1_x);
+    //Serial.print(" ");
+    //Serial.print(stmPacket.items.s1_y);
+    //Serial.print(" ");
+    //Serial.print(stmPacket.items.s1_radius);
+    //Serial.print(" ");
+
+    const float strength_s1c1 = coilStrength(stmPacket, 0, 0);
+    const float strength_s1c2 = coilStrength(stmPacket, 0, 1);
+    Serial.print(strength_s1c1);
     Serial.print(" ");
-    Serial.print(stmPacket.items.s1_y);
-    Serial.print(" ");
-    Serial.print(stmPacket.items.s1_radius);
-    Serial.print(" ");
-    Serial.print(stmPacket.items.coil_data[0][0]);
-    Serial.print(" ");
-    Serial.print(stmPacket.items.coil_data[0][1]);
-    Serial.print(" ");
-    Serial.print(stmPacket.items.coil_data[0][2]);
-    Serial.print(" ");
-    Serial.print(stmPacket.items.coil_data[0][3]);
+    Serial.print(strength_s1c2);
     Serial.println();
 
     data_sent = 1;
