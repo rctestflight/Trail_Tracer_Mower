@@ -158,6 +158,8 @@ def quiet_check(sec=10.0):
 if a.quiet_check and not quiet_check():
     raise SystemExit(1)
 with risky(board, f"OTA {fw.name}"):
+    if not wait_board(15):  # a COM port opens 2 s after it appears; the board must send lines
+        raise SystemExit(f"stop: {board} sends no lines (port {api('/status')['state']})")
     t0 = time.time()
     nxt = api("/status")["next"]
     # A line can lose bytes on the USB input and still be valid hex: the board then writes a short,

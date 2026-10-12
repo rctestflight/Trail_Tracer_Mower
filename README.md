@@ -15,7 +15,7 @@ Outside rover mode, the vehicle moves as on `main`. The guide lists each differe
 
 | File | Content |
 |---|---|
-| `docs/test_guide.html` | First load over V1.0 with PlatformIO, field steps over USB, the way back to V1.0 |
+| `docs/test_guide.md` | Quick start, first load over V1.0 with PlatformIO, field steps over USB, the way back to V1.0 |
 | `docs/rover_guide.md` | Use of the firmware: settings, rover mode, telemetry, updates, commands, limits, test results |
 | `docs/espnow_protocol.md` | The radio messages between a rover and a monitor |
 | `docs/settings_def.json` | The settings, with their ranges and defaults |
