@@ -1,0 +1,100 @@
+name: Programmer page
+
+# The Rx programmer page on this repo's GitHub Pages (Settings, Pages, Source: GitHub Actions).
+# Builds main, every tag and every branch with programmer.json (docs/programmer-json.md) of this repo and of
+# rctestflight/Trail-Tracer, each commit once. Job "build" runs the branch code (PlatformIO scripts) with a
+# read-only token and hands over only the builds; job "deploy" checks the site with its own checkout
+# (tools/programmer/check_site.py, word lists from the secret GATE_LISTS: without it nothing is published)
+# and publishes it. The builds of earlier runs come from the Actions cache; with no cache, all refs rebuild.
+
+on:
+  push:
+    branches: [main]
+    tags: ["*"]
+  schedule:
+    - cron: "*/30 * * * *"        # opt-in branches here and in the Trail-Tracer repo
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: programmer-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Builds of earlier runs
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: site/builds
+          key: programmer-builds-${{ github.run_id }}
+          restore-keys: programmer-builds-
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: PlatformIO
+        run: pip install platformio==6.2.0
+
+      - name: Build the refs that have no build
+        run: python tools/programmer/build_all.py site/builds
+
+      - name: Keep the builds for the next run
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: site/builds
+          key: programmer-builds-${{ github.run_id }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: builds
+          path: site/builds
+          include-hidden-files: false
+          retention-days: 1
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: builds
+          path: site/builds
+
+      - name: Page files
+        run: |
+          cp tools/programmer/page/index.html tools/programmer/page/program.js tools/programmer/page/icon-32.png site/
+          echo '{"sources": [{"name": "builds", "base": "builds/"}]}' > site/sources.json
+          touch site/.nojekyll
+
+      - name: Check the site (layout, paths, names, addresses, banned words, closed images)
+        env:
+          GATE_LISTS: ${{ secrets.GATE_LISTS }}
+        run: python3 tools/programmer/check_site.py site
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346  # v5.0.1
