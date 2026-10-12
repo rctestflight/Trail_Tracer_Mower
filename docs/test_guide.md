@@ -94,7 +94,8 @@ Push **Upload**. A board with this firmware updates over USB with no download mo
 
 - The motor command goes out on the 12 ms timer of the main branch. On a bench board, 99 % of commands left within 10.7 ms of the sensor frame.
 - The log erases flash only while the axes are disarmed or the rover charges. The erased flash holds about 25 min of armed run at the default log rate of 20 Hz. After that, the log stops until the axes disarm.
-- Verified on a bench board with the Upload button: the update over USB, and the full install with its erase and write. Verified next: the full install started from V1.0 with the button steps, and the way back to V1.0 (section 7).
+- Verified on bench boards: the update over USB with the Upload button, and the full install with the Upload button from this firmware. The full install also ran from a main-branch build with no button, on a Linux PC. Not verified: the button steps, and the way back to V1.0 (section 7).
+- The shortest update period setting is 3.6 ms (`dsp_frame_period_us` 3600).
 - This build did not drive an ODrive or a real rover before this test. The bench has no ODrive.
 
 ## Appendix A: command lines
