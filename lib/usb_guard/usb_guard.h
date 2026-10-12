@@ -44,4 +44,11 @@ uint32_t stalls();       // output stops detected
 uint32_t tx_events();    // TX-complete events since begin()
 uint32_t kicks();        // flushes after KICK_MS with a full FIFO and no progress
 
+// Reconnect permission (0.5.62): off at start. An Rx is a vehicle controller first and USB is optional: in the
+// vehicle role the guard never flushes, detaches or reconnects USB; output that no host drains is dropped, and a
+// host that connects later gets live output. The monitor role turns it on once the PC program has connected in
+// this boot (first "P" ping or a "monitor" command): from then on an undrained FIFO gets the USB reconnect.
+void set_reconnect(bool on);
+bool reconnect_allowed();
+
 }  // namespace usb_guard

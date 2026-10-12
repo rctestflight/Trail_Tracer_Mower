@@ -14,6 +14,7 @@ uint32_t detach_ms = 0;
 uint32_t grace_until_ms = 0;
 uint32_t kick_count = 0;   // flushes sent to a full TX FIFO with no progress (KICK_MS)
 bool kicked = false;
+bool reconnect_on = false; // set_reconnect(): the monitor role after the PC program connected; never the vehicle role
 
 void on_tx(void*, esp_event_base_t, int32_t, void*) { tx_count++; }
 
@@ -42,6 +43,7 @@ void service(uint32_t now, bool) {
     kicked = false;
     return;
   }
+  if (!reconnect_on) return;  // vehicle role, or monitor before the PC program connected: drop output, touch nothing
   // A full TX FIFO with no completed transfer for KICK_MS: one flush first. The IN transfer of the data in the
   // FIFO may not have started (monitor role at about 14 KB/s, 2026-10-12); a flush starts it, with no reconnect.
   if (!kicked && now - last_progress_ms >= KICK_MS) {
@@ -63,5 +65,7 @@ uint32_t restarts() { return reconnect_count; }
 uint32_t stalls() { return stall_count; }
 uint32_t tx_events() { return tx_count; }
 uint32_t kicks() { return kick_count; }
+void set_reconnect(bool on) { reconnect_on = on; }
+bool reconnect_allowed() { return reconnect_on; }
 
 }  // namespace usb_guard
