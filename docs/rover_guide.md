@@ -24,7 +24,7 @@ The autopilot bounces inside the perimeter wire, goes home on low battery or aft
 2. Set the settings (section 3).
 3. Check the ODrive CAN watchdog on all six nodes (an ODrive setting). With it off, an ODrive keeps its last speed when the ESP32 stops sending, for example after a restart.
 4. Check the steering sign with the wheels off the ground: set `rover_enabled` true and enter mode 2; hold the sensor near the wire. The rover must stop and pivot away from the wire. If it pivots toward the wire, invert `pid_direction`. If the wire follower already follows correctly, the sign is correct.
-5. Measure the two speed settings on the ground: full drive in mode 0 gives the ground speed (`rover_full_speed_mps`); full steer gives the pivot rate (`rover_full_yaw_rate_dps`). A wrong pivot rate gives wrong pivot angles.
+5. Measure the ground speed at full drive in mode 0 and set `rover_full_speed_mps`. The pivot rate needs no setting: the gyro rate loop turns at the rate the autopilot asks for, up to `steering_rate_max_dps` (from 0.5.61).
 6. On the first runs, check the dock direction. The autopilot takes `s1_x` positive as the wire on the left. If the rover follows the wire counter-clockwise with `rover_goal_cw` true, invert `rover_goal_cw`.
 7. Check the IMU at boot: USB shows `MPU6050 +-8 g, +-500 deg/s`. With "IMU HALT", the rover does not drive (section 6).
 8. Watch the first runs in rover mode. Rover mode does not detect a stall or an obstacle, so the rover pushes on. Stop it with the RC, `run stop`, or the STOP button of the telemetry program. In the simulator, a rover that lost the wire signal in roam drove about 20 m before the lost timeout stopped it.
@@ -46,7 +46,7 @@ Three ways, all with the same keys:
 | rover_goal_cw | true | Dock direction along the wire, clockwise seen from above |
 | rover_sensor_height_mm | 150 | Height of the sensor centre above the wire |
 | rover_full_speed_mps | 1.0 | Ground speed at full drive command (measure it) |
-| rover_full_yaw_rate_dps | 115 | Pivot rate at full steer command (measure it) |
+| rover_full_yaw_rate_dps | 115 | Not used from 0.5.61 (the autopilot takes `steering_rate_max_dps`) |
 | rover_seek_vbatt | 0 | Go home below this filtered battery voltage, V (0 = off) |
 | rover_seek_after_s | 600 | Go home this long after the last charge, s (0 = off) |
 | rover_entry_btx | 1 | BTx channel before the dock: slow approach (0 = none) |

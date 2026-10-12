@@ -188,9 +188,9 @@ void usbLoadService(){
 
 static const char* TAG = "wfrx";
 #ifdef BENCH_FAKE_IMU
-#define ROVER_FW_VERSION "0.5.60+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.5.61+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #else
-#define ROVER_FW_VERSION "0.5.60"  // 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
+#define ROVER_FW_VERSION "0.5.61"  // 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
 
@@ -4152,7 +4152,11 @@ void applyDeviceConfig(const DeviceConfig& cfg)
   roverAp.cfg.goalCW          = cfg.rover_goal_cw;
   roverAp.cfg.sensorHeight    = (float)(cfg.rover_sensor_height_mm * 0.001);
   roverAp.cfg.maxSpeed        = (float)cfg.rover_full_speed_mps;
-  roverAp.cfg.maxYawRate      = (float)(cfg.rover_full_yaw_rate_dps * M_PI / 180.0);
+  // The autopilot steer command goes through the gyro rate loop: full steer requests steering_rate_max_dps
+  // (odrive_setDriveOutput). The autopilot times its pivots from its own yaw rate, so its full yaw rate must
+  // be the same value, or a planned pivot turns by steering_rate_max_dps / full yaw rate of the plan (90/115
+  // with the defaults: 25 deg planned, 19.6 deg turned). rover_full_yaw_rate_dps is no longer used.
+  roverAp.cfg.maxYawRate      = (float)(steering_rate_max_dps * M_PI / 180.0);
   roverAp.cfg.lostTimeout     = (float)cfg.rover_lost_timeout_s;
   roverAp.cfg.speedLimit      = (float)cfg.rover_speed_limit_mps;
   applyTxPower();  // live: the next frame goes out at the new power

@@ -41,7 +41,7 @@ A beacon transmitter (BTx) lies on the wire just past the dock exit. Travelling 
 | rover_goal_cw | true | Dock direction along the wire, seen from above |
 | rover_sensor_height_mm | 150 | Sensor centre above the wire |
 | rover_full_speed_mps | 1.0 | Ground speed at full throttle command (measure it) |
-| rover_full_yaw_rate_dps | 115 | Pivot rate at full steering command (measure it) |
+| rover_full_yaw_rate_dps | 115 | Not used from firmware 0.5.61: `maxYawRate` is `steering_rate_max_dps`, the full scale of the gyro rate loop |
 | rover_seek_vbatt | 0 | Go home below this battery voltage, filtered (0 = off) |
 | rover_seek_after_s | 600 | Go home this long after the last charge (0 = off) |
 | rover_entry_btx | 1 | BTx channel before the dock: creep at 0.2 m/s (0 = none) |

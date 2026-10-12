@@ -389,7 +389,7 @@
       "default": 115,
       "live": false,
       "group": "Rover mode",
-      "description": "Turn rate in place at full steer command (measure it)",
+      "description": "Not used from firmware 0.5.61: the autopilot takes steering_rate_max_dps, the full scale of the gyro rate loop. Kept so that older config files load",
       "max": 720,
       "label": "Turn rate at full steer (rover)"
     },
