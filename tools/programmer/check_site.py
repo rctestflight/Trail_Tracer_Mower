@@ -95,7 +95,7 @@ def check_encrypted(data):
     return out
 
 
-PAGE_FILES = {"index.html", "program.js", "icon-32.png", "sources.json", ".nojekyll"}
+PAGE_FILES = {"index.html", "program.js", "icon-32.png", "sources.json", "version.json", ".nojekyll"}
 BUILD_FILE = r"^builds/([^/]+/)*[^/.][^/]*\.(json|bin|bin\.encrypted|commit_header)$"
 
 
