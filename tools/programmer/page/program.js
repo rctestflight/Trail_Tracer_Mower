@@ -1,6 +1,6 @@
 'use strict';
 const ESPRESSIF = 0x303A, ROM_PID = 0x0002, APP_PID = 0x80C2;
-const PAGE_VERSION = '1.12.8';
+const PAGE_VERSION = '1.12.9';
 let pageVer = `Page v${PAGE_VERSION} (local copy)`;
 const ESPTOOL = 'https://unpkg.com/esptool-js@0.4.7/bundle.js';
 const ESPTOOL_SRI = 'sha384-esoYAtcIwSlHrIf+6+uZc/SPs/S8v44K26De13juLayamqHofUvCPscyHBXPxVIc';
@@ -760,6 +760,7 @@ const stmCurrent = (b, s) => !!(b && s && b.stm === `app ${s.m.version}`);
 async function stmPart(r1, stm) {
   const nb = [...boards.values()].find(x => x.mode === 'app' && x.firmware === 'rover firmware' && x.state === 'open');
   if (!nb) throw plain(`${r1} The STM32 update did not start: the board is not on USB. Start the install again.`);
+  if (!stmCurrent(nb, stm)) { nb.stm = await readStm(nb); say(`STM32 version at the decision: ${nb.stm}`); render(); }
   if (stmCurrent(nb, stm)) {
     step('stm'); say(`STM32 runs ${nb.stm}, the version of the entry: no STM32 update`);
     step('check'); return `${r1} The STM32 runs ${nb.stm} already: no STM32 update.`;
