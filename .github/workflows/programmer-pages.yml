@@ -11,8 +11,6 @@ on:
   push:
     branches: [main]
     tags: ["*"]
-  schedule:
-    - cron: "*/30 * * * *"        # opt-in branches here and in the Trail-Tracer repo
   workflow_dispatch:
 
 permissions: {}
