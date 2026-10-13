@@ -43,6 +43,13 @@ inline uint32_t full_resets() { return 0; }
 uint32_t stalls();       // output stops detected
 uint32_t tx_events();    // TX-complete events since begin()
 uint32_t kicks();        // flushes after KICK_MS with a full FIFO and no progress
+// Bench diagnosis of the USB stops (0.5.60-dev11): the USB core registers of all endpoints and the CDC buffer
+// fills, taken at the stop detection (before the reconnect), or on demand (the monitor's no-PC-input restart).
+void snapshot();                          // take one now
+bool snapshot_valid();
+int format_snapshot(char* buf, int n);    // one text line, no newline; the length
+void save_for_next_boot(const char* line);  // RTC memory: survives a software restart (input-stop restart)
+bool take_saved(char* buf, int n);         // the saved line, once; false if none
 
 // Reconnect permission (0.5.62): off at start. An Rx is a vehicle controller first and USB is optional: in the
 // vehicle role the guard never flushes, detaches or reconnects USB; output that no host drains is dropped, and a
