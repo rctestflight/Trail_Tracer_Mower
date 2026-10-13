@@ -1,6 +1,6 @@
 'use strict';
 const ESPRESSIF = 0x303A, ROM_PID = 0x0002, APP_PID = 0x80C2;
-const PAGE_VERSION = '1.12.9';
+const PAGE_VERSION = '1.15.0';
 let pageVer = `Page v${PAGE_VERSION} (local copy)`;
 const ESPTOOL = 'https://unpkg.com/esptool-js@0.4.7/bundle.js';
 const ESPTOOL_SRI = 'sha384-esoYAtcIwSlHrIf+6+uZc/SPs/S8v44K26De13juLayamqHofUvCPscyHBXPxVIc';
@@ -18,16 +18,28 @@ let job = null;
 let bridgeNext = false;
 let expectRover = false;
 
-async function open(port) {
-  if (boards.has(port)) return boards.get(port);
-  const b = { port, info: port.getInfo(), state: 'opening', lines: [], buf: '', waiters: [], binMode: false, bin: new Uint8Array(0), binWait: null, t0: Date.now() };
-  boards.set(port, b);
+const perm = (() => { try { return JSON.parse(localStorage.getItem('tt.perm') || '{}'); } catch { return {}; } })();
+function notePerm(mode) { if (perm[mode]) return; perm[mode] = true; try { localStorage.setItem('tt.perm', JSON.stringify(perm)); } catch { /* no storage */ } }
+const firstVisit = () => !perm.app && !perm.rom;
+function newBoard(port, state) {
+  const b = { port, info: port.getInfo(), state, lines: [], buf: '', waiters: [], binMode: false, bin: new Uint8Array(0), binWait: null, t0: Date.now() };
   b.mode = b.info.usbProductId === ROM_PID ? 'rom' : 'app';
-  if (b.mode === 'rom') { b.state = 'open'; b.firmware = 'none running (ROM download mode)'; render(); boardOpened(b); return b; }
+  notePerm(b.mode);
+  boards.set(port, b);
+  return b;
+}
+async function open(port) {
+  const old = boards.get(port);
+  if (old && (old.state === 'open' || old.state === 'opening' || !(job && !job.done))) return old;
+  if (old) boards.delete(port);
+  const b = newBoard(port, 'opening');
+  if (job && !job.done) selPort = port;
+  if (b.mode === 'rom') { Object.assign(b, { state: 'open', firmware: ROM_FW, connected: true }); render(); boardOpened(b); return b; }
   render();
   try { await port.open({ baudRate: 115200 }); }
-  catch (ex) { b.state = `does not open: ${ex.message}`; render(); return b; }
-  b.state = 'open'; render();
+  catch (ex) { say(`port open ${usbId(port)}: ${ex.message}`); b.state = `does not open: ${ex.message}`; render(); return b; }
+  say(`port open: ${usbId(port)}`);
+  b.state = 'open'; b.connected = true; render();
   if (bridgeNext) { b.bridge = true; b.binMode = true; b.firmware = 'STM32 bridge (IAP)'; b.readDone = readLoop(b); boardOpened(b); return b; }
   b.readDone = readLoop(b);
   detect(b);
@@ -52,8 +64,15 @@ async function readLoop(b) {
   if (!b.closing) { b.closing = true; await b.port.close().catch(() => {}); boards.delete(b.port); }
   render();
 }
+function binLine(b) {
+  b.binLines = (b.binLines || 0) + 1;
+  const t = `(${b.binLines} lines of bytes that are not text, not shown)`;
+  if (b.lines.length && /^\(\d+ lines of bytes that are not text/.test(b.lines[b.lines.length - 1])) b.lines[b.lines.length - 1] = t;
+  else b.lines.push(t);
+}
 function gotLine(b, line) {
-  b.lines.push(line); if (b.lines.length > 600) b.lines.shift();
+  if (/[\uFFFD\x00-\x08\x0E-\x1F]/.test(line)) binLine(b); else b.lines.push(line);
+  if (b.lines.length > 600) b.lines.shift();
   learn(b, line);
   for (const w of [...b.waiters]) if (w.test(line)) { b.waiters.splice(b.waiters.indexOf(w), 1); w.resolve(line); }
 }
@@ -72,15 +91,70 @@ function waitLine(b, re, ms) {
 async function ask(b, cmd, re, ms = 3000) { const p = waitLine(b, re, ms); await send(b, cmd); return p; }
 async function closeBoard(b) {
   b.closing = true;
+  if (b.rom) { const r = b.rom; b.rom = null; await r.transport.disconnect().catch(() => {}); }
   try { if (b.reader) await b.reader.cancel(); } catch { /* gone */ }
   await b.readDone;
   try { await b.port.close(); } catch (ex) { if (b.port.readable) say(`port close: ${ex.message}`); }
   boards.delete(b.port); render();
 }
+const ROM_FW = 'none running (ROM download mode)';
+let selPort = null;
+const listed = () => [...boards.values()].sort((a, c) => a.t0 - c.t0);
+function selected() {
+  if (job && !job.done) return boards.get(selPort) || null;
+  return boards.get(selPort) || null;
+}
+function choose(port) { if (job && !job.done) return; selPort = port; render(); }
+function known(port) {
+  if (job && !job.done) return open(port);
+  if (boards.has(port)) return boards.get(port);
+  const b = newBoard(port, 'closed');
+  if (b.mode === 'rom') b.firmware = ROM_FW;
+  render();
+  return b;
+}
+async function ensureOpen(b) {
+  if (b.mode === 'rom' || b.state === 'open') return b;
+  Object.assign(b, { closing: false, buf: '', state: 'opening' }); render();
+  try { await b.port.open({ baudRate: 115200 }); }
+  catch (ex) { b.state = `does not open: ${ex.message}`; render(); throw plain(`The Rx does not open. ${BUTTON_STEP} Then press Connect.`); }
+  b.state = 'open'; b.readDone = readLoop(b); render();
+  return b;
+}
+async function releaseBoard(b) {
+  if (b.rom) { const r = b.rom; b.rom = null; await r.transport.disconnect().catch(() => {}); if (b.port.readable) await b.port.close().catch(() => {}); }
+  if (b.mode !== 'rom' && b.state === 'open') {
+    b.closing = true;
+    try { if (b.reader) await b.reader.cancel(); } catch { /* gone */ }
+    await b.readDone;
+    try { await b.port.close(); } catch { /* closed */ }
+  }
+  Object.assign(b, { reader: null, state: 'closed' }); render();
+}
+async function connectBoard(b) {
+  if (!b || (job && !job.done)) return;
+  job = null;
+  Object.assign(b, { connected: true, error: null, firmware: b.mode === 'rom' ? ROM_FW : null, version: null, role: null, stm: null, stmLink: null,
+    table: null, tableCrc: null, hb: false, redetect: 0, flash: null });
+  render();
+  try {
+    if (b.mode === 'rom') await romRead(b);
+    else { await ensureOpen(b); await detect(b); await releaseBoard(b); }
+  } catch (ex) { Object.assign(b, { connected: false, error: ex.plain ? ex.message : `The Rx does not answer. ${BUTTON_STEP} Then press Connect.` }); render(); }
+}
+async function disconnectBoard(b) {
+  if (!b || (job && !job.done)) return;
+  job = null; b.connected = false;
+  await releaseBoard(b);
+}
 
 const openWaiters = [];
 function boardOpened(b) { for (const w of [...openWaiters]) if (w.test(b)) { openWaiters.splice(openWaiters.indexOf(w), 1); w.resolve(b); } }
-const BUTTON_STEP = 'Hold button while connecting USB, and for 3s after.';
+const CONNECT_STEP = 'Hold the button while you plug in USB';
+const BUTTON_STEP = CONNECT_STEP;
+const REPLUG_STEP = 'Unplug, wait 3 s, plug in again.';
+const ADD_HINT = 'Press Find Rx Boards and select the Rx.';
+const PERM_HINT = 'Press Find Rx Boards and select the Rx again.';
 let lastConnect = 0;
 let disconnects = 0;
 const plain = msg => Object.assign(new Error(msg), { plain: true });
@@ -88,14 +162,14 @@ function waitGone(ms) {
   const d0 = disconnects, t0 = Date.now();
   return new Promise(res => { const iv = setInterval(() => { if (disconnects !== d0 || Date.now() - t0 > ms) { clearInterval(iv); res(disconnects !== d0); } }, 100); });
 }
-async function personPowerCycle(test) {
+async function personPowerCycle(test, text = BUTTON_STEP) {
   const want = x => test(x) || x.mode === 'rom';
-  instruct(BUTTON_STEP);
-  if ([...boards.values()].some(x => x.state === 'open') && !await waitGone(300000)) throw plain(BUTTON_STEP);
+  instruct(text);
+  if ([...boards.values()].some(x => x.state === 'open') && !await waitGone(300000)) throw plain(text);
   let b = await waitBoard(want, 10000);
   while (!b && Date.now() - lastConnect < 6000) b = await waitBoard(want, 3000);
-  if (!b) { instruct(BUTTON_STEP + '\nIf the page does not show the board, press "Connect an Rx" and choose it.'); b = await waitBoard(want, 170000); }
-  if (!b) throw plain(BUTTON_STEP);
+  if (!b) { instruct(text + ' ' + ADD_HINT); b = await waitBoard(want, 170000); }
+  if (!b) throw plain(text);
   instruct('');
   if (b.mode === 'rom' && !test(b)) {
     say('the board is in ROM download mode: the watchdog reset starts its firmware');
@@ -116,7 +190,7 @@ async function waitBoardHint(test, ms, choose) {
   let b = await waitBoard(test, 8000), waited = 8000;
   while (!b && Date.now() - lastConnect < 8000 && waited < ms) { b = await waitBoard(test, 4000); waited += 4000; }
   if (b) return b;
-  instruct('If the page does not show the board, press "Connect an Rx" and choose it.');
+  instruct(perm.app && perm.rom ? ADD_HINT : PERM_HINT);
   return waitBoard(test, Math.max(1000, ms - waited));
 }
 function waitBoard(test, ms, label) {
@@ -134,6 +208,7 @@ function learn(b, line) {
     Object.assign(b, { firmware: 'rover firmware', version: m[1], role: b.role || 'vehicle' });
     const r = line.match(/ board=(\S+)/); if (r) b.board = r[1];
     const a = line.match(/ mac=(\S+)/); if (a) b.mac = a[1];
+    const fp = line.match(/ first_packet_ms=(\d+)/); if (fp) b.firstPacket = +fp[1];
   } else if ((m = line.match(/^OTA status .*table=(\S+) table_crc=([0-9a-fA-F]+)/))) Object.assign(b, { table: m[1], tableCrc: m[2].toLowerCase() });
   else if ((m = line.match(/Trail-Tracer-Rx-Monitor v(\S+) MAC (\S+)/))) {
     const rover = / role monitor/.test(line);
@@ -150,44 +225,50 @@ async function readStm(b) {
 }
 async function detect(b) {
   b.detecting = true; render();
-  const hb = await waitLine(b, /^HB |Trail-Tracer-Rx-Monitor v/, 2500);
-  if (!hb) {
-    const boot = await ask(b, 'boot', /^BOOT rover-firmware/, 2000);
-    if (!boot) b.firmware = 'other firmware (no version report)';
-  } else if (!b.version) await ask(b, b.role === 'monitor' ? 'V' : 'boot', /^BOOT rover-firmware|Trail-Tracer-Rx-Monitor v/, 2000);
+  let r = null;
+  for (let i = 0; i < 8 && !r && !b.closing && !b.firmware; i++) r = await ask(b, 'boot', /^BOOT rover-firmware|Trail-Tracer-Rx-Monitor v/, 400);
+  if (!r && !b.firmware) b.firmware = 'other firmware (no version report)';
+  else if (b.role === 'monitor' && !b.version) await ask(b, 'V', /Trail-Tracer-Rx-Monitor v/, 1500);
+  else if (b.firmware === 'rover firmware' && !b.version) await ask(b, 'boot', /^BOOT rover-firmware/, 1500);
   if (b.firmware === 'rover firmware' && b.role !== 'monitor' && !b.table) await ask(b, 'ota status', /^OTA status/, 2000);
   if (b.firmware === 'rover firmware' && b.role !== 'monitor' && !b.stm) b.stm = await readStm(b);
   b.detecting = false; render();
   if (expectRover && b.firmware !== 'rover firmware' && (b.redetect = (b.redetect || 0) + 1) <= 10 && !b.closing)
-    setTimeout(() => { if (!b.closing && b.state === 'open' && !b.bridge) { say(`read the board again (${b.redetect})`); b.firmware = null; b.hb = false; detect(b); } }, 3000);
+    waitLine(b, /./, 30000).then(l => { if (l && !b.closing && b.state === 'open' && !b.bridge) { say(`read the board again (${b.redetect})`); b.firmware = null; b.hb = false; detect(b); } });
   boardOpened(b);
 }
 
 function say(text) { if (job) { job.log.push(`${new Date().toTimeString().slice(0, 8)}  ${text}`); job.prog = false; } render(); }
+const pageLog = [];
+const usbId = port => { const i = port.getInfo(); return `${(i.usbVendorId || 0).toString(16).padStart(4, '0')}:${(i.usbProductId || 0).toString(16).padStart(4, '0')} (${i.usbProductId === ROM_PID ? 'update mode' : 'firmware runs'})`; };
+function note(text) { pageLog.push(`${new Date().toTimeString().slice(0, 8)}  ${text}`); if (pageLog.length > 200) pageLog.shift(); render(); }
 function progress(text) { if (!job) return; if (job.prog) job.log.pop(); say(text); job.prog = true; }
 function step(id) {
   if (!job || !job.steps) return;
   const s = job.steps.find(x => x.id === id);
-  if (!s) return;
+  if (!s || s.state === 'skip') return;
   for (const x of job.steps) if (x.state === 'now') x.state = 'done';
   s.state = 'now'; say(`STEP ${id}: ${s.text}`);
 }
 function stage(text, pct = null) { if (!job) return; job.stage = text; job.pct = pct; say('STEP: ' + text); }
 function setPct(p) { if (job && job.pct !== p) { job.pct = p; render(); } }
-async function run(name, fn) {
-  if (job && !job.done) return alert('A job runs. Wait until it ends.');
-  job = { name, log: [], done: false, stage: 'Starting', pct: null, result: null, devOpen: false };
+async function run(name, fn, extra = {}) {
+  if (job && !job.done) return;
+  job = { name, log: [], done: false, stage: 'Starting', pct: null, result: null, ...extra };
   say(pageVer);
   say(`${name}: start`);
   try {
     const r = await fn(); job.result = { ok: true, text: typeof r === 'string' ? r : 'Done.' }; say(`${name}: done`);
     for (const x of job.steps || []) if (x.state !== 'skip') x.state = 'done';
+    job.pct = 100;
   } catch (ex) {
     job.result = { ok: false, text: ex.message.includes(NO_LOADER) ? NO_LOADER : BUTTON_STEP };
     say(`${name}: STOPPED: ${ex.message}`); instruct('');
     for (const x of job.steps || []) if (x.state === 'now') x.state = 'fail';
   }
-  job.done = true; job.pct = null; expectRover = false; render();
+  job.done = true; if (!job.result.ok) job.pct = null; expectRover = false; render();
+  for (const x of [...boards.values()]) if (x.state === 'open' && !x.rom) { x.connected = true; await releaseBoard(x).catch(() => {}); }
+  render();
 }
 async function fetchBuild(build, path) {
   const f = build.m.files.find(x => x.path === path);
@@ -240,9 +321,8 @@ async function otaUpdate(b0, build) {
     'The board restarts with the new firmware; the page opens it again.');
   if (!b) throw new Error('The board did not come back on USB within 100 s. It returns to its old firmware by itself after 2 min.');
   stage('Confirming the new firmware');
-  await sleep(1500);
   let st = null;
-  for (let i = 0; i < 6 && !st; i++) { st = await status(); if (!st) await sleep(4000); }
+  for (let i = 0; i < 6 && !st; i++) { st = await status(); if (!st) await waitLine(b, /./, 4000); }
   say(String(st));
   if (!st || !/state=1/.test(st)) throw new Error('The board did not start the new firmware. It still runs its old firmware.');
   say(String(await ask(b, 'ota confirm', /^OTA/, 5000)));
@@ -274,42 +354,82 @@ function partitionTable(table) {
   }
   return out;
 }
-function md5hex(d) {
-  const K = new Uint32Array(64), S = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21];
-  for (let i = 0; i < 64; i++) K[i] = Math.floor(Math.abs(Math.sin(i + 1)) * 2 ** 32) >>> 0;
-  const n = ((d.length + 8) >>> 6) + 1, m = new Uint8Array(n * 64);
-  m.set(d); m[d.length] = 0x80;
-  const v = new DataView(m.buffer); v.setUint32(n * 64 - 8, (d.length * 8) >>> 0, true); v.setUint32(n * 64 - 4, Math.floor(d.length / 0x20000000), true);
-  let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
-  for (let o = 0; o < m.length; o += 64) {
-    let a = a0, b = b0, c = c0, e = d0;
-    for (let i = 0; i < 64; i++) {
-      let f, g;
-      if (i < 16) { f = (b & c) | (~b & e); g = i; } else if (i < 32) { f = (e & b) | (~e & c); g = (5 * i + 1) % 16; }
-      else if (i < 48) { f = b ^ c ^ e; g = (3 * i + 5) % 16; } else { f = c ^ (b | ~e); g = (7 * i) % 16; }
-      const s = S[(i >> 4) * 4 + (i & 3)], x = (a + f + K[i] + v.getUint32(o + g * 4, true)) >>> 0;
-      a = e; e = c; c = b; b = (b + ((x << s) | (x >>> (32 - s)))) >>> 0;
-    }
-    a0 = (a0 + a) >>> 0; b0 = (b0 + b) >>> 0; c0 = (c0 + c) >>> 0; d0 = (d0 + e) >>> 0;
+async function flashRead(loader, addr, len) {
+  const out = new Uint8Array(len);
+  for (let at = 0; at < len; at += 64) {
+    const n = Math.min(64, len - at), pk = new Uint8Array(8), v = new DataView(pk.buffer);
+    v.setUint32(0, addr + at, true); v.setUint32(4, n, true);
+    const r = await loader.checkCommand('read flash block', 0x0E, pk);
+    if (!r || r.length < n) throw new Error(`flash read at 0x${(addr + at).toString(16)}: ${r ? r.length : 0} of ${n} B`);
+    out.set(r.subarray(0, n), at);
   }
-  const out = new DataView(new ArrayBuffer(16)); [a0, b0, c0, d0].forEach((w, i) => out.setUint32(i * 4, w, true));
-  return [...new Uint8Array(out.buffer)].map(x => x.toString(16).padStart(2, '0')).join('');
+  return out;
 }
-async function flashMd5(loader, addr, size) {
-  const pk = new Uint8Array(16), v = new DataView(pk.buffer);
-  v.setUint32(0, addr, true); v.setUint32(4, size, true);
-  const r = await loader.checkCommand('calculate md5sum', loader.ESP_SPI_FLASH_MD5, pk, 0, loader.timeoutPerMb(loader.MD5_TIMEOUT_PER_MB, size));
-  const text = new TextDecoder().decode(r.slice(0, 32));
-  if (/^[0-9a-fA-F]{32}$/.test(text)) return text.toLowerCase();
-  return [...r.slice(0, 16)].map(x => x.toString(16).padStart(2, '0')).join('');
+const cstr = (d, at, n) => new TextDecoder().decode(d.subarray(at, at + n)).replace(/\0.*$/s, '');
+async function romIdentify(read, tailOf = buildTail) {
+  const tab = [];
+  for (let at = 0x8000; at < 0x8C00; at += 64) { const t = partitionTable(await read(at, 64)); tab.push(...t); if (t.length < 2) break; }
+  const ota = tab.filter(q => q.type === 0 && q.subtype >= 0x10 && q.subtype < 0x20).sort((a, c) => a.subtype - c.subtype);
+  const otadata = tab.find(q => q.type === 1 && q.subtype === 0);
+  let slot = tab.find(q => q.type === 0 && q.subtype === 0) || ota[0];
+  if (otadata && ota.length) {
+    const seqs = [];
+    for (const off of [0, 0x1000]) { const seq = new DataView((await read(otadata.offset + off, 4)).buffer).getUint32(0, true); if (seq && seq !== 0xFFFFFFFF) seqs.push(seq); }
+    if (seqs.length) slot = ota[(Math.max(...seqs) - 1) % ota.length];
+  }
+  if (!slot) return { text: 'ESP32 firmware: none in flash', detail: 'no app partition' };
+  const h = await read(slot.offset, 0xB0);
+  if (h[0] !== 0xE9) return { text: 'ESP32 firmware: none in flash', detail: `no image at 0x${slot.offset.toString(16)}` };
+  const desc = new DataView(h.buffer).getUint32(0x20, true) === 0xABCD5432 ? { version: cstr(h, 0x30, 32), project: cstr(h, 0x50, 32), date: cstr(h, 0x80, 16) } : {};
+  let off = slot.offset + 24;
+  for (let i = 0; i < h[1]; i++) { const sh = i === 0 ? h.subarray(24, 32) : await read(off, 8); off += 8 + new DataView(sh.buffer, sh.byteOffset).getUint32(4, true); }
+  const end = slot.offset + ((off - slot.offset + 16) & ~15);
+  const sha = h[23] === 1 ? hex(await read(end, 32)) : null;
+  const detail = `${slot.label} at 0x${slot.offset.toString(16)}: ${desc.project || '?'} ${desc.version || ''} ${desc.date || ''}`.trim();
+  const hit = sha && await matchBuild(sha, tailOf);
+  if (hit) return { version: hit.m.version, sha, detail, text: `ESP32 firmware ${hit.m.version}` };
+  return { sha, detail, text: 'ESP32 firmware: V1.0 or other' };
+}
+const tails = new Map();
+async function buildTail(url) {
+  if (tails.has(url)) return tails.get(url);
+  let t = null;
+  try {
+    const r = await fetch(url, { headers: { Range: 'bytes=-32' } }), d = new Uint8Array(await r.arrayBuffer());
+    if (d.length >= 32) t = hex(r.status === 206 ? d.subarray(0, 32) : d.subarray(d.length - 32));
+  } catch { /* not reachable: no match */ }
+  tails.set(url, t);
+  return t;
+}
+async function matchBuild(sha, tailOf) {
+  for (const x of allBuilds.filter(x => x.m.chip === 'esp32s2' && x.m.esp32 && x.m.esp32.full_load)) {
+    const parts = x.m.esp32.full_load.parts || [], app = parts.find(p => /firmware/.test(p.file)) || parts.find(p => parseInt(p.offset, 16) === 0x10000);
+    if (app && await tailOf(x.base + app.file) === sha) return x;
+  }
+  return null;
+}
+async function romRead(b) {
+  b.detecting = true; render();
+  const { ESPLoader, Transport } = await loadEsptool();
+  const transport = new Transport(b.port, true);
+  try {
+    const loader = new ESPLoader({ transport, baudrate: 115200, romBaudrate: 115200, terminal: { clean() {}, writeLine() {}, write() {} } });
+    await loader.detectChip('no_reset');
+    b.rom = { transport, loader };
+    b.flash = await romIdentify((a, n) => flashRead(loader, a, n));
+    b.lines.push(`flash: ${b.flash.detail}${b.flash.sha ? `, SHA-256 ${b.flash.sha.slice(0, 12)}` : ''}`);
+    b.state = 'open';
+  } catch (ex) {
+    b.flash = { text: 'ESP32 firmware: not read', detail: ex.message }; b.lines.push(`flash read: ${ex.message}`);
+    b.rom = null; await transport.disconnect().catch(() => {}); b.state = 'closed';
+  } finally { b.detecting = false; render(); }
 }
 async function watchdogReset(loader) {
-  say('watchdog reset (esptool watchdog_reset)');
+  say('watchdog reset in 1.5 s (esptool watchdog_reset); the port closes first');
   await loader.writeReg(0x3F4080AC, 0x50D83AA1);
-  await loader.writeReg(0x3F408098, 2000);
+  await loader.writeReg(0x3F408098, 135000);
   await loader.writeReg(0x3F408094, ((1 << 31) | (5 << 28) | (1 << 8) | 2) >>> 0);
   await loader.writeReg(0x3F4080AC, 0).catch(() => {});
-  await sleep(500);
 }
 async function withLoader(b, fn) {
   const { ESPLoader, Transport } = await loadEsptool();
@@ -350,7 +470,7 @@ async function romLoad(b0, build, erase, stmBuild = null) {
     else {
       await closeBoard(b).catch(() => {});
       say('1200-baud touch');
-      try { await oldPort.open({ baudRate: 1200 }); await oldPort.setSignals({ dataTerminalReady: false }).catch(() => {}); await sleep(100); await oldPort.close(); }
+      try { await oldPort.open({ baudRate: 1200 }); await oldPort.setSignals({ dataTerminalReady: false }).catch(() => {}); await oldPort.close(); }
       catch (ex) { say(`1200-baud touch: ${ex.message}`); }
       b = await waitBoard(x => x.mode === 'rom', 8000, 'The board restarts into ROM download mode.');
       if (!b && !oldPort.gone) {
@@ -376,12 +496,19 @@ async function romLoad(b0, build, erase, stmBuild = null) {
   stage('Connecting to the board');
   const { ESPLoader, Transport } = await loadEsptool();
   const term = { clean() {}, writeLine: t => say('esptool: ' + t), write: t => { if (t.trim()) say('esptool: ' + t.trim()); } };
-  if (b.port.readable) await b.port.close().catch(() => {});
-  const transport = new Transport(b.port, true);
+  const kept = b.rom; b.rom = null;
+  if (!kept && b.port.readable) await b.port.close().catch(() => {});
+  const transport = kept ? kept.transport : new Transport(b.port, true);
   let entry = null, merged = false;
   try {
-  const loader = new ESPLoader({ transport, baudrate: 115200, romBaudrate: 115200, terminal: term, debugLogging: true });
-  await loader.detectChip('no_reset');
+  const loader = kept ? kept.loader : new ESPLoader({ transport, baudrate: 115200, romBaudrate: 115200, terminal: term, debugLogging: true });
+  if (kept) say('the update-mode link of Connect'); else await loader.detectChip('no_reset');
+  if (!b.flash) {
+    try { b.flash = await romIdentify((a, n) => flashRead(loader, a, n)); say(`ESP32 firmware in flash: ${b.flash.text} (${b.flash.detail})`); }
+    catch (ex) { say(`flash read: ${ex.message}`); }
+    if (b0 !== b) b0.flash = b.flash;
+    render();
+  }
   say(`chip: ${await loader.chip.getChipDescription(loader)}`);
   const strap = await loader.readReg(S2.STRAP), opt1 = await loader.readReg(S2.OPTION1);
   const byButton = (strap & S2.SPI_BOOT) === 0 && (opt1 & S2.FORCE_DL) === 0;
@@ -394,7 +521,7 @@ async function romLoad(b0, build, erase, stmBuild = null) {
       instruct('');
     }
   }
-  const tb = blobs.find(x => x.address === 0x8000), table = tb ? partitionTable(tb.data) : [], images = new Set(blobs);
+  const tb = blobs.find(x => x.address === 0x8000), table = tb ? partitionTable(tb.data) : [];
   if (build) {
     for (const q of table.filter(q => q.type === 0x01)) {
       if (blobs.some(x => x.address === q.offset)) continue;
@@ -405,38 +532,24 @@ async function romLoad(b0, build, erase, stmBuild = null) {
       } else { blobs.push({ data: new Uint8Array(q.size).fill(0xFF), address: q.offset }); say(`${q.label} at 0x${q.offset.toString(16)}: overwritten (${q.size} B)`); }
     }
   }
-  let tableSame = false;
-  if (tb) {
-    const fm = await flashMd5(loader, tb.address, tb.data.length).catch(() => null);
-    tableSame = !!fm && fm === md5hex(tb.data);
-    say(`partition table: ${tableSame ? 'the same' : 'differs: full write'}`);
-  }
-  if (erase && (!build || !tableSame)) fillRest();
-  stage('Checking the board', null);
-  for (let i = blobs.length - 1; i >= 0; i--) {
-    const x = blobs[i];
-    if (!images.has(x)) continue;
-    const fm = await flashMd5(loader, x.address, x.data.length).catch(ex => { say(`MD5 0x${x.address.toString(16)}: ${ex.message}`); return null; });
-    if (fm && fm === md5hex(x.data)) { say(`0x${x.address.toString(16)} (${x.data.length} B): equal, not written`); blobs.splice(i, 1); }
-  }
+  if (erase) fillRest();
   loader.FLASH_WRITE_SIZE = 0x400; if (loader.chip) loader.chip.FLASH_WRITE_SIZE = 0x400;
   const sizes = blobs.map(x => x.data.length), total = sizes.reduce((a, c) => a + c, 0);
   stage('Writing the ESP32 firmware', 0);
   const bstr = d => { let s = ''; for (let i = 0; i < d.length; i += 0x8000) s += String.fromCharCode.apply(null, d.subarray(i, i + 0x8000)); return s; };
-  if (blobs.length) await loader.writeFlash({ fileArray: blobs.map(x => ({ data: bstr(x.data), address: x.address })), flashSize: '4MB', flashMode: 'dio', flashFreq: '80m',
+  await loader.writeFlash({ fileArray: blobs.map(x => ({ data: bstr(x.data), address: x.address })), flashSize: '4MB', flashMode: 'dio', flashFreq: '80m',
     eraseAll: false, compress: true, reportProgress: (i, w, t) => { setPct(Math.floor(100 * (sizes.slice(0, i).reduce((a, c) => a + c, 0) + sizes[i] * w / t) / total)); progress(`file ${i + 1} of ${blobs.length}: ${Math.floor(100 * w / t)} %`); } });
-  else say('every region equal: nothing written');
   if (build) step('start');
   if (build) {
     stage('Starting the new firmware');
     await loader.writeReg(S2.OPTION1, 0, S2.FORCE_DL).catch(ex => say(`force-download bit not cleared: ${ex.message}`));
     if (byButton) await watchdogReset(loader);
-    else { say('RTS reset'); await transport.setRTS(true); await sleep(200); await transport.setRTS(false); await sleep(200); }
+    else { say('RTS reset'); await transport.setRTS(true); await sleep(100); await transport.setRTS(false); }
   }
   entry = byButton ? 'button' : 'firmware';
   } finally { await transport.disconnect().catch(() => {}); if (b.port.readable) await b.port.close().catch(() => {}); }
   boards.delete(b.port); render();
-  if (!build) return 'The ESP32 is erased: 4 MB, nothing kept. It runs no firmware and stays in bootloader mode until a Full install. Press "Connect an Rx" to see it.';
+  if (!build) return 'The whole ESP32 is erased. It runs no firmware and stays in update mode until the next update.';
   const rover = build.m.esp32.usb_update, back = x => x.mode === 'app' && !x.detecting && (rover ? x.firmware === 'rover firmware' && !!x.version : !!x.firmware);
   b = null;
   expectRover = !!rover;
@@ -448,8 +561,10 @@ async function romLoad(b0, build, erase, stmBuild = null) {
       const nb = await waitBoardHint(x => appTest(x) || x.mode === 'rom', 45000, 'the board');
       if (nb && nb.mode === 'rom') {
         say('the board came back in ROM download mode');
-        if (entry === 'button') { instruct('Let go of the button.'); await sleep(3000); instruct(''); }
+
         await withLoader(nb, async (loader, tr) => {
+          const held = async () => ((await loader.readReg(0x3F40403C).catch(() => 1)) & 1) === 0;
+          if (await held()) { instruct('Let go of the button.'); for (let i = 0; i < 400 && await held(); i++) await sleep(150); instruct(''); }
           await loader.writeReg(S2.OPTION1, 0, S2.FORCE_DL).catch(() => {});
           say('fallback: RTS reset'); await tr.setRTS(true); await sleep(200); await tr.setRTS(false); await sleep(200);
         });
@@ -519,11 +634,11 @@ async function stmLoad(b0, build) {
   bridgeNext = true;
   stage('Waiting for you');
   try {
-    b = await personPowerCycle(x => x.mode === 'app' && x.port !== oldPort && x.bridge);
+    b = await personPowerCycle(x => x.mode === 'app' && x.port !== oldPort && x.bridge, REPLUG_STEP);
   } finally { bridgeNext = false; }
   return stmBridge(b, build, header, image);
 }
-const NO_LOADER = 'The STM32 on this board cannot take an update over USB. Nothing was written to it. Contact support.';
+const NO_LOADER = 'The Rx STM32 cannot take an update over USB. Nothing was written to it. Contact support.';
 async function stmBridge(b, build, header = null, image = null) {
   step('stm');
   if (!header) {
@@ -531,30 +646,21 @@ async function stmBridge(b, build, header = null, image = null) {
     image = await fetchBuild(build, build.m.stm32.update.image);
   }
   const n = image.length / 1040;
-  const t0 = Date.now(), dec = new TextDecoder();
-  for (;;) {
-    const txt = dec.decode(b.bin), k = txt.indexOf('no text until it ends');
-    if (k >= 0) {
-      const e = txt.indexOf('\n', k);
-      if (e >= 0) {
-        const line = txt.slice(txt.lastIndexOf('STM bridge on', k), e).trim();
-        say(line);
-        if (/HELLO not answered/.test(line)) { say('no HELLO answer (bridge line)'); throw plain(NO_LOADER); }
-        b.bin = b.bin.slice(new TextEncoder().encode(txt.slice(0, e + 1)).length); break;
-      }
-    }
-    if (/BOOT rover-firmware/.test(txt)) throw new Error('the board started normally, not as an STM32 bridge: the update flag was gone at this power-on. Start the STM32 install again.');
-    if (Date.now() - t0 > 4000) { say('no "STM bridge on" line (sent before the port opened); HELLO anyway'); b.bin = new Uint8Array(0); break; }
-    await sleep(100);
-  }
+  const dec = new TextDecoder(), txt = dec.decode(b.bin), k = txt.indexOf('no text until it ends');
+  if (k >= 0) {
+    const line = txt.slice(txt.lastIndexOf('STM bridge on', k), (txt.indexOf('\n', k) + 1 || txt.length)).trim();
+    say(line);
+    if (/HELLO not answered/.test(line)) { say('no HELLO answer (bridge line)'); throw plain(NO_LOADER); }
+  } else say(b.restartLine ? 'the bridge of "stm restart" is on: HELLO at once' : 'no "STM bridge on" line yet: HELLO at once');
+  b.restartLine = null;
   stage('Checking the STM32');
   await send(b, frame(1));
-  const h = await readFrame(b, 2000).then(f => f.cid === 1 && f.p.length >= 7 ? f : Promise.reject(new Error('not a HELLO answer'))).catch(() => { say('no HELLO answer'); throw plain(NO_LOADER); });
+  const h = await readFrame(b, 2000).then(f => f.cid === 1 && f.p.length >= 7 ? f : Promise.reject(new Error('not a HELLO answer'))).catch(() => {
+    if (/BOOT rover-firmware/.test(dec.decode(b.bin))) throw new Error('the board started normally, not as an STM32 bridge: the update flag was gone at this power-on');
+    say('no HELLO answer'); throw plain(NO_LOADER);
+  });
   say(`HELLO: boot status ${h.p[0]}, app ${h.p[1]}.${h.p[2]}.${h.p[3]}, IAP ${h.p[4]}.${h.p[5]}.${h.p[6]}`);
   let r;
-  if (h.p[0] === 0 && `${h.p[1]}.${h.p[2]}.${h.p[3]}` === build.m.version) {
-    say(`the STM32 app is ${build.m.version} already: BOOT only, no write`);
-  } else {
   await send(b, frame(2, header));
   r = await readFrame(b, 2000);
   if (r.cid !== 2 || r.p[0]) throw new Error(`BEGIN_UPDATE refused: answer cid ${r.cid}, status ${r.p[0]}`);
@@ -567,20 +673,20 @@ async function stmBridge(b, build, header = null, image = null) {
     if (r.cid !== 3 || idx !== i || r.p[2]) throw new Error(`chunk ${i}: answer cid ${r.cid}, echoed ${idx}, reason ${r.p[2]}`);
     setPct(Math.floor(100 * (i + 1) / n)); progress(`STM32 chunk ${i + 1} of ${n}`);
   }
-  stage('Starting the new STM32 app');
+  stage('Starting the new STM32 app', 100);
   await send(b, frame(4));
   r = await readFrame(b, 3000);
   if (r.cid === 1) { say(`boot status after FINALIZE: ${r.p[0]}, app ${r.p[1]}.${r.p[2]}.${r.p[3]}`); r = await readFrame(b, 3000); }
   if (r.cid !== 4 || r.p[0]) throw new Error(`FINALIZE failed: answer cid ${r.cid}, status ${r.p[0]}`);
-  }
   await send(b, frame(5));
   r = await readFrame(b, 3000);
   if (r.cid !== 5 || r.p[0]) throw new Error(`BOOT failed: answer cid ${r.cid}, status ${r.p[0]}`);
   say('STM32 app loaded and started. The ESP32 leaves the bridge 10 s after the last byte.');
+  step('check');
+  stage('Rx STM32 written. The Rx restarts (10 s)', 100);
   b.binMode = false; b.buf = '';
   if (!await waitLine(b, /STM bridge off/, 30000)) say('no "STM bridge off" line within 30 s');
-  step('check');
-  stage('Reading the new versions');
+  stage('Reading the new versions', 100);
   b.bridge = false;
   Object.assign(b, { firmware: null, version: null, role: null, stm: null, stmLink: null, table: null, tableCrc: null, hb: false });
   await detect(b);
@@ -589,74 +695,123 @@ async function stmBridge(b, build, header = null, image = null) {
 }
 
 const setHtml = (el, html) => { if (el._html !== html) { el._html = html; el.innerHTML = html; return true; } return false; };
+const setText = (el, t) => { if (el.textContent !== t) el.textContent = t; };
 function setLog(details, pre, text) {
   if (!details.open || pre._text === text) return;
   const atEnd = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 4;
   pre._text = text; pre.textContent = text;
   if (atEnd) pre.scrollTop = pre.scrollHeight;
 }
-let boardSeq = 0;
-function boardCard(b) {
-  if (b.card) return b.card;
-  b.id = ++boardSeq;
-  const c = document.createElement('div');
-  c.className = 'card';
-  c.innerHTML = `<b class="title"></b><div class="kv"></div><div class="offers"></div><div class="refbox"></div>
-    <details class="usb"><summary>USB lines</summary><pre class="log"></pre></details>`;
-  c.querySelector('.usb').ontoggle = () => render();
-  c.querySelector('.offers').onclick = e => {
-    const el = e.target.closest('button[data-o]');
-    if (!el || (job && !job.done)) return;
-    const o = b.offers[+el.dataset.o];
-    if (o && confirm(`${o.l1}\n${o.l2}\n\n${(o.plan || []).map(([x, y]) => `${x}: ${y}`).join('\n')}\n\n${o.l3}`)) run(o.l1, o.go);
-  };
-  b.card = c;
-  return c;
+let lastDetail = ['', '', ''];
+let serialOk = true, serialMsg = '', buildsLoaded = false, ready1 = false;
+const hhmm = t => new Date(t).toTimeString().slice(0, 5);
+const vcol = v => String(v == null ? '?' : v).padEnd(8);
+const row = (label, v) => `${label.padEnd(8)} ${v}`;
+const espVal = b => b.mode === 'rom' ? (b.flash ? b.flash.version || b.flash.text.replace(/^ESP32 firmware:? ?/, '') : '')
+  : b.firmware === 'rover firmware' || b.role === 'monitor' ? b.version || '?'
+  : b.firmware === 'Monitor firmware (old)' ? `${vcol(b.version)} old Monitor`
+  : b.firmware ? 'V1.0 or other' : '';
+const espLine = b => espVal(b) ? row('ESP32', espVal(b)) : '';
+const stmLine = b => row('STM32', b.mode === 'rom' ? 'after update'
+  : /^app \d/.test(b.stm || '') ? b.stm.slice(4) : /^app 1\.x/.test(b.stm || '') ? '1.x'
+  : b.stm ? 'not reported' : 'not readable');
+function offerFor(b) {
+  if (!b || !b.connected || b.detecting || !b.firmware) return {};
+  const o = offersFor(b);
+  return { offer: o[0], missing: o.missing, refused: !o.length && o.refused && o.refused.length ? o.refused[0] : null, erase: o.erase };
 }
 function render() {
-  $('release').textContent = builds.length ? `Builds: ${builds.length} (${[...new Set(builds.map(x => x.src))].join(', ')})` : 'No builds found.';
-  $('steps').hidden = !stepText; $('steps').textContent = stepText;
-  drawRefMenu();
-  const idle = !job || job.done, list = $('boards'), all = [...boards.values()];
-  for (const el of [...list.children]) if (!all.some(b => b.card === el)) el.remove();
-  all.forEach((b, k) => {
-    const c = boardCard(b);
-    if (list.children[k] !== c) list.insertBefore(c, list.children[k] || null);
-    const rows = b.mode === 'rom' ? [['state', 'bootloader mode detected'], ['details', 'shown after the install: no firmware runs now'], ['port', b.state]]
-      : b.detecting ? [['state', 'reading the board'], ['port', b.state]]
-      : [['ESP32', (b.firmware || '-') + (b.version ? ` ${b.version}` : '')], ['role', b.role || '-'],
-        ['STM32', b.stm ? b.stm + (b.stmLink ? `, link v${b.stmLink}` : '') : '-'], ['board revision', b.board || (b.firmware ? 'RX_REVA (not reported)' : '-')],
-        ...(b.mac ? [['radio address', b.mac]] : []), ['port', b.state]];
-    setHtml(c.querySelector('.title'), `Rx ${k + 1}`);
-    setHtml(c.querySelector('.kv'), rows.map(([x, y]) => `<span class="k">${esc(x)}</span><span>${esc(y)}</span>`).join(''));
-    const offers = idle && b.state === 'open' && !b.detecting ? offersFor(b) : [];
-    b.offers = offers.erase ? [...offers, offers.erase] : offers;
-    const btn = offers.button ? `<div class="card steps">To install firmware, unplug the board.
-${BUTTON_STEP}</div>` : '';
-    setHtml(c.querySelector('.offers'), btn + b.offers.map((o, i) => `<button class="offer" data-o="${i}"><b>${esc(o.l1)}</b><span>${esc(o.l2)}</span><span>${esc(o.l3)}</span><div class="kv plan">${(o.plan || []).map(([x, y]) => `<span class="k">${esc(x)}</span><i>${esc(y)}</i>`).join('')}</div></button>`).join(''));
-    const refused = offers.refused || [], rb = c.querySelector('.refbox'), wasOpen = !!rb.querySelector('details')?.open;
-    if (setHtml(rb, refused.length ? `<details class="refused"><summary>Not compatible with this board (${refused.length})</summary>${refused.map(r => `<div class="ref"><b>${esc(r.l1)}</b><span>${esc(r.l2)}</span><span>${esc(r.reason)}</span></div>`).join('')}</details>` : '') && wasOpen && rb.querySelector('details')) rb.querySelector('details').open = true;
-    setLog(c.querySelector('.usb'), c.querySelector('.usb pre'), b.lines.slice(-200).join('\n'));
-  });
-  if (!all.length && !list.querySelector('.note')) list.innerHTML = '<p class="note">No Rx connected.</p>';
-  const jp = $('job');
-  jp.hidden = !job;
-  if (!job) return;
-  if (jp._job !== job) {
-    jp._job = job; jp._html = null;
-    jp.innerHTML = `<b class="name"></b><div class="body"></div><details class="dev"><summary>Developer log</summary><pre class="log"></pre></details>`;
-    jp.querySelector('.dev').ontoggle = () => render();
+  if (!$('rxDetail')) return;
+  const l = listed(), b = selected(), k = 1, running = !!(job && !job.done);
+  let L = ['', '', ''];
+  if (!serialOk) L = ['', '', ''];
+  else if (running && !b) L = ['Rx unplugged', 'The page waits for the Rx.', ''];
+  else if (b) {
+    const name = k ? 'Rx' : '', rev = b.board && b.board !== 'RX_REVA' ? `, revision ${b.board.replace('RX_REV', '')}` : '';
+    const e0 = job && job.esp && job.esp[0] === '?' && b.flash && b.flash.version ? b.flash.version : job && job.esp && job.esp[0];
+    if (running && job.esp) L = [b.mode === 'rom' ? `${name} in update mode` : `${name} connected`, row('ESP32', `${vcol(e0)} → ${job.esp[1]}`), job.stm ? row('STM32', `${vcol(job.stm[0])} → ${job.stm[1]}`) : stmLine(b)];
+    else if (!b.connected) L = [b.mode === 'rom' ? `${name} in update mode` : `${name} found, not connected`, '', ''];
+    else if (b.detecting) L = [`${name} connected`, 'Reading the versions…', ''];
+    else L = [(b.mode === 'rom' ? `${name} in update mode` : `${name} connected`) + rev, espLine(b), stmLine(b)];
   }
-  const res = job.result, head = res ? (res.ok ? 'Done' : 'Stopped') : job.stage, bar = `<div class="bar"><div style="width: ${job.pct}%"></div></div><div class="note">${job.pct} %</div>`;
-  setHtml(jp.querySelector('.name'), esc(job.name));
-  setHtml(jp.querySelector('.body'), (job.steps ? `<ol class="jobsteps">${job.steps.map(s => `<li class="${s.state}"><span>${{ wait: '·', now: '▶', done: '✓', fail: '✗' }[s.state] || '·'}</span>${esc(s.text)}${s.state === 'now' && !res ? `<div class="note">${esc(job.stage)}</div>${job.pct !== null ? bar : ''}` : ''}</li>`).join('')}</ol>` : '')
-    + `<div class="stage ${res ? (res.ok ? 'good' : 'bad') : ''}">${esc(job.steps && !res ? '' : head)}</div>`
-    + (!job.steps && job.pct !== null && !res ? bar : '')
-    + (res ? `<div class="result ${res.ok ? 'good' : 'bad'}">${esc(res.text)}</div>` : ''));
-  setLog(jp.querySelector('.dev'), jp.querySelector('.dev pre'), job.log.join('\n'));
+  const ended = !!(job && job.done);
+  if (ended && !(b && b.connected)) L = lastDetail; else if (b) lastDetail = L;
+  const detail = (running && !!b) || !!(b && (b.connected || b.detecting)) || ended;
+  const o0 = offerFor(b), connected = !!(b && b.connected && !b.detecting);
+  $('s2').classList.toggle('off', !(ready1 || running || connected));
+  $('fwCard').classList.toggle('off', !connected || running);
+  $('s4').classList.toggle('off', !(running || (job && job.result) || (connected && o0.offer && currentRef())));
+  $('doneBtn').hidden = ready1;
+  $('findBtn').hidden = detail; $('rxBtn').hidden = !detail;
+  $('findBtn').disabled = !serialOk || !(ready1 || running);
+  setHtml($('rxDetail'), detail ? L.map((t, i) => `<div class="line${i ? '' : ' big'}" title="${esc(t)}">${esc(t)}${i === 1 && b && b.detecting ? '<span class="spin"></span>' : ''}</div>`).join('') : '');
+  $('rxBtn').disabled = running || !!(b && b.detecting);
+  drawRefMenu();
+  $('refBtn').disabled = running;
+  const o = offerFor(b);
+  let I = '', tone = '', arrows = false;
+  if (!serialOk) { I = serialMsg; tone = 'bad'; }
+  else if (running) { I = stepText || 'Keep the Rx plugged in.'; tone = stepText ? 'warn' : ''; arrows = stepText.startsWith(BUTTON_STEP); }
+  else if (job && job.result) {
+    if (job.result.ok) { I = job.kind === 'erase' ? 'ESP32 erased. Press Disconnect.' : '✓ Update done. Press Disconnect.'; tone = 'good'; }
+    else if (job.result.text === NO_LOADER) { I = NO_LOADER; tone = 'bad'; }
+    else { I = `Stopped. ${CONNECT_STEP}, then press Find Rx Boards.`; tone = 'bad'; arrows = true; }
+  }
+  else if (!b) { I = ''; arrows = !ready1; }
+  else if (b.error) { I = b.error; tone = 'bad'; arrows = true; }
+  else if (!b.connected) { I = ''; arrows = !ready1; }
+  else if (b.detecting) I = 'Reading the Rx…';
+  else if (o.missing) { I = o.missing; tone = 'bad'; }
+  else if (o.refused) { I = `This firmware does not fit this Rx (revision ${(b.board || 'RX_REVA').replace('RX_REV', '')}). Press Change.`; tone = 'bad'; }
+  else if (!currentRef()) I = '';
+  else if (!o.offer) { I = 'No firmware fits this Rx. Press Change.'; tone = 'bad'; }
+  else I = 'Press Update. About 2 minutes.';
+  setText($('instr'), I); $('instr').className = `instr ${tone}`;
+  $('arrows').hidden = !arrows;
+  $('updBtn').disabled = !serialOk || running || !o.offer || !!o.missing;
+  const okEnd = !!(job && job.done && job.result && job.result.ok);
+  $('s4').classList.toggle('ok', okEnd);
+  setText($('updBtn'), okEnd ? 'Update again' : 'Update');
+  $('rxBtn2').hidden = !okEnd;
+  const pct = job ? job.pct : null, st = id => job && job.steps && job.steps.find(x => x.id === id);
+  const now = job && job.steps && job.steps.find(x => x.state === 'now');
+  if (job && !job.bars) job.bars = { Esp: 0, Stm: 0 };
+  const hasStm = !!(st('stm') && st('stm').state !== 'skip');
+  const rowOf = x => !x ? null : x.id === 'stm' || (x.id === 'check' && hasStm) ? 'Stm' : 'Esp';
+  const active = running ? rowOf(now) : null;
+  if (active && pct != null && (now.id === 'esp' || now.id === 'stm')) job.bars[active] = pct;
+  for (const k of ['Esp', 'Stm']) {
+    const s = st(k === 'Esp' ? 'esp' : 'stm'), skip = !job ? false : k === 'Stm' && !hasStm;
+    if (s && s.state === 'done') job.bars[k] = 100;
+    const v = !job || skip ? 0 : job.bars[k];
+    $(`bar${k}`).style.width = `${v}%`;
+    $(`row${k}`).classList.toggle('skip', skip);
+    $(`row${k}`).classList.toggle('fail', !!(s && s.state === 'fail'));
+    $(`spin${k}`).hidden = !(active === k && (pct == null || pct === 100 || (now && now.id !== 'esp' && now.id !== 'stm')));
+    setText($(`pct${k}`), job && !skip && (v || active === k) ? `${String(v).padStart(3, ' ')} %` : '');
+  }
+  const kv = b ? [['ESP32 firmware', b.mode === 'rom' ? (b.flash ? b.flash.detail || b.flash.text : 'not read') : `${b.firmware || '-'} ${b.version || ''}`],
+    ['role', b.role || '-'], ['Rx STM32 app', b.stm || '-'], ['board revision', b.board || (b.firmware ? 'RX_REVA (not reported)' : '-')],
+    ['radio address', b.mac || '-'], ['USB', b.state]] : [];
+  setHtml($('dKv'), kv.map(([x, y]) => `<span class="k">${esc(x)}</span><span>${esc(y)}</span>`).join(''));
+  $('eraseBtn').disabled = !serialOk || running || !b || !b.connected || !!b.detecting;
+  setLog($('more'), $('dLog'), [...pageLog, ...(job ? job.log : [])].join('\n'));
+  setLog($('more'), $('dUsb'), b ? b.lines.slice(-200).join('\n') : '');
 }
 let stepText = '';
 function instruct(text) { stepText = text; if (text) say('USER: ' + text); render(); }
+function startUpdate() {
+  const b = selected(), o = offerFor(b);
+  if (!b || !o.offer || (job && !job.done)) return;
+  const from = [b.mode === 'rom' ? (b.flash && b.flash.version) || '?' : b.version || '?', /^app \d/.test(b.stm || '') ? b.stm.slice(4) : '?'];
+  return run('Update', async () => { await ensureOpen(b); return o.offer.go(); }, { esp: [from[0], o.offer.espV], stm: o.offer.stmV ? [from[1], o.offer.stmV] : null });
+}
+function startErase() {
+  const b = selected(), o = offerFor(b);
+  if (!b || !o.erase || (job && !job.done)) return;
+  if (!confirm('Erase the whole ESP32? It then runs no firmware until the next update.')) return;
+  return run('Erase', async () => { await ensureOpen(b); return o.erase.go(); }, { kind: 'erase' });
+}
 
 function vcmp(a, b) { const x = String(a).split(/[.+ ]/).map(Number), y = String(b).split(/[.+ ]/).map(Number); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0); return 0; }
 function change(from, to) { if (!from) return 'Replaces an unknown version.'; const c = vcmp(to, from); return c === 0 ? `Same version (${from}).` : c > 0 ? `Replaces ${from}.` : `Older than the board (${from} to ${to}).`; }
@@ -664,7 +819,11 @@ const srcLine = (m, rel) => rel && rel === m.source.branch
   ? `${m.source.repo.split('/').pop()}, commit ${m.source.commit.slice(0, 7)}, release ${rel}`
   : `${m.source.repo.split('/').pop()}, branch ${m.source.branch}, commit ${m.source.commit.slice(0, 7)}`
   + (rel ? `, release ${rel}` : rel === false ? ', development branch' : '');
-let refSel = (() => { try { return JSON.parse(localStorage.getItem('tt.ref') || 'null'); } catch { return null; } })();
+let refSel = null;
+function fresh() {
+  job = null; ready1 = false; selPort = null; refSel = null; lastDetail = ['', '', ''];
+  $('refList').hidden = true; render();
+}
 let refInfo = {};
 let allBuilds = [];
 function refFromUrl() {
@@ -679,10 +838,11 @@ function urlFor(sel, pin) {
   u.search = `?fw=${enc(sel.repo.split('/').pop() + '/' + sel.ref)}` + (pin ? `&commit=${encodeURIComponent(pin)}` : '');
   return u.toString();
 }
+const pinnedOf = sel => allBuilds.filter(x => x.m.source.repo === sel.repo && x.m.source.branch === sel.ref && x.m.source.commit.startsWith(sel.commit));
+const pinMissing = sel => sel !== '*' && !!sel.commit && !pinnedOf(sel).length;
 function offerBuilds(sel) {
   if (sel === '*' || !sel.commit) return builds;
-  const pinned = allBuilds.filter(x => x.m.source.repo === sel.repo && x.m.source.branch === sel.ref && x.m.source.commit.startsWith(sel.commit));
-  return pinned.length ? [...pinned, ...builds.filter(x => !(x.m.source.repo === sel.repo && x.m.source.branch === sel.ref))] : builds;
+  return [...pinnedOf(sel), ...builds.filter(x => !(x.m.source.repo === sel.repo && x.m.source.branch === sel.ref))];
 }
 const stmOnly = repo => builds.filter(x => x.m.source.repo === repo).every(x => x.m.chip === 'stm32g070');
 const repoName = repo => ({ Trail_Tracer_Mower: 'Trail Tracer Mower', 'Trail-Tracer': 'Trail Tracer V1.0' })[repo.split('/').pop()]
@@ -697,7 +857,7 @@ function refsOf() {
     const r = m.get(k) || { repo: s.repo, ref: s.branch, release: x.release, commit: s.commit, t: s.built_utc, parts: [] };
     if (s.built_utc > r.t) Object.assign(r, { commit: s.commit, t: s.built_utc });
     if (x.m.chip === 'esp32s2' && x.m.esp32.usb_update) r.ver = vtext(x.m.version);
-    r.parts.push(x.m.chip === 'stm32g070' ? `STM32 app ${vtext(x.m.version)}` : x.m.esp32.usb_update ? `ESP32 firmware ${vtext(x.m.version)}` : 'ESP32 firmware');
+    r.parts.push(x.m.chip === 'stm32g070' ? `Rx STM32 app ${vtext(x.m.version)}` : x.m.esp32.usb_update ? `ESP32 firmware ${vtext(x.m.version)}` : 'ESP32 firmware');
     m.set(k, r);
   }
   const out = [...m.values()].map(r => {
@@ -713,64 +873,149 @@ function refsOf() {
   const rank = r => ({ release: 0, test: 1, dev: 2 })[r.kind] * 2 + (r.kind === 'dev' && r.ref !== 'main' ? 1 : 0);
   return out.sort((a, b) => a.repo.localeCompare(b.repo) || rank(a) - rank(b) || b.t.localeCompare(a.t));
 }
+const inSel = (x, sel) => sel === '*' || stmOnly(x.m.source.repo) || (x.m.source.repo === sel.repo && x.m.source.branch === sel.ref);
 function currentRef() {
   if (refSel === '*') return '*';
   const refs = refsOf(), fromUrl = refFromUrl();
   if (fromUrl) return fromUrl;
   if (refSel && refs.some(r => r.repo === refSel.repo && r.ref === refSel.ref)) return refSel;
-  const newest = list => [...list].sort((a, b) => b.t.localeCompare(a.t));
-  const rel = newest(refs.filter(r => r.kind === 'release')), mains = newest(refs.filter(r => r.ref === 'main'));
-  const d = rel[0] || mains.find(r => /Trail_Tracer_Mower$/.test(r.repo)) || mains[0] || newest(refs)[0];
-  return d ? { repo: d.repo, ref: d.ref } : '*';
+  return null;
 }
-const inSel = (x, sel) => sel === '*' || stmOnly(x.m.source.repo) || (x.m.source.repo === sel.repo && x.m.source.branch === sel.ref);
-const refHtml = r => `<b>${esc(r.title)}</b><span class="rdesc">${esc(r.description)}</span><span class="rgit">${esc(repoName(r.repo))} · ${esc(r.git)}</span>`;
+const builtOn = t => { const d = new Date(t); return isNaN(d) ? '' : `${d.getUTCDate()} ${d.toLocaleString('en', { month: 'short', timeZone: 'UTC' })} ${d.getUTCFullYear()}`; };
+const refName = r => r.ver && !/\d+\.\d+\.\d+/.test(r.title) ? `${r.title.replace(/ \(latest, untested\)/, '')} ${r.ver}` : r.title;
+const optHtml = (r, on, latest) => `<button class="refopt${on ? ' on' : ''}" data-v="${esc(JSON.stringify({ repo: r.repo, ref: r.ref }))}"><b>${esc(refName(r))}${latest ? '<span class="latest">latest</span>' : ''}</b>`
+  + `<span class="dim">${esc(builtOn(r.t))}</span></button>`;
 function drawRefMenu() {
   const refs = refsOf(), sel = currentRef(), list = $('refList');
-  $('refBox').hidden = !refs.length || sel === '*';
-  let cur = sel !== '*' && refs.find(r => r.repo === sel.repo && r.ref === sel.ref);
-  if (cur && sel.commit) {
-    const pb = offerBuilds(sel).find(x => x.m.source.repo === sel.repo && x.m.source.branch === sel.ref);
-    if (pb) cur = { ...cur, git: `${sel.ref}, ${pb.m.source.commit.slice(0, 7)} (this exact version)` };
+  let cur = sel && sel !== '*' && refs.find(r => r.repo === sel.repo && r.ref === sel.ref);
+  let F = buildsLoaded ? (refs.length ? ['Choose the firmware', ''] : ['No firmware found', '']) : ['Loading the firmware list…', ''];
+  if (!buildsLoaded) F = ['Loading the firmware list…', ''];
+  else if (sel === '*') F = ['Every build (test page)', ''];
+  else if (cur) {
+    let l2 = builtOn(cur.t);
+    if (sel.commit) {
+      const pb = offerBuilds(sel).find(x => x.m.source.repo === sel.repo && x.m.source.branch === sel.ref);
+      l2 = pb ? `exact version ${pb.m.source.commit.slice(0, 7)}` : `${sel.commit.slice(0, 7)}: not on this site`;
+    }
+    F = [refName(cur), l2];
   }
-  if (cur) { const h = refHtml(cur); if ($('refBtn').dataset.h !== h) { $('refBtn').dataset.h = h; $('refBtn').innerHTML = h; } }
+  ['fwL1', 'fwL2'].forEach((id, i) => { setText($(id), F[i]); $(id).title = F[i]; });
+  $('refBtn').hidden = !refs.length || sel === '*'; $('refBtn').textContent = cur ? 'Change' : 'Choose';
+  $('spinFw').hidden = buildsLoaded;
   if (cur) {
     const newest = builds.find(x => x.m.source.repo === cur.repo && x.m.source.branch === cur.ref);
-    const pinC = sel.commit ? (offerBuilds(sel).find(x => x.m.source.repo === cur.repo && x.m.source.branch === cur.ref) || newest) : newest;
-    const link = urlFor(cur, pinC && pinC.m.source.commit.slice(0, 12));
+    const pinC = sel.commit ? offerBuilds(sel).find(x => x.m.source.repo === cur.repo && x.m.source.branch === cur.ref) : newest;
+    const link = urlFor(cur, pinC ? pinC.m.source.commit.slice(0, 12) : sel.commit);
     if ($('refLink').href !== link) $('refLink').href = link;
     if (!window.PROGRAM_TEST) { const want = urlFor(cur, sel.commit); if (location.href !== want) history.replaceState(null, '', want); }
   }
-  const key = refs.map(r => [r.repo, r.ref, r.commit, r.title, r.description].join(' ')).join('|') + (cur ? cur.repo + cur.ref : '');
+  const key = refs.map(r => [r.repo, r.ref, r.commit, r.title].join(' ')).join('|') + (cur ? cur.repo + cur.ref : '');
   if (list.dataset.key === key) return;
   list.dataset.key = key;
-  list.innerHTML = [...new Set(refs.map(r => r.repo))].map(repo => `<div class="rgroup">${esc(repoName(repo))}</div>`
-    + refs.filter(r => r.repo === repo).map(r => `<button class="refopt${cur && cur.repo === r.repo && cur.ref === r.ref ? ' on' : ''}" data-v="${esc(JSON.stringify({ repo: r.repo, ref: r.ref }))}">${refHtml(r)}</button>`).join('')).join('');
+  const all = [...refs].sort((a, c) => c.t.localeCompare(a.t));
+  list.innerHTML = all.map((r, i) => optHtml(r, cur && cur.repo === r.repo && cur.ref === r.ref, i === 0)).join('');
   for (const el of list.querySelectorAll('.refopt')) el.onclick = () => chooseRef(el.dataset.v);
 }
 function chooseRef(v) {
   refSel = JSON.parse(v); $('refList').hidden = true;
   if (!window.PROGRAM_TEST) history.replaceState(null, '', urlFor(refSel));
-  try { localStorage.setItem('tt.ref', v); } catch { /* no storage */ }
+  if (job && job.done) job = null;
   render();
 }
 
 const named = (label, v, sep = ' ') => `${label.replace(/\s*\bv?\d+\.\d+\.\d+[^\s,()]*/g, '').trim()}${sep}${v}`;
-const stmCurrent = (b, s) => !!(b && s && b.stm === `app ${s.m.version}`);
+const canRestart = b => b.firmware === 'rover firmware' && vcmp(b.version, '0.5.65') >= 0 && /^app \d/.test(b.stm || '') && vcmp(b.stm.slice(4), '2.0.39') >= 0;
 async function stmPart(r1, stm) {
   const nb = [...boards.values()].find(x => x.mode === 'app' && x.firmware === 'rover firmware' && x.state === 'open');
-  if (!nb) throw plain(`${r1} The STM32 update did not start: the board is not on USB. Start the install again.`);
-  if (!stmCurrent(nb, stm)) { nb.stm = await readStm(nb); say(`STM32 version at the decision: ${nb.stm}`); render(); }
-  if (stmCurrent(nb, stm)) {
-    step('stm'); say(`STM32 runs ${nb.stm}, the version of the entry: no STM32 update`);
-    step('check'); return `${r1} The STM32 runs ${nb.stm} already: no STM32 update.`;
+  if (!nb) throw plain(`${r1} The Rx STM32 update did not start: the Rx is not on USB. Press Update again.`);
+  stage('Reading the Rx STM32');
+  const t0 = Date.now();
+  while (Date.now() - t0 < 5000 && !nb.closing) {
+    nb.firstPacket = undefined;
+    await ask(nb, 'boot', /^BOOT rover-firmware/, 1500);
+    if (nb.firstPacket > 0) break;
+    await waitLine(nb, /^HB /, 1500);
   }
+  const linked = nb.firstPacket > 0;
+  say(`Rx STM32 link: ${linked ? `first packet ${nb.firstPacket} ms after the ESP32 start` : 'no Rx STM32 packet in 5 s: it waits in its boot checker'}`);
+  if (linked) {
+    nb.stm = await readStm(nb); say(`Rx STM32 version: ${nb.stm}`); render();
+    if (canRestart(nb)) {
+      try { return `${r1} ${await stmRestart(nb, stm)}`; }
+      catch (ex) {
+        if (ex.plain) throw plain(`The ESP32 firmware is installed. ${ex.message}`);
+        say(`no-power-cycle path: ${ex.message}; the replug path`);
+        const back = [...boards.values()].find(x => x.mode === 'app' && x.firmware === 'rover firmware' && x.state === 'open' && !x.bridge);
+        if (!back) throw plain(BUTTON_STEP);
+        back.binMode = false; back.bridge = false;
+        return stmLoadOr(r1, back, stm);
+      }
+    }
+    return stmLoadOr(r1, nb, stm);
+  }
+  try {
+    const set = await ask(nb, 'stm iaphold', /STM iaphold (set|:)/, 10000);
+    say(String(set));
+    if (set && /STM iaphold set/.test(set)) {
+      const oldPort = nb.port;
+      bridgeNext = true;
+      await send(nb, 'restart').catch(() => {});
+      say('restart (ESP32 only): the new start opens the Rx STM32 bridge');
+      await closeBoard(nb).catch(() => {});
+      let bb;
+      try { bb = await waitBoardHint(x => x.mode === 'app' && x.port !== oldPort && x.bridge, 30000, 'the board'); } finally { bridgeNext = false; }
+      if (bb) {
+        try { return `${r1} ${await stmBridge(bb, stm)}`; }
+        catch (ex) {
+          if (ex.message !== NO_LOADER) throw ex;
+          say('no HELLO answer after the restart: the Rx STM32 runs its app; the replug path');
+          bb.binMode = false; bb.buf = ''; bb.bridge = false;
+          if (!await waitLine(bb, /STM bridge off/, 30000)) say('no "STM bridge off" line within 30 s');
+          Object.assign(bb, { firmware: null, version: null, role: null, stm: null, stmLink: null, table: null, tableCrc: null, hb: false });
+          await detect(bb);
+        }
+      } else say('no bridge after the restart: the replug path');
+    }
+  } catch (ex) {
+    if (ex.plain) throw plain(`The ESP32 firmware is installed. ${ex.message}`);
+    say(`Rx STM32 by restart: ${ex.message}; the replug path`);
+  }
+  const back = [...boards.values()].find(x => x.mode === 'app' && x.firmware === 'rover firmware' && x.state === 'open' && !x.bridge);
+  if (!back) throw plain(BUTTON_STEP);
+  return stmLoadOr(r1, back, stm);
+}
+async function stmRestart(b, build) {
+  step('stm');
+  stage('Checking the Rx STM32 files');
+  const header = await fetchBuild(build, build.m.stm32.update.header), image = await fetchBuild(build, build.m.stm32.update.image);
+  if (header.length !== 52 || image.length % 1040) throw new Error(`header ${header.length} B, image ${image.length} B`);
+  const first = new Uint8Array(52 + 1040); first.set(header); first.set(image.subarray(0, 1040), 52);
+  stage('Preparing the Rx STM32 for its update');
+  const re = /^STM restart (held|refused|failed)/;
+  let a = await ask(b, 'stm restart clear', re, 3000);
+  if (!a || !/held 0 B/.test(a)) throw new Error(`"stm restart clear": ${a || 'no answer'}`);
+  for (let off = 0; off < first.length; off += 512) {
+    const n = Math.min(off + 512, first.length);
+    a = await ask(b, `stm restart add ${hex(first.subarray(off, n))}`, re, 3000);
+    if (!a || !new RegExp(`held ${n} B`).test(a)) throw new Error(`"stm restart add" up to ${n} B: ${a || 'no answer'}`);
+  }
+  const on = waitLine(b, /^STM bridge on/, 15000);
+  a = await ask(b, 'stm restart go', /^STM restart(:| failed| refused)/, 5000);
+  say(String(a || 'no answer to "stm restart go"'));
+  if (!a || !/^STM restart:/.test(a)) throw new Error(`"stm restart go": ${a || 'no answer'}`);
+  const line = await on;
+  if (!line) throw new Error('no "STM bridge on" within 15 s of "stm restart go"');
+  say(line);
+  Object.assign(b, { binMode: true, bin: new Uint8Array(0), bridge: true, restartLine: line });
+  return stmBridge(b, build, header, image);
+}
+async function stmLoadOr(r1, nb, stm) {
   try { return `${r1} ${await stmLoad(nb, stm)}`; }
   catch (ex) { say(`STM32 part: ${ex.message}`); throw plain(`The ESP32 firmware is installed. ${ex.plain ? ex.message : 'The STM32 update stopped. Start the install again.'}`); }
 }
 function offersFor(b) {
   const out = [], no = [], sel = currentRef(), rev = b.board || 'RX_REVA';
-  const pool = offerBuilds(sel).filter(x => inSel(x, sel));
+  const pool = sel ? offerBuilds(sel).filter(x => inSel(x, sel)) : [];
   const stmExtra = pool.filter(x => stmOnly(x.m.source.repo) && x.m.chip === 'stm32g070');
   const groups = new Map();
   for (const x of pool) {
@@ -784,37 +1029,33 @@ function offersFor(b) {
     if (!g.esp) continue;
     const m = g.esp.m, rover = !!m.esp32.usb_update, stm = rover ? (g.stm || stmExtra[0]) : null;
     const what = `${rover ? named(m.label || 'ESP32 rover firmware', m.version) : named(m.label || m.source.repo.split('/').pop() + ' firmware', m.version, ', ')}`
-      + (stm ? ` + ${named(stm.m.label || 'STM32 app', stm.m.version)}` : '') + ` (${srcLine(m, g.esp.release)})`;
+      + (stm ? ` + ${named(stm.m.label || 'Rx STM32 app', stm.m.version)}` : '') + ` (${srcLine(m, g.esp.release)})`;
     const bad = [g.esp, stm].filter(Boolean).find(x => !x.m.boards.includes(rev));
     if (bad) { no.push({ l1: 'Full install', l2: what, reason: `This firmware is for board revision ${bad.m.boards.join(', ')}. This board is revision ${rev}.` }); continue; }
     const rom = b.mode === 'rom';
-    const espName = named(m.label || 'firmware', m.version), stmName = stm && named(stm.m.label || 'STM32 app', stm.m.version);
-    const steps = [...(rom ? [] : [{ id: 'loader', text: 'Prepare the board for the install' }]), { id: 'esp', text: `ESP32: write ${espName} (only the parts that differ)` }, { id: 'start', text: 'Start the new ESP32 firmware' },
-      ...(stm ? [{ id: 'stm', text: `STM32: update to ${stmName} if its version differs` }] : []), { id: 'check', text: 'Read both versions' }];
-    out.push({ l1: 'Install', l2: what, steps,
-      l3: `Installs what differs on the ESP32${stm ? ' and the STM32' : ''}.`,
-      plan: [['Erases', 'all ESP32 settings, logs and files: they return to their defaults (the whole ESP32 when its partition table differs)'],
-        ['Writes ESP32', `${espName}: only the parts that differ`],
-        ...(stm ? [['Writes STM32', `${stmName}, only if its version differs; its settings and calibration then return to their defaults`]] : []),
-        ['Keeps', stm ? 'the STM32 app and its settings when its version is current' : 'the STM32']],
+    const steps = [{ id: 'loader', text: 'Prepare', skip: rom }, { id: 'esp', text: 'Write ESP32' },
+      { id: 'stm', text: 'Write Rx STM32', skip: !stm }, { id: 'check', text: 'Check' }];
+    out.push({ l1: 'Update', l2: what, steps, espV: m.version, stmV: stm ? stm.m.version : null,
+      l3: stm ? 'Erases the whole ESP32, writes its firmware and the Rx STM32 app. Wipes all user settings and calibration.'
+        : 'Erases the whole ESP32 and writes its firmware. Wipes all user settings.',
       go: () => fullInstall(b, g.esp, stm, steps) });
   }
   out.refused = no;
-  const esteps = [...(b.mode === 'rom' ? [] : [{ id: 'loader', text: 'Prepare the board' }]), { id: 'esp', text: 'ESP32: erase the whole flash' }];
+  out.missing = sel && pinMissing(sel) ? `This exact version (${sel.commit.slice(0, 7)}) is not on this site. Press Change.` : null;
+  const esteps = [{ id: 'loader', text: 'Prepare', skip: b.mode === 'rom' }, { id: 'esp', text: 'Erase ESP32' }];
   out.erase = { l1: 'Erase ESP32', l2: 'Erases the whole ESP32 flash and writes no firmware.',
     l3: 'The board then stays in bootloader mode until a Full install.',
-    plan: [['Erases', 'the whole ESP32 flash, 4 MB: firmware, settings, logs and Wi-Fi passwords. Nothing stays.'], ['Writes', 'nothing'], ['Keeps', 'the STM32 app and its update loader']],
-    go: () => { if (job) job.steps = esteps.map(x => ({ ...x, state: 'wait' })); return romLoad(b, null, true); } };
+    steps: esteps, go: () => { if (job) job.steps = esteps.map(x => ({ ...x, state: x.skip ? 'skip' : 'wait' })); return romLoad(b, null, true); } };
   return out;
 }
 async function otaInstall(b, esp, stm, steps) {
-  if (job && steps) job.steps = steps.map(x => ({ ...x, state: 'wait' }));
+  if (job && steps) job.steps = steps.map(x => ({ ...x, state: x.skip ? 'skip' : 'wait' }));
   const r1 = await otaUpdate(b, esp);
   if (!stm) { step('check'); return r1; }
   return stmPart(r1, stm);
 }
 async function fullInstall(b, esp, stm, steps) {
-  if (job && steps) job.steps = steps.map(x => ({ ...x, state: 'wait' }));
+  if (job && steps) job.steps = steps.map(x => ({ ...x, state: x.skip ? 'skip' : 'wait' }));
   mergedBridge = null;
   const r1 = await romLoad(b, esp, true, stm);
   if (!stm) { step('check'); return r1; }
@@ -838,15 +1079,66 @@ async function fullInstall(b, esp, stm, steps) {
   return stmPart(r1, stm);
 }
 
+async function fetchPool(urls, n) {
+  const out = new Array(urls.length).fill(null);
+  let next = 0;
+  const worker = async () => {
+    while (next < urls.length) {
+      const k = next++;
+      for (let t = 0; t < 3 && !out[k]; t++) { try { const r = await fetch(urls[k]); if (r.ok) out[k] = await r.json(); } catch { await sleep(500 * (t + 1)); } }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(n, urls.length) }, worker));
+  return out;
+}
 async function start() {
   $('refBtn').onclick = e => { e.stopPropagation(); $('refList').hidden = !$('refList').hidden; };
-  addEventListener('click', e => { if (!$('refBox').contains(e.target)) $('refList').hidden = true; });
+  addEventListener('click', e => { if (!$('fwCard').contains(e.target)) $('refList').hidden = true; });
+  $('rxBtn').onclick = $('rxBtn2').onclick = () => { const b = selected(); fresh(); if (b) disconnectBoard(b); };
+  $('doneBtn').onclick = () => { ready1 = true; render(); $('findBtn').focus(); };
+  addEventListener('keydown', e => {
+    if (ready1 || (e.key !== 'Enter' && e.key !== ' ') || e.target.closest('button, input, select, a, summary')) return;
+    e.preventDefault(); ready1 = true; render(); $('findBtn').focus();
+  });
+  $('findBtn').onclick = async () => {
+    try {
+      const port = await navigator.serial.requestPort({ filters: [{ usbVendorId: ESPRESSIF }] });
+      note(`browser list: selected ${usbId(port)}`);
+      known(port);
+      if (!job || job.done) { selPort = port; connectBoard(boards.get(port)); }
+    } catch { /* the browser list was closed */ }
+  };
+  $('updBtn').onclick = () => startUpdate();
+  $('eraseBtn').onclick = () => startErase();
+  $('more').ontoggle = () => render();
   try {
     const v = await (await fetch('version.json', { cache: 'no-store' })).json();
     if (v && v.version) pageVer = `Page v${v.version}, ${v.date}, ${v.commit}`;
   } catch { /* no version.json: a local copy */ }
   $('pageVer').textContent = pageVer;
-  if (window.PROGRAM_TEST) return render();
+  if (window.PROGRAM_TEST) { buildsLoaded = true; return render(); }
+  if (!('serial' in navigator) || !isSecureContext) {
+    serialOk = false;
+    serialMsg = !isSecureContext
+      ? `This page needs a secure address for USB. Open http://localhost${location.port ? ':' + location.port : ''}${location.pathname} on the computer with the Rx.`
+      : 'This page needs Chrome or Edge on a computer. Phones and other browsers cannot reach USB devices.';
+  }
+  render();
+  if (serialOk) {
+    navigator.serial.addEventListener('connect', e => { const port = e.target; port.gone = false; lastConnect = Date.now(); note(`USB connect: ${usbId(port)}`); setTimeout(() => { if (!port.gone) known(port); }, 2000); });
+    navigator.serial.addEventListener('disconnect', e => {
+      const port = e.target, b = boards.get(port);
+      note(`USB disconnect: ${usbId(port)}`);
+      port.gone = true;
+      disconnects++;
+      if (b) { b.state = 'unplugged'; closeBoard(b).catch(() => {}); }
+      if (port === selPort && !(job && !job.done)) fresh();
+    });
+    addEventListener('pagehide', () => { for (const b of boards.values()) { b.closing = true; b.port.close().catch(() => {}); } });
+    const permitted = await navigator.serial.getPorts();
+    note(`the browser permits ${permitted.length} port${permitted.length === 1 ? '' : 's'} on USB now${permitted.length ? ': ' + permitted.map(usbId).join(', ') : ''}; modes allowed before in this browser: ${['app', 'rom'].filter(m => perm[m]).map(m => m === 'rom' ? 'update mode' : 'firmware runs').join(', ') || 'none'}`);
+    for (const p of permitted) known(p);
+  }
   try {
     let r = await fetch('sources.json').catch(() => null);
     if (!r || !r.ok) r = await fetch('api/sources');
@@ -855,37 +1147,16 @@ async function start() {
       const rr = await fetch(s.base + 'releases.json').catch(() => null), rel = rr && rr.ok ? (await rr.json()).commits || {} : null;
       const rf = await fetch(s.base + 'refs.json').catch(() => null);
       if (rf && rf.ok) for (const e of (await rf.json()).refs || []) refInfo[e.repo + ' ' + e.ref] = e;
-      for (const e of idx.builds) {
-        const m = await (await fetch(s.base + e.manifest)).json();
-        builds.push({ m, base: s.base + e.manifest.replace(/[^/]*$/, ''), src: s.name, release: rel ? rel[m.source.commit] || false : undefined });
-      }
+      const ms = await fetchPool(idx.builds.map(e => s.base + e.manifest), 6);
+      idx.builds.forEach((e, k) => { if (ms[k]) builds.push({ m: ms[k], base: s.base + e.manifest.replace(/[^/]*$/, ''), src: s.name, release: rel ? rel[ms[k].source.commit] || false : undefined }); });
+      const lost = ms.filter(m => !m).length; if (lost) note(`${lost} of ${ms.length} build manifests did not load`);
     }
     builds.sort((a, b) => b.m.source.built_utc.localeCompare(a.m.source.built_utc));
     allBuilds = [...builds];
     const seen = new Set();
     builds = builds.filter(x => { const k = [x.m.source.repo, x.m.source.branch, x.m.chip].join(' '); return !seen.has(k) && seen.add(k); });
   } catch (ex) { console.error(ex); }
-  if (!('serial' in navigator) || !isSecureContext) {
-    $('noSerial').hidden = false;
-    $('noSerial').textContent = !isSecureContext
-      ? `This page needs a secure address for USB access. Open http://localhost${location.port ? ':' + location.port : ''}${location.pathname} on the PC with the Rx.`
-      : 'This browser has no Web Serial. Use Chrome or Edge on a PC.';
-    $('connectBtn').disabled = true;
-    return render();
-  }
-  $('connectBtn').onclick = async () => {
-    try { open(await navigator.serial.requestPort({ filters: [{ usbVendorId: ESPRESSIF }] })); }
-    catch { /* the chooser was closed */ }
-  };
-  navigator.serial.addEventListener('connect', e => { const port = e.target; port.gone = false; lastConnect = Date.now(); setTimeout(() => { if (!port.gone) open(port); }, 2000); });
-  navigator.serial.addEventListener('disconnect', e => {
-    const port = e.target, b = boards.get(port);
-    port.gone = true;
-    disconnects++;
-    if (b) { b.state = 'unplugged'; closeBoard(b).catch(() => {}); }
-  });
-  addEventListener('pagehide', () => { for (const b of boards.values()) { b.closing = true; b.port.close().catch(() => {}); } });
-  for (const p of await navigator.serial.getPorts()) open(p);
+  buildsLoaded = true;
   render();
 }
 start();

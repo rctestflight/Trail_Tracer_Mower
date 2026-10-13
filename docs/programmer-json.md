@@ -1,7 +1,7 @@
 # Put a branch on the Rx programmer page
 
-The page offers the branch `main` and every tag of each firmware repository. Any other branch shows only
-when it holds a file `programmer.json` at its root. No file: the branch is not on the page.
+The page offers the newest commit of the branches `main`, `dev` and `dev-tyler` and every tag of each
+firmware repository. No other branch and no older commit is on the page.
 
 `programmer.json` names what the page offers from the branch, each item with a plain label:
 
@@ -29,11 +29,10 @@ when it holds a file `programmer.json` at its root. No file: the branch is not o
 | `"stm32": "latest"` | in place of the list: the page offers the newest encrypted pair in `stm32/` (newest by the version `vX.Y.Z` in the file name; the `.commit_header` and the `.bin.encrypted` must have the same name). An STM32 update then needs only the new files in `stm32/`, no edit of this file. No pair in `stm32/`: the branch is not offered |
 
 Every key is optional. Without a title, the menu says "Release vX.Y.Z" for a tag, "Test release vX.Y.Z" for a
-tag that ends in `-test.N`, and "Development build" for `main`. The menu lists releases first, then test
-releases, then development builds, each with its branch or tag and commit in small print. Labels use letters, digits, spaces and `. , : ( ) + / _ -`, at most 60
+tag that ends in `-test.N`, and "Development build" for `main`. The menu lists every entry newest first and
+marks the first one "latest", each with its branch or tag and commit in small print. Labels use letters, digits, spaces and `. , : ( ) + / _ -`, at most 60
 characters. A file that does not follow this form takes the branch off the page.
 
-The page checks the public repositories every 30 minutes and builds each new commit of `main`, of every
-tag and of every branch with this file. Remove the file, or delete the branch, and its builds leave the page
-at the next check. The same rule applies to `main` and tags when they hold the file: it then names the
-items; without it they offer the default PlatformIO environment and every STM32 update pair in the commit.
+The page builds the newest commit of `main`, `dev` and `dev-tyler` and of every tag at each run of its
+workflow. An older commit or a deleted tag leaves the page at the next run. A ref with this file offers what
+the file names; without it, the default PlatformIO environment and every STM32 update pair in the commit.

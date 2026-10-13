@@ -1,14 +1,14 @@
 """build_all.py - build the firmware the programmer page offers, from the public Rx firmware repos.
 
-Which refs: the branch "main" and every tag of each repo, always; any other branch only when it holds
-programmer.json at its root (the opt-in file: see docs/programmer-json.md). A ref with a build of its
-current commit is skipped. For each new commit: shallow clone, PlatformIO build (programmer.json "esp32"
+Which refs: the branches main, dev and dev-tyler and every tag of each repo; no other branch.
+programmer.json at the root of a ref names what it offers (docs/programmer-json.md). A ref with a build
+of its current commit is skipped. For each new commit: shallow clone, PlatformIO build (programmer.json "esp32"
 env, else the default environment) with prefix maps (no local path goes into the image), and the STM32
 update pairs (programmer.json "stm32", else every .commit_header with its .bin.encrypted); then
 tools/make_manifest.py adds each build to <out> (index.json and <repo>/<ref>/<commit>/).
 
-Drops the builds of refs that are no longer offered (branch deleted, opt-in file removed) and of commits
-that no branch or tag reaches any more; keeps the newest KEEP builds of each ref. A failed build is
+Drops the builds of refs that are no longer offered (branch or tag deleted) and of commits that no branch
+or tag reaches any more; keeps only the build of the newest commit of each ref (KEEP = 1). A failed build is
 reported and skipped. No GitHub API: one blobless clone of each repo gives refs, opt-in files and
 reachable commits.
 
@@ -24,7 +24,8 @@ import tempfile
 from pathlib import Path
 
 REPOS = ["rctestflight/Trail_Tracer_Mower", "rctestflight/Trail-Tracer"]
-KEEP = 10
+KEEP = 1                                   # the newest commit of each ref only
+BRANCHES = ("main", "dev", "dev-tyler")      # the branches on the page; every tag too
 OPT_IN = "programmer.json"
 HERE = Path(__file__).resolve().parent
 LABEL = re.compile(r"^[A-Za-z0-9 .,:()+/_-]{1,60}$")        # a plain label: shown on the page as text
@@ -95,8 +96,7 @@ def clones(work):
 
 
 def targets(cl):
-    """(repo, ref, commit, opt-in config or None, is tag): main and every tag always, other branches with
-    programmer.json at the root of their head."""
+    """(repo, ref, commit, programmer.json config or None, is tag): the branches in BRANCHES and every tag."""
     out = []
     for repo, d in cl.items():
         lines = git("-C", str(d), "for-each-ref", "--format=%(refname)\t%(objectname)\t%(*objectname)",
@@ -106,7 +106,7 @@ def targets(cl):
             sha, tag = peeled or obj, name.startswith("refs/tags/")
             ref = name.split("/", 2)[2]
             has = git("-C", str(d), "cat-file", "-e", f"{sha}:{OPT_IN}", check=False).returncode == 0
-            if not (tag or ref == "main" or has):
+            if not (tag or ref in BRANCHES):
                 continue
             cfg = None
             if has:

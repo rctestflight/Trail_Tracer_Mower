@@ -81,7 +81,7 @@ jobs:
 
       - name: Page files
         run: |
-          cp tools/programmer/page/index.html tools/programmer/page/program.js tools/programmer/page/icon-32.png site/
+          cp tools/programmer/page/index.html tools/programmer/page/program.js tools/programmer/page/icon-32.png tools/programmer/page/receiver.jpg site/
           echo '{"sources": [{"name": "builds", "base": "builds/"}]}' > site/sources.json
           touch site/.nojekyll
           # the page version: PAGE_VERSION of the page, the date and the short commit of this repo
