@@ -62,6 +62,9 @@ pre { margin:8px 0 0; height:180px; overflow:auto; background:var(--panel); bord
 .rgroup { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.06em; margin:8px 6px 2px; }
 .refopt { display:grid; gap:0; width:100%; text-align:left; border:1px solid var(--line); border-radius:6px; padding:6px 10px; margin:4px 0; background:var(--bg); }
 .refopt.on { border-color:var(--accent); } .refopt .dim { font-size:12px; }
+.refopt { grid-template-columns:minmax(0, 1fr) auto; column-gap:16px; } .refopt b, .refopt .dim { grid-column:1; }
+.refopt .gitref { grid-column:2; grid-row:1 / span 2; align-self:center; text-align:right; white-space:nowrap; }
+.gitref { font-size:14px; font-weight:600; }
 .devrefs { padding:4px 6px; } .devrefs > summary { padding:4px 0; }
 footer { max-width:760px; margin:0 auto; padding:0 16px 24px; }
 @media (max-width: 600px) { body { font-size:12px; } .big { font-size:14px; } .instr { height:96px; font-size:13px; } header .note { display:none; }
@@ -113,7 +116,7 @@ footer { max-width:760px; margin:0 auto; padding:0 16px 24px; }
     <div class="mid"><div class="say">Hold the button while you plug in USB</div><div id="rxDetail"></div></div>
     <div class="btns"><button id="doneBtn" class="primary">Done</button>
       <div id="s2" class="step"><button id="findBtn" class="primary">Find Rx Boards</button><button id="rxBtn" class="primary" hidden>Disconnect</button></div></div></div>
-  <div id="fwCard" class="card cols step"><div class="mid"><div id="fwL1" class="line big"></div><div id="fwL2" class="line dim"></div></div>
+  <div id="fwCard" class="card cols step"><div class="mid"><div id="fwL1" class="line big"></div><div id="fwL2" class="line dim"></div><div id="fwL3" class="line gitref"></div></div>
     <div class="btns"><button id="refBtn" class="primary">Choose</button><span id="spinFw" class="spin" hidden></span></div>
     <div id="refList" class="reflist" hidden></div></div>
   <div id="s4" class="card cols step"><div class="mid"><div class="prog"><div id="rowEsp" class="prow"><span class="plab">ESP32</span><div class="bar"><div id="barEsp" style="width:0%"></div></div><span class="slot"><span id="spinEsp" class="spin" hidden></span></span><span id="pctEsp" class="pctn"></span></div>
