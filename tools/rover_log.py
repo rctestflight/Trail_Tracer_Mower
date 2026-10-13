@@ -21,6 +21,9 @@ B_SAMPLES, B_STATUS, B_SAMPLES_IMU, B_EVENT = 0x20, 0x21, 0x22, 0x30
 B_SAMPLES_DEC, B_SAMPLES_IMU_DEC = 0x24, 0x25  # 0x20 / 0x22 below 100 Hz: one more header byte, the rate in Hz
 # Layout 3 (firmware 0.5.58): 50-byte samples (60 with the IMU axes); 0x2C / 0x2D below 100 Hz
 B3_SAMPLES, B3_SAMPLES_IMU, B3_SAMPLES_DEC, B3_SAMPLES_IMU_DEC = 0x2A, 0x2B, 0x2C, 0x2D
+# Firmware 0.5.66: coil magnitudes of all 8 bins, stream 0, one record each window (about 200 ms)
+B_BINS = 0x2E
+NO_DATA24 = -8388608  # 0x800000: the sensor is on no STM32 lane, or the bin is off
 NO_SEQ = 0xFFFFFFFF
 AP_STATES = ["roam", "seek", "acquire", "follow", "depart", "halted"]
 EVENTS = {1: "boot", 2: "mode", 3: "ap_state", 4: "stuck", 5: "charge_step", 6: "odrive_error",
@@ -110,6 +113,16 @@ def decode_event(b):
     return d
 
 
+def decode_bins(b):
+    """Body 0x2E: frames averaged, window ms, 8 bin frequencies (Hz; None = bin off), and per bin the 4 coil
+    values (sensor 1 coil 1, coil 2, sensor 2 coil 1, coil 2) in STM32 magnitude LSB; None = no data."""
+    n, win = b[1], struct.unpack_from("<H", b, 2)[0]
+    hz = [f * 2 if f else None for f in struct.unpack_from("<8H", b, 4)]
+    vals = [int.from_bytes(b[20 + 3 * i:23 + 3 * i], "little", signed=True) for i in range(32)]
+    vals = [None if v == NO_DATA24 else v for v in vals]
+    return {"frames": n, "window_ms": win, "hz": hz, "coils": [vals[4 * k:4 * k + 4] for k in range(8)]}
+
+
 def decode_body(body, ms):
     if not body:
         return {"body": None}
@@ -127,6 +140,8 @@ def decode_body(body, ms):
         return {"body": "status", **decode_status(body)}
     if t == B_EVENT:
         return {"body": "event", **decode_event(body)}
+    if t == B_BINS and len(body) >= 116:
+        return {"body": "bins", **decode_bins(body)}
     return {"body": "unknown 0x%02x" % t}
 
 

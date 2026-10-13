@@ -23,6 +23,14 @@ const int BLOCK_BYTES = 3 + SAMPLES_PER_BLOCK * SAMPLE_BYTES;  // 227, the large
 // IMU axes). 0x2A 100 Hz, 0x2B with IMU, 0x2C decimated, 0x2D decimated with IMU. Layout 1 stays readable.
 const uint8_t BODY_SAMPLES3 = 0x2A, BODY_SAMPLES3_IMU = 0x2B, BODY_SAMPLES3_DEC = 0x2C, BODY_SAMPLES3_IMU_DEC = 0x2D;
 const int SAMPLE3_BYTES = 50, SAMPLES3_PER_BLOCK = 4, IMU_SAMPLE3_BYTES = 60, IMU_SAMPLES3_PER_BLOCK = 3;
+// 0x2E (0.5.66, stream 0, 5 a second): the coil magnitudes of all 8 frequency bins of both sensors, averaged
+// over the window, for the per-bin plots of the telemetry app. type, frames averaged (u8, 255 at most), window
+// ms (u16), 8 x bin frequency in Hz/2 (u16, 0 = bin off), then per bin: sensor 1 coil 1, sensor 1 coil 2,
+// sensor 2 coil 1, sensor 2 coil 2 as int24 in Rx STM32 magnitude LSB (2^-24), signed as the USB STMCOIL8 line
+// (mean of |v| with the sign of the sum). BINS_NONE: no data (the sensor is on no lane, or the bin is off).
+const uint8_t BODY_BINS = 0x2E;
+const int BINS = 8, BINS_BYTES = 4 + BINS * 2 + BINS * 4 * 3;  // 116
+const int32_t BINS_NONE = -8388608;  // 0x800000
 const int STATUS_BYTES = 77;  // 67 up to 0.5.20; 68 in 0.5.21 (monitor age); 74 in 0.5.22 and 0.5.23 (PC time); 77 from 0.5.24 (firmware version)
 const int EVENT_MAX = 80;  // telemlog SLOW body limit
 const int16_t I16_NONE = -32768;
@@ -112,6 +120,8 @@ void packSample3Imu(uint8_t* out, const Sample& s, uint32_t block_ms); // IMU_SA
 int packStatus(uint8_t* out, const Status& s);                      // returns STATUS_BYTES
 // Event body: code, a, b, then text cut to fit EVENT_MAX. Returns its length.
 int packEvent(uint8_t* out, uint16_t code, int32_t a, int32_t b, const char* text);
+// Bin body 0x2E. v[bin][k]: k = sensor * 2 + coil; values outside int24 are clamped. Returns BINS_BYTES.
+int packBins(uint8_t* out, uint8_t frames, uint16_t window_ms, const float hz[BINS], const int32_t v[BINS][4]);
 
 // Collects samples into one sample body: layout 3 (0x2A-0x2D, the firmware) or layout 1 (0x20-0x25,
 // the host tests). The IMU body when the first sample has imu set.

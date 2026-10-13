@@ -195,9 +195,9 @@ void usbLoadService(){
 
 static const char* TAG = "wfrx";
 #ifdef BENCH_FAKE_IMU
-#define ROVER_FW_VERSION "0.5.65+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.5.66+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #else
-#define ROVER_FW_VERSION "0.5.65"  // 0.5.65: "stm restart" (Rx STM32 command 41, app 2.0.39+): Rx STM32 update with no power cycle; 0.5.64: USB output fix from the bench line (0.5.60-dev10 to dev13): project copy of the TinyUSB ESP32-S2 device driver (lib/tinyusb_dcd_fix) with no zero-length packet on data IN endpoints; USB register record at each output stop and over a restart (monitor). 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
+#define ROVER_FW_VERSION "0.5.66"  // 0.5.66: telemetry body 0x2E, the coil magnitudes of all 8 bins of both sensors, 5 a second; 0.5.65: "stm restart" (Rx STM32 command 41, app 2.0.39+): Rx STM32 update with no power cycle; 0.5.64: USB output fix from the bench line (0.5.60-dev10 to dev13): project copy of the TinyUSB ESP32-S2 device driver (lib/tinyusb_dcd_fix) with no zero-length packet on data IN endpoints; USB register record at each output stop and over a restart (monitor). 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
 
@@ -667,6 +667,52 @@ void stmCoilFrame(){
   memset(stm_coil_ssum, 0, sizeof(stm_coil_ssum));
   stm_coil_n = 0;
   stm_coil_t0 = now;
+}
+// Telemetry: the coil magnitudes of all 8 bins of both sensors (body 0x2E, lib/rover_telemetry), averaged over
+// TELEM_BINS_MS as the STMCOIL8 line, for the per-bin plots of the telemetry app. One FAST record each window.
+#define TELEM_BINS_MS 200
+extern bool safe_mode;
+int32_t telem_bins_abs[2][WFRX_BINS][2], telem_bins_sum[2][WFRX_BINS][2];
+uint8_t telem_bins_n = 0;
+bool telem_bins_seen[2] = {false, false};
+uint32_t telem_bins_t0 = 0;
+void telemetryBins(){
+  if (safe_mode || !g_deviceConfig.telemetry_enabled) return;
+  if (telem_bins_n < 255) {  // 255 frames of at most 2^23 fit an int32
+    bool done[2] = {false, false};
+    for (unsigned k = 0; k < WFRX_RESULTS; k++) {
+      const unsigned sn = (stmDec.lanes >> k) & 1u;  // the sensor this lane reads; both lanes on one sensor: lane 1
+      if (done[sn]) continue;
+      done[sn] = telem_bins_seen[sn] = true;
+      for (unsigned bn = 0; bn < WFRX_BINS; bn++) {
+        const int32_t v1 = wfrx_int24_get(stmDec.coil[k][bn].v1), v2 = wfrx_int24_get(stmDec.coil[k][bn].v2);
+        telem_bins_abs[sn][bn][0] += v1 < 0 ? -v1 : v1;
+        telem_bins_abs[sn][bn][1] += v2 < 0 ? -v2 : v2;
+        telem_bins_sum[sn][bn][0] += v1;
+        telem_bins_sum[sn][bn][1] += v2;
+      }
+    }
+    telem_bins_n++;
+  }
+  const uint32_t now = millis();
+  if (!telem_bins_t0) telem_bins_t0 = now;
+  if (now - telem_bins_t0 < TELEM_BINS_MS) return;
+  int32_t v[WFRX_BINS][4];
+  for (unsigned bn = 0; bn < WFRX_BINS; bn++)
+    for (unsigned sn = 0; sn < 2; sn++)
+      for (unsigned c = 0; c < 2; c++) {
+        const int32_t m = telem_bins_abs[sn][bn][c] / telem_bins_n;
+        v[bn][sn * 2 + c] = !telem_bins_seen[sn] || stm_bin_hz[bn] <= 0 ? rec::BINS_NONE : telem_bins_sum[sn][bn][c] < 0 ? -m : m;
+      }
+  uint8_t body[rec::BINS_BYTES];
+  const uint32_t win = now - telem_bins_t0;
+  const int n = rec::packBins(body, telem_bins_n, (uint16_t)(win < 65535u ? win : 65535u), stm_bin_hz, v);
+  telemlog_add(TELEMLOG_FAST, telem_bins_t0, body, (size_t)n);
+  memset(telem_bins_abs, 0, sizeof(telem_bins_abs));
+  memset(telem_bins_sum, 0, sizeof(telem_bins_sum));
+  telem_bins_seen[0] = telem_bins_seen[1] = false;
+  telem_bins_n = 0;
+  telem_bins_t0 = now;
 }
 // Channel scan: with the Tx off, the user drives in
 // manual mode over the full throttle range and the ESP32 ranks the bins by interference. Per frame and bin: level
@@ -4009,6 +4055,7 @@ bool stmReadFrame(){
     if (ok && stm_cap && stm_cap_n < stm_cap_want) memcpy(stm_cap + (size_t)STM_FRAME_LEN * stm_cap_n++, f, STM_FRAME_LEN);
     if (ok && stm_acc_want) stmAccFrame();
     if (ok && stm_coil_ms) stmCoilFrame();
+    if (ok) telemetryBins();
     if (ok && scan_on) scanFrame();
     if (ok && stm_link_ver == 0) { stm_link_ver = 2; stm_v2_resync = false; usbOut.println("STM link v2.0 layout 2: 128 B frames"); }
     if (known) {

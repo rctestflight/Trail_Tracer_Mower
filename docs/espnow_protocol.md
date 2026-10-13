@@ -190,6 +190,22 @@ Below 100 Hz, an anti-alias filter runs before the mower keeps a sample. The fil
 
 At 20 Hz, the frames carry one fifth of the 100 Hz data.
 
+### Body 0x2E: coil magnitudes of all 8 bins (stream 0, 5 a second)
+
+From firmware 0.5.66, with the STM32 link version 2. The mower averages the coil magnitudes of the 8 frequency bins of both sensors over a window of about 200 ms, and stores one record per window. The record time is the start of the window. The telemetry app draws one plot per bin from it.
+
+| Offset | Field | Type | Unit |
+|---|---|---|---|
+| 0 | body type 0x2E | u8 | |
+| 1 | frames averaged | u8 | 255 at most |
+| 2 | window | u16 | ms |
+| 4 | bin 0 to 7 frequency | 8 x u16 | Hz / 2; 0 = bin off |
+| 20 | bin 0 to 7 coil values | 8 x 4 x i24 | per bin: sensor 1 coil 1, sensor 1 coil 2, sensor 2 coil 1, sensor 2 coil 2 |
+
+A coil value is the STM32 magnitude in LSB of 2^-24 (about 1/mm for the wire bin at unit gain), as the USB `STMCOIL8` line prints it: the mean of the absolute values, with the sign of their sum. 0x800000 (-8388608) means no data: the sensor is on no STM32 lane, or the bin is off.
+
+Size: 14 + 116 = 130 bytes a frame, 5 frames a second, about 5 kbit/s.
+
 ### Body 0x21: status (stream 1, once a second)
 
 | Offset | Field | Type | Unit |
