@@ -204,7 +204,8 @@ Bench only: `timing on|off`, `thru`, `loss`, `send`, `erase off|on`, `flashtest`
 - A flash erase while the rover stands still loses 3 or 4 STM32 packets (about every 32 s on a bench board, which always counts as standing still). While it drives, the rover does not erase; 48 sectors kept erased cover about 25 min of driving.
 - The samples stay in RAM for 70 sample times (50 with the IMU): 3.5 s at 20 Hz. A Monitor Rx out of range for longer loses them. The status records stay in flash.
 - A Windows PC can stop enumerating a USB port after failed requests; only a replug clears it. Do not open the port while the rover restarts.
-- After a PC opens the USB port, the board sometimes sends no more USB output. The USB guard finds this stop after 3 s. The guard then disconnects USB for 0.3 s and connects it again, with no restart. The PC sees a short USB loss, and the output continues. We do not know the cause of the stop yet.
+- USB is optional on a rover (from 0.5.62). The rover never waits for USB and never resets or reconnects it. When no program reads the port, the rover drops its USB output. A laptop that connects later gets live output and commands.
+- After a PC opens the USB port, the board sometimes sends no more USB output. On a rover, close the port and open it again to get the output back. A monitor uses the USB guard after the first connection of the telemetry program (section 5) in each boot. The guard finds the stop after 3 s. It then disconnects USB for 0.3 s and connects it again, with no restart.
 
 ## 11. Verified on the bench, and not verified
 

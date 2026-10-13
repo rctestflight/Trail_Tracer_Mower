@@ -395,7 +395,10 @@ bool ota_may_start() {  // a monitor has no motion to protect; enter update mode
 void handle_line(char* line) {
   if (line[0] == 'S' && line[1] == ' ') cmd_send(line + 2);
   else if (line[0] == 'V' && line[1] == 0) print_banner();
-  else if (line[0] == 'P' && line[1] == 0) host_pinged = true;
+  else if (line[0] == 'P' && line[1] == 0) {
+    host_pinged = true;
+    usb_guard::set_reconnect(true);  // the PC program connected: an undrained FIFO now gets the USB reconnect
+  }
   else if (!strcmp(line, "P0")) host_pinged = false;
   else if (!strncmp(line, "ota ", 4)) {
     if (update_mode) update_last_ms = millis();
@@ -414,6 +417,7 @@ void handle_line(char* line) {
     cpuprof::report(b, sizeof(b), nullptr, 0);
     out("I %lld %s\n", esp_timer_get_time(), b);
   } else if (!strcmp(line, "monitor")) {
+    usb_guard::set_reconnect(true);  // the PC program connected
     out("I %lld monitor role already on\n", esp_timer_get_time());
   } else if (!strcmp(line, "promisc off") || !strcmp(line, "promisc on")) {
     // bench (USB output stop search, 2026-10-12): the Wi-Fi promiscuous receive for the RSSI lines off or on

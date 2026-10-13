@@ -139,7 +139,13 @@ class UsbOut : public Print {
   }
   size_t room() const { return sizeof(q_) - len_; }
   void service() {
-    int free = Serial.availableForWrite();  // 0 with no host (DTR off): nothing is handed over
+    // 0.5.62: USB is optional. With no host holding the port (DTR off), the queued text is dropped, so nothing
+    // waits in the USB stack for a host, and a host that opens the port later gets live output only.
+    if (!tud_cdc_connected()) {
+      if (len_) { dropped++; head_ = 0; len_ = 0; }
+      return;
+    }
+    int free = Serial.availableForWrite();  // the free CDC buffer: never more is handed over, so no write blocks
     while (free > 0 && len_ > 0) {
       size_t n = min((size_t)free, min(len_, sizeof(q_) - head_));
       Serial.write(q_ + head_, n);
@@ -159,6 +165,7 @@ class UsbOut : public Print {
   size_t head_ = 0, len_ = 0;
 };
 UsbOut usbOut;
+bool usb_verbose = false;  // USB "verbose on": the bench lines each second (rover state, USB counters); off at start
 
 // Bench "usbload <bytes_per_s> <seconds>": paced 100-byte lines on USB, to measure USB output stops
 // (lib/usb_guard) against the output rate. The start and end lines carry the guard counters.
@@ -188,9 +195,9 @@ void usbLoadService(){
 
 static const char* TAG = "wfrx";
 #ifdef BENCH_FAKE_IMU
-#define ROVER_FW_VERSION "0.5.61+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.5.62+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #else
-#define ROVER_FW_VERSION "0.5.61"  // 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
+#define ROVER_FW_VERSION "0.5.62"  // 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
 
@@ -1828,6 +1835,9 @@ void benchSerial(){
       usbOut.printf("BOOT rover-firmware %s reset=%d setup_ms=%lu first_packet_ms=%lu espnow_start_ms=%lu espnow=%d mac=%s board=%s\n",
         ROVER_FW_VERSION, (int)esp_reset_reason(), (unsigned long)boot_setup_ms, (unsigned long)boot_first_packet_ms,
         (unsigned long)boot_espnow_ms, (int)espnow_started, WiFi.macAddress().c_str(), RX_BOARD);
+    } else if (!strcmp(line, "verbose on") || !strcmp(line, "verbose off")) {
+      usb_verbose = line[9] == 'n';  // this boot only
+      usbOut.printf("verbose=%d%c", (int)usb_verbose, 10);
     } else if (!strcmp(line, "drv")) {
       // bench: the drive chain for the PC Start/Stop trace: mode, rover state, the ODrive commands (CAN)
       // The commanded values come before the motor locks (gyro, arm switch, CAN): a bench board with no
@@ -3194,7 +3204,7 @@ void loop() {
         (unsigned long)((main_loop_counter - hb_last_packets + MAIN_LOOP_PERIOD) % MAIN_LOOP_PERIOD), (int)drive_mode_status, (int)espnow_started, (int)mpu_ok,
         (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMaxAllocHeap(), (unsigned long)ESP.getPsramSize(),
         (int)tud_cdc_connected());
-      if (usbOut.dropped || usb_guard::restarts() || usb_guard::full_resets())
+      if (usb_verbose && (usbOut.dropped || usb_guard::restarts() || usb_guard::full_resets()))
         usbOut.printf("USB dropped=%lu guard_reconnects=%lu full_resets=%lu stalls=%lu\n", (unsigned long)usbOut.dropped,
                       (unsigned long)usb_guard::restarts(), (unsigned long)usb_guard::full_resets(),
                       (unsigned long)usb_guard::stalls());
@@ -4257,7 +4267,7 @@ void roverStep(){
                               : PWM_OUT_1_DEFAULT - left * (PWM_OUT_1_MAX - PWM_OUT_1_DEFAULT);
 
   static uint32_t print_ms = 0;
-  if(millis() - print_ms >= 1000){
+  if(usb_verbose && millis() - print_ms >= 1000){
     print_ms = millis();
     usbOut.printf("rover %s sub=%d in=%d X=%.2f d=%.2f psi=%.0f v=%.2f w=%.2f home=%d turns=%lu\n",
       rover::stateName(roverAp.state), (int)roverAp.sub, (int)in.inRange, roverAp.rd.Xf, roverAp.rd.df,
