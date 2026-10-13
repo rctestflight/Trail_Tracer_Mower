@@ -35,6 +35,11 @@ button.offer b { color: var(--accent); } button.offer span { color: var(--dim); 
 .bar { height: 10px; background: var(--line); border-radius: 5px; overflow: hidden; margin-top: 4px; }
 .bar > div { height: 100%; background: var(--accent); transition: width 0.3s; }
 .result { margin-top: 6px; font-size: 14px; white-space: pre-line; line-height: 1.6; }
+.plan { margin-top: 6px; grid-template-columns: 14ch 1fr; } .plan i { font-style: normal; color: var(--text, inherit); }
+.jobsteps { list-style: none; padding: 0; margin: 8px 0; } .jobsteps li { padding: 4px 0; color: var(--dim); }
+.jobsteps li > span { display: inline-block; width: 2ch; } .jobsteps li.now { color: inherit; font-weight: bold; }
+.jobsteps li.done { color: var(--good, #3fb950); } .jobsteps li.fail { color: var(--bad, #f85149); }
+.jobsteps li .note, .jobsteps li .bar { font-weight: normal; margin-left: 2ch; }
 .refbox { position: relative; margin: 10px 0; max-width: 640px; }
 .refbtn, .refopt { display: grid; gap: 2px; width: 100%; text-align: left; padding: 8px 12px; margin-top: 4px; }
 .refbtn::after { content: "change"; position: absolute; right: 12px; top: 34px; color: var(--accent); font-size: 12px; }
