@@ -114,13 +114,14 @@ def decode_event(b):
 
 
 def decode_bins(b):
-    """Body 0x2E: frames averaged, window ms, 8 bin frequencies (Hz; None = bin off), and per bin the 4 coil
-    values (sensor 1 coil 1, coil 2, sensor 2 coil 1, coil 2) in STM32 magnitude LSB; None = no data."""
-    n, win = b[1], struct.unpack_from("<H", b, 2)[0]
+    """Body 0x2E: filter factor N (100 Hz / rate; firmware 0.5.66-0.5.67: frames averaged), output period ms
+    (0.5.66-0.5.67: the window), 8 bin frequencies (Hz; None = bin off), and per bin the 4 coil values (sensor 1
+    coil 1, coil 2, sensor 2 coil 1, coil 2) in STM32 magnitude LSB; None = no data."""
+    n, per = b[1], struct.unpack_from("<H", b, 2)[0]
     hz = [f * 2 if f else None for f in struct.unpack_from("<8H", b, 4)]
     vals = [int.from_bytes(b[20 + 3 * i:23 + 3 * i], "little", signed=True) for i in range(32)]
     vals = [None if v == NO_DATA24 else v for v in vals]
-    return {"frames": n, "window_ms": win, "hz": hz, "coils": [vals[4 * k:4 * k + 4] for k in range(8)]}
+    return {"filter_n": n, "period_ms": per, "hz": hz, "coils": [vals[4 * k:4 * k + 4] for k in range(8)]}
 
 
 def decode_body(body, ms):
