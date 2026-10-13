@@ -29,11 +29,12 @@ pre.log { height: 260px; max-height: none; overflow-y: scroll; }
 .offers { display: grid; gap: 8px; margin-top: 10px; }
 button.offer { display: grid; gap: 2px; text-align: left; padding: 8px 12px; }
 button.offer b { color: var(--accent); } button.offer span { color: var(--dim); }
-.steps { border-color: var(--warn); color: var(--warn); font-size: 15px; }
+.steps { border-color: var(--warn); color: var(--warn); font-size: 15px; white-space: pre-line; line-height: 1.6; }
+.intro { margin: 12px 0 4px; padding-left: 24px; line-height: 1.6; }
 .stage { font-size: 16px; margin: 6px 0; }
 .bar { height: 10px; background: var(--line); border-radius: 5px; overflow: hidden; margin-top: 4px; }
 .bar > div { height: 100%; background: var(--accent); transition: width 0.3s; }
-.result { margin-top: 6px; font-size: 14px; }
+.result { margin-top: 6px; font-size: 14px; white-space: pre-line; line-height: 1.6; }
 .refbox { position: relative; margin: 10px 0; max-width: 640px; }
 .refbtn, .refopt { display: grid; gap: 2px; width: 100%; text-align: left; padding: 8px 12px; margin-top: 4px; }
 .refbtn::after { content: "change"; position: absolute; right: 12px; top: 34px; color: var(--accent); font-size: 12px; }
@@ -50,7 +51,12 @@ details summary { cursor: pointer; color: var(--dim); margin-top: 8px; }
 <header><h1>Trail Tracer Rx programmer</h1><span class="note">Chrome or Edge, on the PC with the Rx on USB</span><span style="flex: 1"></span></header>
 <main>
   <div id="noSerial" class="card bad" hidden></div>
-  <p>Plug an Rx into this PC, then press "Connect an Rx" and choose it. After each restart or replug of the board, press "Connect an Rx" and choose it again (the Rx has no USB serial number, so the browser forgets it).</p>
+  <ol class="intro">
+    <li>Plug an Rx into this PC.</li>
+    <li>Press "Connect an Rx".</li>
+    <li>Choose the Rx in the browser list.</li>
+  </ol>
+  <p class="note">After each restart or replug of the board, do steps 2 and 3 again. The Rx has no USB serial number, so the browser forgets it.</p>
   <p id="release" class="note"></p>
   <button id="connectBtn">Connect an Rx</button>
   <div id="refBox" class="refbox" hidden><span class="note">Firmware to offer</span><button id="refBtn" class="refbtn"></button><div id="refList" class="reflist" hidden></div><a id="refLink" class="note" href="#" title="Copy this link to share exactly this firmware version">Link to this exact version</a></div>

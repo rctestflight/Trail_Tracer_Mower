@@ -1,6 +1,6 @@
 'use strict';
 const ESPRESSIF = 0x303A, ROM_PID = 0x0002, APP_PID = 0x80C2;
-const PAGE_VERSION = '1.4.1';
+const PAGE_VERSION = '1.5.2';
 let pageVer = `Page v${PAGE_VERSION} (local copy)`;
 const ESPTOOL = 'https://unpkg.com/esptool-js@0.4.7/bundle.js';
 const ESPTOOL_SRI = 'sha384-esoYAtcIwSlHrIf+6+uZc/SPs/S8v44K26De13juLayamqHofUvCPscyHBXPxVIc';
@@ -122,7 +122,7 @@ function progress(text) { if (!job) return; if (job.prog) job.log.pop(); say(tex
 function stage(text, pct = null) { if (!job) return; job.stage = text; job.pct = pct; say('STEP: ' + text); }
 function setPct(p) { if (job && job.pct !== p) { job.pct = p; render(); } }
 async function run(name, fn) {
-  if (job && !job.done) return alert('A job runs. Wait for its end.');
+  if (job && !job.done) return alert('A job runs. Wait until it ends.');
   job = { name, log: [], done: false, stage: 'Starting', pct: null, result: null, devOpen: false };
   say(pageVer);
   say(`${name}: start`);
@@ -176,7 +176,7 @@ async function otaUpdate(b0, build) {
   if (end && !end.startsWith('OTA done')) throw new Error('"ota end" failed');
   const oldPort = b.port; await closeBoard(b);
   b = await waitBoard(x => x.mode === 'app' && x.port !== oldPort || x.t0 > Date.now() - 100000 && x.mode === 'app' && x.lines.some(l => /^BOOT rover-firmware/.test(l)), 100000,
-    'The board restarts. When it is back on USB: press "Connect an Rx" and choose it again.');
+    'The board restarts. When it is back on USB, press "Connect an Rx" again.');
   if (!b) throw new Error('The board did not come back on USB within 100 s. It returns to its old firmware by itself after 2 min.');
   stage('Confirming the new firmware');
   await sleep(1500);
@@ -190,6 +190,7 @@ async function otaUpdate(b0, build) {
   return `Installed. The ESP32 now runs ${b.firmware} ${b.version || ''}.`;
 }
 
+const S2 = { STRAP: 0x3F404038, SPI_BOOT: 0x8, OPTION1: 0x3F408128, FORCE_DL: 0x1 };
 async function romLoad(b0, build, erase) {
   stage('Checking the firmware files');
   const fl = build.m.esp32.full_load, blobs = [];
@@ -206,16 +207,26 @@ async function romLoad(b0, build, erase) {
   if (b.mode !== 'rom') {
     stage('Restarting the board into its loader');
     const oldPort = b.port;
-    if (b.firmware === 'rover firmware') { say('rover firmware: "dld"'); await send(b, 'dld'); await closeBoard(b).catch(() => {}); }
+    if (b.firmware === 'rover firmware') { say('rover firmware: "dld"'); await send(b, 'dld'); await closeBoard(b).catch(() => {}); b = null; }
     else {
-      say('USB reset into ROM download mode');
-      for (const [d, r] of [[false, true], [true, true], [true, false], [false, false]]) { await b.port.setSignals({ dataTerminalReady: d, requestToSend: r }).catch(() => {}); await sleep(60); }
       await closeBoard(b).catch(() => {});
+      say('1200-baud touch');
+      try { await oldPort.open({ baudRate: 1200 }); await oldPort.setSignals({ dataTerminalReady: false }).catch(() => {}); await sleep(100); await oldPort.close(); }
+      catch (ex) { say(`1200-baud touch: ${ex.message}`); }
+      b = await waitBoard(x => x.mode === 'rom', 8000, 'The board restarts into ROM download mode.');
+      if (!b && !oldPort.gone) {
+        say('no ROM download mode 8 s after the touch: USB reset');
+        try {
+          await oldPort.open({ baudRate: 115200 });
+          for (const [d, r] of [[false, true], [true, true], [true, false], [false, false]]) { await oldPort.setSignals({ dataTerminalReady: d, requestToSend: r }).catch(() => {}); await sleep(60); }
+          await oldPort.close();
+        } catch (ex) { say(`USB reset: ${ex.message}`); }
+      }
     }
-    b = await waitBoard(x => x.mode === 'rom', 15000, 'The board restarts for the load. If Chrome asks: press "Connect an Rx" and choose "ESP32-S2".');
+    if (!b) b = await waitBoard(x => x.mode === 'rom', 15000, 'The board restarts into ROM download mode.');
     if (!b) {
       stage('Waiting for you: start the board in its loader');
-      instruct('1 Unplug USB. 2 Hold the button "0" on the board. 3 Plug USB in. 4 Release the button. 5 Press "Connect an Rx" and choose "ESP32-S2".');
+      instruct('1. Unplug USB.\n2. Hold the button "0" on the board.\n3. Plug in USB.\n4. Release the button "0".\n5. Press "Connect an Rx".\n6. Choose "ESP32-S2" in the browser list.');
       b = await waitBoard(x => x.mode === 'rom', 180000);
       if (!b) throw new Error('no board ready for the load within 3 min');
     }
@@ -227,24 +238,44 @@ async function romLoad(b0, build, erase) {
   const term = { clean() {}, writeLine: t => say('esptool: ' + t), write: t => { if (t.trim()) say('esptool: ' + t.trim()); } };
   if (b.port.readable) await b.port.close().catch(() => {});
   const transport = new Transport(b.port, true);
+  let entry = null;
   try {
   const loader = new ESPLoader({ transport, baudrate: 115200, romBaudrate: 115200, terminal: term, debugLogging: true });
   await loader.detectChip('no_reset');
   say(`chip: ${await loader.chip.getChipDescription(loader)}`);
+  const strap = await loader.readReg(S2.STRAP), opt1 = await loader.readReg(S2.OPTION1);
+  const byButton = (strap & S2.SPI_BOOT) === 0 && (opt1 & S2.FORCE_DL) === 0;
+  say(`download mode entry: ${byButton ? 'button "0" (power cycle needed)' : 'firmware (restart by reset)'}; strap 0x${(strap >>> 0).toString(16)}, option1 0x${(opt1 >>> 0).toString(16)}`);
   loader.FLASH_WRITE_SIZE = 0x400; if (loader.chip) loader.chip.FLASH_WRITE_SIZE = 0x400;
   const sizes = blobs.map(x => x.data.length), total = sizes.reduce((a, c) => a + c, 0);
   stage('Writing the ESP32 firmware (about 1 min; keep the board plugged in)', 0);
   const bstr = d => { let s = ''; for (let i = 0; i < d.length; i += 0x8000) s += String.fromCharCode.apply(null, d.subarray(i, i + 0x8000)); return s; };
   await loader.writeFlash({ fileArray: blobs.map(x => ({ data: bstr(x.data), address: x.address })), flashSize: '4MB', flashMode: 'dio', flashFreq: '80m',
     eraseAll: false, compress: true, reportProgress: (i, w, t) => { setPct(Math.floor(100 * (sizes.slice(0, i).reduce((a, c) => a + c, 0) + sizes[i] * w / t) / total)); progress(`file ${i + 1} of ${blobs.length}: ${Math.floor(100 * w / t)} %`); } });
+  if (!byButton) {
+    stage('Starting the new firmware');
+    await loader.writeReg(S2.OPTION1, 0, S2.FORCE_DL).catch(ex => say(`force-download bit not cleared: ${ex.message}`));
+    say('hard reset: RTS on 200 ms, off');
+    await transport.setRTS(true); await sleep(200); await transport.setRTS(false); await sleep(200);
+  }
+  entry = byButton ? 'button' : 'firmware';
   } finally { await transport.disconnect().catch(() => {}); if (b.port.readable) await b.port.close().catch(() => {}); }
   boards.delete(b.port); render();
+  const rover = build.m.esp32.usb_update, back = x => x.mode === 'app' && (rover ? !x.detecting && x.firmware === 'rover firmware' && !!x.version : true);
+  b = null;
+  if (entry === 'firmware') {
+    stage('The board restarts with the new firmware');
+    b = await waitBoard(back, 20000, 'The board restarts. When it is back on USB, press "Connect an Rx" again.');
+    if (!b) say('no board on USB 20 s after the hard reset: power cycle');
+  }
+  if (!b) {
   stage('Waiting for you: unplug and plug in the board');
-  instruct('Written. 1 Unplug USB and all vehicle power. 2 Wait 3 s. 3 Plug USB in. 4 If the board does not show: press "Connect an Rx" and choose it.');
-  const rover = build.m.esp32.usb_update;
-  b = await waitBoard(x => x.mode === 'app' && (rover ? !x.detecting && x.firmware === 'rover firmware' && !!x.version : true), 180000);
+  instruct((entry === 'button' ? 'The ESP32 firmware is written. The board started with the button "0", so it needs a power cycle.' : 'The ESP32 firmware is written. The board did not restart by itself.')
+    + '\n1. Unplug USB.\n2. Disconnect all vehicle power.\n3. Wait 3 s.\n4. Plug in USB.\n5. If the board does not show, press "Connect an Rx".\n6. Choose the board in the browser list.');
+  b = await waitBoard(back, 180000);
   instruct('');
-  if (!b) throw new Error('The board did not come back within 3 min. Unplug and plug it in again, then press "Connect an Rx": the page shows what it runs.');
+  }
+  if (!b) throw new Error('The board did not come back within 3 min.\n1. Unplug USB.\n2. Plug in USB.\n3. Press "Connect an Rx".\n4. Choose the board in the browser list.\nThe page then shows the firmware on the board.');
   say(`ESP32 now: ${b.firmware} ${b.version || ''}`);
   return rover ? `Installed. The ESP32 now runs ${b.firmware} ${b.version || ''}.` : 'Installed. The board is back on USB; this firmware does not report its version.';
 }
@@ -290,7 +321,7 @@ async function stmLoad(b0, build) {
   const oldPort = b.port; await closeBoard(b);
   bridgeNext = true;
   stage('Waiting for you: unplug and plug in the board');
-  instruct('1 Unplug USB and all vehicle power. 2 Wait 3 s. 3 Plug USB in. 4 If the board does not show: press "Connect an Rx" and choose it.');
+  instruct('1. Unplug USB.\n2. Disconnect all vehicle power.\n3. Wait 3 s.\n4. Plug in USB.\n5. If the board does not show, press "Connect an Rx".\n6. Choose the board in the browser list.');
   b = await waitBoard(x => x.mode === 'app' && x.port !== oldPort && x.bridge, 180000);
   bridgeNext = false; instruct('');
   if (!b) throw new Error('no board on USB within 3 min');
@@ -474,6 +505,10 @@ function chooseRef(v) {
 }
 
 const named = (label, v, sep = ' ') => `${label.replace(/\s*\bv?\d+\.\d+\.\d+[^\s,()]*/g, '').trim()}${sep}${v}`;
+function cycles(rom, stm) {
+  const n = (rom ? 1 : 0) + (stm ? 1 : 0);
+  return n === 0 ? 'The board restarts by itself.' : `You unplug and plug in the board ${n === 1 ? 'once' : 'twice'}.`;
+}
 function offersFor(b) {
   const out = [], no = [], sel = currentRef(), rev = b.board || 'RX_REVA';
   const pool = offerBuilds(sel).filter(x => inSel(x, sel));
@@ -494,7 +529,7 @@ function offersFor(b) {
     const bad = [g.esp, stm].filter(Boolean).find(x => !x.m.boards.includes(rev));
     if (bad) { no.push({ l1: 'Full install', l2: what, reason: `This firmware is for board revision ${bad.m.boards.join(', ')}. This board is revision ${rev}.` }); continue; }
     out.push({ l1: 'Full install', l2: what,
-      l3: `Erases the whole board, then installs the ESP32 firmware${stm ? ' and the STM32 app' : ''}. You unplug and plug in the board ${stm ? 'twice' : 'once'}.`,
+      l3: `Erases the whole board, then installs the ESP32 firmware${stm ? ' and the STM32 app' : ''}. ${cycles(b.mode === 'rom', !!stm)}`,
       go: () => fullInstall(b, g.esp, stm) });
   }
   out.refused = no;
