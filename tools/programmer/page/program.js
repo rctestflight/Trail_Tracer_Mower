@@ -457,9 +457,9 @@ async function romRead(b) {
   } finally { b.detecting = false; render(); }
 }
 async function watchdogReset(loader) {
-  say('watchdog reset in 1.5 s (esptool watchdog_reset); the port closes first');
+  say('watchdog reset (esptool watchdog_reset)');
   await loader.writeReg(0x3F4080AC, 0x50D83AA1);
-  await loader.writeReg(0x3F408098, 135000);
+  await loader.writeReg(0x3F408098, 2000);
   await loader.writeReg(0x3F408094, ((1 << 31) | (5 << 28) | (1 << 8) | 2) >>> 0);
   await loader.writeReg(0x3F4080AC, 0).catch(() => {});
 }
