@@ -1,6 +1,6 @@
 'use strict';
 const ESPRESSIF = 0x303A, ROM_PID = 0x0002, APP_PID = 0x80C2;
-const PAGE_VERSION = '1.7.0';
+const PAGE_VERSION = '1.7.1';
 let pageVer = `Page v${PAGE_VERSION} (local copy)`;
 const ESPTOOL = 'https://unpkg.com/esptool-js@0.4.7/bundle.js';
 const ESPTOOL_SRI = 'sha384-esoYAtcIwSlHrIf+6+uZc/SPs/S8v44K26De13juLayamqHofUvCPscyHBXPxVIc';
@@ -399,38 +399,70 @@ async function stmLoad(b0, build) {
   return /^app /.test(b.stm) ? `Installed. The STM32 now runs ${b.stm}.` : 'Installed and started. The board did not report the STM32 version yet.';
 }
 
+const setHtml = (el, html) => { if (el._html !== html) { el._html = html; el.innerHTML = html; return true; } return false; };
+function setLog(details, pre, text) {
+  if (!details.open || pre._text === text) return;
+  const atEnd = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 4;
+  pre._text = text; pre.textContent = text;
+  if (atEnd) pre.scrollTop = pre.scrollHeight;
+}
+let boardSeq = 0;
+function boardCard(b) {
+  if (b.card) return b.card;
+  b.id = ++boardSeq;
+  const c = document.createElement('div');
+  c.className = 'card';
+  c.innerHTML = `<b class="title"></b><div class="kv"></div><div class="offers"></div><div class="refbox"></div>
+    <details class="usb"><summary>USB lines</summary><pre class="log"></pre></details>`;
+  c.querySelector('.usb').ontoggle = () => render();
+  c.querySelector('.offers').onclick = e => {
+    const el = e.target.closest('button[data-o]');
+    if (!el || (job && !job.done)) return;
+    const o = b.offers[+el.dataset.o];
+    if (o && confirm(`${o.l1}\n${o.l2}\n\n${(o.plan || []).map(([x, y]) => `${x}: ${y}`).join('\n')}\n\n${o.l3}`)) run(o.l1, o.go);
+  };
+  b.card = c;
+  return c;
+}
 function render() {
-  const keep = new Map([...document.querySelectorAll('pre[data-p]')].map(e => [e.dataset.p, e.scrollHeight - e.scrollTop - e.clientHeight < 4 ? -1 : e.scrollTop]));
   $('release').textContent = builds.length ? `Builds: ${builds.length} (${[...new Set(builds.map(x => x.src))].join(', ')})` : 'No builds found.';
   $('steps').hidden = !stepText; $('steps').textContent = stepText;
   drawRefMenu();
-  const idle = !job || job.done;
-  $('boards').innerHTML = [...boards.values()].map((b, k) => {
+  const idle = !job || job.done, list = $('boards'), all = [...boards.values()];
+  for (const el of [...list.children]) if (!all.some(b => b.card === el)) el.remove();
+  all.forEach((b, k) => {
+    const c = boardCard(b);
+    if (list.children[k] !== c) list.insertBefore(c, list.children[k] || null);
     const rows = b.mode === 'rom' ? [['state', 'bootloader mode detected (ESP32 ROM loader)'], ['details', 'shown after the install: no firmware runs now'], ['port', b.state]]
       : b.detecting ? [['state', 'reading the board'], ['port', b.state]]
       : [['ESP32', (b.firmware || '-') + (b.version ? ` ${b.version}` : '')], ['role', b.role || '-'],
         ['STM32', b.stm ? b.stm + (b.stmLink ? `, link v${b.stmLink}` : '') : '-'], ['board revision', b.board || (b.firmware ? 'RX_REVA (not reported)' : '-')],
         ...(b.mac ? [['radio address', b.mac]] : []), ['port', b.state]];
+    setHtml(c.querySelector('.title'), `Rx ${k + 1}`);
+    setHtml(c.querySelector('.kv'), rows.map(([x, y]) => `<span class="k">${esc(x)}</span><span>${esc(y)}</span>`).join(''));
     const offers = idle && b.state === 'open' && !b.detecting ? offersFor(b) : [];
     b.offers = offers.erase ? [...offers, offers.erase] : offers;
-    return `<div class="card"><b>Rx ${k + 1}</b><div class="kv">${rows.map(([x, y]) => `<span class="k">${esc(x)}</span><span>${esc(y)}</span>`).join('')}</div>
-      <div class="offers">${b.offers.map((o, i) => `<button class="offer" data-b="${k}" data-o="${i}"><b>${esc(o.l1)}</b><span>${esc(o.l2)}</span><span>${esc(o.l3)}</span><div class="kv plan">${(o.plan || []).map(([x, y]) => `<span class="k">${esc(x)}</span><i>${esc(y)}</i>`).join('')}</div></button>`).join('')}</div>
-      ${(offers.refused || []).length ? `<details class="refused"><summary>Not compatible with this board (${offers.refused.length})</summary>${offers.refused.map(r => `<div class="ref"><b>${esc(r.l1)}</b><span>${esc(r.l2)}</span><span>${esc(r.reason)}</span></div>`).join('')}</details>` : ''}
-      <details><summary>USB lines</summary><pre class="log" data-p="b${k}">${esc(b.lines.slice(-200).join('\n'))}</pre></details></div>`;
-  }).join('') || '<p class="note">No Rx connected.</p>';
-  for (const el of document.querySelectorAll('button[data-o]')) el.onclick = () => { const b = [...boards.values()][+el.dataset.b], o = b.offers[+el.dataset.o]; if (confirm(`${o.l1}\n${o.l2}\n\n${(o.plan || []).map(([x, y]) => `${x}: ${y}`).join('\n')}\n\n${o.l3}`)) run(o.l1, o.go); };
-  $('job').hidden = !job;
-  if (job) {
-    const res = job.result, head = res ? (res.ok ? 'Done' : 'Stopped') : job.stage;
-    $('job').innerHTML = `<b>${esc(job.name)}</b>
-      ${job.steps ? `<ol class="jobsteps">${job.steps.map(s => `<li class="${s.state}"><span>${{ wait: '·', now: '▶', done: '✓', fail: '✗' }[s.state] || '·'}</span>${esc(s.text)}${s.state === 'now' && !res ? `<div class="note">${esc(job.stage)}</div>${job.pct !== null ? `<div class="bar"><div style="width: ${job.pct}%"></div></div><div class="note">${job.pct} %</div>` : ''}` : ''}</li>`).join('')}</ol>` : ''}
-      <div class="stage ${res ? (res.ok ? 'good' : 'bad') : ''}">${esc(job.steps && !res ? '' : head)}</div>
-      ${!job.steps && job.pct !== null && !res ? `<div class="bar"><div style="width: ${job.pct}%"></div></div><div class="note">${job.pct} %</div>` : ''}
-      ${res ? `<div class="result ${res.ok ? 'good' : 'bad'}">${esc(res.text)}</div>` : ''}
-      <details ${job.devOpen ? 'open' : ''}><summary>Developer log</summary><pre class="log" data-p="job">${esc(job.log.join('\n'))}</pre></details>`;
-    $('job').querySelector('details').ontoggle = e => { job.devOpen = e.target.open; };
+    setHtml(c.querySelector('.offers'), b.offers.map((o, i) => `<button class="offer" data-o="${i}"><b>${esc(o.l1)}</b><span>${esc(o.l2)}</span><span>${esc(o.l3)}</span><div class="kv plan">${(o.plan || []).map(([x, y]) => `<span class="k">${esc(x)}</span><i>${esc(y)}</i>`).join('')}</div></button>`).join(''));
+    const refused = offers.refused || [], rb = c.querySelector('.refbox'), wasOpen = !!rb.querySelector('details')?.open;
+    if (setHtml(rb, refused.length ? `<details class="refused"><summary>Not compatible with this board (${refused.length})</summary>${refused.map(r => `<div class="ref"><b>${esc(r.l1)}</b><span>${esc(r.l2)}</span><span>${esc(r.reason)}</span></div>`).join('')}</details>` : '') && wasOpen && rb.querySelector('details')) rb.querySelector('details').open = true;
+    setLog(c.querySelector('.usb'), c.querySelector('.usb pre'), b.lines.slice(-200).join('\n'));
+  });
+  if (!all.length && !list.querySelector('.note')) list.innerHTML = '<p class="note">No Rx connected.</p>';
+  const jp = $('job');
+  jp.hidden = !job;
+  if (!job) return;
+  if (jp._job !== job) {
+    jp._job = job; jp._html = null;
+    jp.innerHTML = `<b class="name"></b><div class="body"></div><details class="dev"><summary>Developer log</summary><pre class="log"></pre></details>`;
+    jp.querySelector('.dev').ontoggle = () => render();
   }
-  for (const e of document.querySelectorAll('pre[data-p]')) { const s = keep.get(e.dataset.p); e.scrollTop = s === undefined || s < 0 ? e.scrollHeight : s; }
+  const res = job.result, head = res ? (res.ok ? 'Done' : 'Stopped') : job.stage, bar = `<div class="bar"><div style="width: ${job.pct}%"></div></div><div class="note">${job.pct} %</div>`;
+  setHtml(jp.querySelector('.name'), esc(job.name));
+  setHtml(jp.querySelector('.body'), (job.steps ? `<ol class="jobsteps">${job.steps.map(s => `<li class="${s.state}"><span>${{ wait: '·', now: '▶', done: '✓', fail: '✗' }[s.state] || '·'}</span>${esc(s.text)}${s.state === 'now' && !res ? `<div class="note">${esc(job.stage)}</div>${job.pct !== null ? bar : ''}` : ''}</li>`).join('')}</ol>` : '')
+    + `<div class="stage ${res ? (res.ok ? 'good' : 'bad') : ''}">${esc(job.steps && !res ? '' : head)}</div>`
+    + (!job.steps && job.pct !== null && !res ? bar : '')
+    + (res ? `<div class="result ${res.ok ? 'good' : 'bad'}">${esc(res.text)}</div>` : ''));
+  setLog(jp.querySelector('.dev'), jp.querySelector('.dev pre'), job.log.join('\n'));
 }
 let stepText = '';
 function instruct(text) { stepText = text; if (text) say('USER: ' + text); render(); }
