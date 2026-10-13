@@ -1,0 +1,10 @@
+{
+  "name": "tinyusb_dcd_fix",
+  "version": "0.16.0-fix1",
+  "description": "ESP32-S2/S3 TinyUSB device driver (dcd_esp32sx.c) that replaces the libarduino_tinyusb.a member of arduino-esp32 2.0.17, with upstream fixes for the IN transfer path.",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "build": {
+    "libArchive": false
+  }
+}

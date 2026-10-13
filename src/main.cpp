@@ -195,9 +195,9 @@ void usbLoadService(){
 
 static const char* TAG = "wfrx";
 #ifdef BENCH_FAKE_IMU
-#define ROVER_FW_VERSION "0.5.63+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.5.64+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #else
-#define ROVER_FW_VERSION "0.5.63"  // 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
+#define ROVER_FW_VERSION "0.5.64"  // 0.5.64: USB output fix from the bench line (0.5.60-dev10 to dev13): project copy of the TinyUSB ESP32-S2 device driver (lib/tinyusb_dcd_fix) with no zero-length packet on data IN endpoints; USB register record at each output stop and over a restart (monitor). 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
 

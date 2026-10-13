@@ -560,11 +560,23 @@ void loop() {
   static uint32_t flash_until = 0;
   static bool host_was_open = false;
   const bool open_now = host_open();
-  if (open_now && !host_was_open) print_banner();
+  if (open_now && !host_was_open) {
+    print_banner();
+    static char saved[900];
+    if (usb_guard::take_saved(saved, sizeof(saved))) out("I %lld %s (input stop, before the last restart)\n", esp_timer_get_time(), saved);
+  }
   if (!open_now) host_pinged = false;
   if (open_now && host_pinged && millis() - host_rx_ms >= HOST_SILENT_MS) {
     out("I %lld restart: no PC input for %lu s after pings (USB input stopped?)\n", esp_timer_get_time(),
         (unsigned long)(HOST_SILENT_MS / 1000));
+    {
+      static char regs[900];
+      usb_guard::snapshot();
+      usb_guard::format_snapshot(regs, sizeof(regs));
+      usb_guard::save_for_next_boot(regs);  // the line below can be lost in the restart
+      out("I %lld %s (input stop)\n", esp_timer_get_time(), regs);
+      delay(200);
+    }
     delay(100);
     restart_with_detach();
   }
@@ -620,6 +632,9 @@ void loop() {
           esp_timer_get_time(), (unsigned long)seen_stalls, (unsigned long)snap.r_lines, (unsigned long)snap.out_bytes,
           (unsigned long)snap.waits, (unsigned long)snap.cuts, (unsigned long)snap.uart_bytes, (unsigned long)snap.loop_max_us,
           (unsigned long)ESP.getFreeHeap(), (unsigned long)usb_guard::kicks());
+      static char regs[900];
+      usb_guard::format_snapshot(regs, sizeof(regs));
+      out("I %lld %s (output stop)\n", esp_timer_get_time(), regs);
     }
   }
   if (update_mode && millis() - update_last_ms >= UPDATE_IDLE_MS) {
