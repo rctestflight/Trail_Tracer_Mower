@@ -1,6 +1,6 @@
 'use strict';
 const ESPRESSIF = 0x303A, ROM_PID = 0x0002, APP_PID = 0x80C2;
-const PAGE_VERSION = '1.12.3';
+const PAGE_VERSION = '1.12.4';
 let pageVer = `Page v${PAGE_VERSION} (local copy)`;
 const ESPTOOL = 'https://unpkg.com/esptool-js@0.4.7/bundle.js';
 const ESPTOOL_SRI = 'sha384-esoYAtcIwSlHrIf+6+uZc/SPs/S8v44K26De13juLayamqHofUvCPscyHBXPxVIc';
@@ -87,21 +87,28 @@ function waitGone(ms) {
   const d0 = disconnects, t0 = Date.now();
   return new Promise(res => { const iv = setInterval(() => { if (disconnects !== d0 || Date.now() - t0 > ms) { clearInterval(iv); res(disconnects !== d0); } }, 100); });
 }
-async function personPowerCycle(test, button = false) {
-  instruct('Unplug the USB cable and the battery from the board.');
-  if (!await waitGone(60000)) {
-    instruct('The board is still connected. Unplug the USB cable and the battery from the board.');
-    if (!await waitGone(120000)) throw plain('The board stayed connected. Start the install again.');
-  }
-  for (let s = 3; s > 0; s--) { instruct(`Unplugged. Wait ${s} s.`); await sleep(1000); }
-  const plug = button ? BUTTON_STEP : 'Plug the USB cable back in.';
-  instruct(plug);
-  let b = await waitBoard(test, 10000);
-  while (!b && Date.now() - lastConnect < 6000) b = await waitBoard(test, 3000);
-  if (!b) { instruct(plug + '\nIf the page does not show the board, press "Connect an Rx" and choose it.'); b = await waitBoard(test, 170000); }
-  if (!b) throw plain('The board did not come back. Start the install again.');
-  if (button) { instruct('You can let go of the button now.'); await sleep(1500); }
+async function personPowerCycle(test) {
+  const want = x => test(x) || x.mode === 'rom';
+  instruct(BUTTON_STEP);
+  if (!await waitGone(300000)) throw plain(BUTTON_STEP);
+  let b = await waitBoard(want, 10000);
+  while (!b && Date.now() - lastConnect < 6000) b = await waitBoard(want, 3000);
+  if (!b) { instruct(BUTTON_STEP + '\nIf the page does not show the board, press "Connect an Rx" and choose it.'); b = await waitBoard(want, 170000); }
+  if (!b) throw plain(BUTTON_STEP);
   instruct('');
+  if (b.mode === 'rom' && !test(b)) {
+    say('the board is in ROM download mode: the watchdog reset starts its firmware');
+    await withLoader(b, async loader => {
+      const held = async () => ((await loader.readReg(0x3F40403C).catch(() => 1)) & 1) === 0;
+      for (let i = 0; i < 34 && await held(); i++) { if (i === 33) instruct('Let go of the button.'); await sleep(300); }
+      for (let i = 0; i < 200 && await held(); i++) await sleep(300);
+      instruct('');
+      await loader.writeReg(S2.OPTION1, 0, S2.FORCE_DL).catch(() => {});
+      await watchdogReset(loader);
+    });
+    b = await waitBoardHint(test, 45000, 'the board');
+    if (!b) throw plain(BUTTON_STEP);
+  }
   return b;
 }
 async function waitBoardHint(test, ms, choose) {
@@ -173,7 +180,7 @@ async function run(name, fn) {
     const r = await fn(); job.result = { ok: true, text: typeof r === 'string' ? r : 'Done.' }; say(`${name}: done`);
     for (const x of job.steps || []) if (x.state !== 'skip') x.state = 'done';
   } catch (ex) {
-    job.result = { ok: false, text: ex.plain ? ex.message : 'The install stopped. Start it again. If it stops again, contact support.' };
+    job.result = { ok: false, text: ex.message.includes(NO_LOADER) ? NO_LOADER : BUTTON_STEP };
     say(`${name}: STOPPED: ${ex.message}`); instruct('');
     for (const x of job.steps || []) if (x.state === 'now') x.state = 'fail';
   }
@@ -264,6 +271,46 @@ function partitionTable(table) {
   }
   return out;
 }
+function md5hex(d) {
+  const K = new Uint32Array(64), S = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21];
+  for (let i = 0; i < 64; i++) K[i] = Math.floor(Math.abs(Math.sin(i + 1)) * 2 ** 32) >>> 0;
+  const n = ((d.length + 8) >>> 6) + 1, m = new Uint8Array(n * 64);
+  m.set(d); m[d.length] = 0x80;
+  const v = new DataView(m.buffer); v.setUint32(n * 64 - 8, (d.length * 8) >>> 0, true); v.setUint32(n * 64 - 4, Math.floor(d.length / 0x20000000), true);
+  let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
+  for (let o = 0; o < m.length; o += 64) {
+    let a = a0, b = b0, c = c0, e = d0;
+    for (let i = 0; i < 64; i++) {
+      let f, g;
+      if (i < 16) { f = (b & c) | (~b & e); g = i; } else if (i < 32) { f = (e & b) | (~e & c); g = (5 * i + 1) % 16; }
+      else if (i < 48) { f = b ^ c ^ e; g = (3 * i + 5) % 16; } else { f = c ^ (b | ~e); g = (7 * i) % 16; }
+      const s = S[(i >> 4) * 4 + (i & 3)], x = (a + f + K[i] + v.getUint32(o + g * 4, true)) >>> 0;
+      a = e; e = c; c = b; b = (b + ((x << s) | (x >>> (32 - s)))) >>> 0;
+    }
+    a0 = (a0 + a) >>> 0; b0 = (b0 + b) >>> 0; c0 = (c0 + c) >>> 0; d0 = (d0 + e) >>> 0;
+  }
+  const out = new DataView(new ArrayBuffer(16)); [a0, b0, c0, d0].forEach((w, i) => out.setUint32(i * 4, w, true));
+  return [...new Uint8Array(out.buffer)].map(x => x.toString(16).padStart(2, '0')).join('');
+}
+async function watchdogReset(loader) {
+  say('watchdog reset (esptool watchdog_reset)');
+  await loader.writeReg(0x3F4080AC, 0x50D83AA1);
+  await loader.writeReg(0x3F408098, 2000);
+  await loader.writeReg(0x3F408094, ((1 << 31) | (5 << 28) | (1 << 8) | 2) >>> 0);
+  await loader.writeReg(0x3F4080AC, 0).catch(() => {});
+  await sleep(500);
+}
+async function withLoader(b, fn) {
+  const { ESPLoader, Transport } = await loadEsptool();
+  const term = { clean() {}, writeLine: t => say('esptool: ' + t), write: t => { if (t.trim()) say('esptool: ' + t.trim()); } };
+  if (b.port.readable) await b.port.close().catch(() => {});
+  const transport = new Transport(b.port, true);
+  try {
+    const loader = new ESPLoader({ transport, baudrate: 115200, romBaudrate: 115200, terminal: term, debugLogging: true });
+    await loader.detectChip('no_reset');
+    return await fn(loader, transport);
+  } finally { await transport.disconnect().catch(() => {}); if (b.port.readable) await b.port.close().catch(() => {}); boards.delete(b.port); render(); }
+}
 let mergedBridge = null;
 const S2 = { STRAP: 0x3F404038, SPI_BOOT: 0x8, OPTION1: 0x3F408128, FORCE_DL: 0x1 };
 async function romLoad(b0, build, erase, stmBuild = null) {
@@ -309,7 +356,7 @@ async function romLoad(b0, build, erase, stmBuild = null) {
     if (!b) {
       stage('Waiting for you');
       say('no ROM download mode by itself: the button');
-      b = await personPowerCycle(x => x.mode === 'rom', true);
+      b = await personPowerCycle(x => x.mode === 'rom');
     }
     instruct('');
     if (b.port === oldPort) say('same port object for the load');
@@ -458,7 +505,9 @@ async function stmLoad(b0, build) {
   const oldPort = b.port; await closeBoard(b);
   bridgeNext = true;
   stage('Waiting for you');
-  try { b = await personPowerCycle(x => x.mode === 'app' && x.port !== oldPort && x.bridge); } finally { bridgeNext = false; }
+  try {
+    b = await personPowerCycle(x => x.mode === 'app' && x.port !== oldPort && x.bridge);
+  } finally { bridgeNext = false; }
   return stmBridge(b, build, header, image);
 }
 const NO_LOADER = 'The STM32 on this board cannot take an update over USB. Nothing was written to it. Contact support.';
@@ -694,11 +743,6 @@ function chooseRef(v) {
 }
 
 const named = (label, v, sep = ' ') => `${label.replace(/\s*\bv?\d+\.\d+\.\d+[^\s,()]*/g, '').trim()}${sep}${v}`;
-function cycles(rom, stm) {
-  if (rom && stm) return 'Then power-cycle the board once, and once more if the STM32 version differs.';
-  if (rom) return 'Then power-cycle the board once.';
-  return stm ? 'Then power-cycle the board once if the STM32 version differs.' : 'No action from you.';
-}
 const stmCurrent = (b, s) => !!(b && s && b.stm === `app ${s.m.version}`);
 async function stmPart(r1, stm) {
   const nb = [...boards.values()].find(x => x.mode === 'app' && x.firmware === 'rover firmware' && x.state === 'open');
@@ -734,7 +778,7 @@ function offersFor(b) {
     const steps = [...(rom ? [] : [{ id: 'loader', text: 'Prepare the board for the install' }]), { id: 'esp', text: `ESP32: write ${espName} (only the parts that differ)` }, { id: 'start', text: 'Start the new ESP32 firmware' },
       ...(stm ? [{ id: 'stm', text: `STM32: update to ${stmName} if its version differs` }] : []), { id: 'check', text: 'Read both versions' }];
     out.push({ l1: 'Install', l2: what, steps,
-      l3: `Installs what differs on the ESP32${stm ? ' and the STM32' : ''}. ${stm && !rom ? 'If the STM32 needs an update, you power-cycle the board once.' : 'No action from you.'}`,
+      l3: `Installs what differs on the ESP32${stm ? ' and the STM32' : ''}.`,
       plan: [['Erases', 'all ESP32 settings, logs and files: they return to their defaults (the whole ESP32 when its partition table differs)'],
         ['Writes ESP32', `${espName}: only the parts that differ`],
         ...(stm ? [['Writes STM32', `${stmName}, only if its version differs; its settings and calibration then return to their defaults`]] : []),
