@@ -1,6 +1,6 @@
 'use strict';
 const ESPRESSIF = 0x303A, ROM_PID = 0x0002, APP_PID = 0x80C2;
-const PAGE_VERSION = '1.12.4';
+const PAGE_VERSION = '1.12.5';
 let pageVer = `Page v${PAGE_VERSION} (local copy)`;
 const ESPTOOL = 'https://unpkg.com/esptool-js@0.4.7/bundle.js';
 const ESPTOOL_SRI = 'sha384-esoYAtcIwSlHrIf+6+uZc/SPs/S8v44K26De13juLayamqHofUvCPscyHBXPxVIc';
@@ -367,14 +367,14 @@ async function romLoad(b0, build, erase, stmBuild = null) {
   const term = { clean() {}, writeLine: t => say('esptool: ' + t), write: t => { if (t.trim()) say('esptool: ' + t.trim()); } };
   if (b.port.readable) await b.port.close().catch(() => {});
   const transport = new Transport(b.port, true);
-  let entry = null;
+  let entry = null, merged = false;
   try {
   const loader = new ESPLoader({ transport, baudrate: 115200, romBaudrate: 115200, terminal: term, debugLogging: true });
   await loader.detectChip('no_reset');
   say(`chip: ${await loader.chip.getChipDescription(loader)}`);
   const strap = await loader.readReg(S2.STRAP), opt1 = await loader.readReg(S2.OPTION1);
   const byButton = (strap & S2.SPI_BOOT) === 0 && (opt1 & S2.FORCE_DL) === 0;
-  say(`download mode entry: ${byButton ? 'button "0" (watchdog reset)' : 'firmware (RTS reset)'}; strap 0x${(strap >>> 0).toString(16)}, option1 0x${(opt1 >>> 0).toString(16)}`);
+  say(`download mode entry: ${byButton ? 'button "0" (watchdog reset)' : 'firmware (force-download bit)'}; strap 0x${(strap >>> 0).toString(16)}, option1 0x${(opt1 >>> 0).toString(16)}`);
   if (byButton) {
     const held = async () => ((await loader.readReg(0x3F40403C).catch(() => 1)) & 1) === 0;
     if (await held()) {
@@ -383,7 +383,6 @@ async function romLoad(b0, build, erase, stmBuild = null) {
       instruct('');
     }
   }
-  let merged = false;
   const tb = blobs.find(x => x.address === 0x8000), table = tb ? partitionTable(tb.data) : [], images = new Set(blobs);
   if (build) {
     for (const q of table.filter(q => q.type === 0x01)) {
