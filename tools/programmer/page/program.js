@@ -1,6 +1,6 @@
 'use strict';
 const ESPRESSIF = 0x303A, ROM_PID = 0x0002, APP_PID = 0x80C2;
-const PAGE_VERSION = '1.12.2';
+const PAGE_VERSION = '1.12.3';
 let pageVer = `Page v${PAGE_VERSION} (local copy)`;
 const ESPTOOL = 'https://unpkg.com/esptool-js@0.4.7/bundle.js';
 const ESPTOOL_SRI = 'sha384-esoYAtcIwSlHrIf+6+uZc/SPs/S8v44K26De13juLayamqHofUvCPscyHBXPxVIc';
@@ -341,7 +341,7 @@ async function romLoad(b0, build, erase, stmBuild = null) {
   if (build) {
     for (const q of table.filter(q => q.type === 0x01)) {
       if (blobs.some(x => x.address === q.offset)) continue;
-      if (q.subtype === 0x02 && stmBuild) {
+      if (q.subtype === 0x02 && stmBuild && byButton) {
         blobs.push({ data: nvsIapholdPage(), address: q.offset });
         if (q.size > 4096) blobs.push({ data: new Uint8Array(q.size - 4096).fill(0xFF), address: q.offset + 4096 });
         merged = true; say(`${q.label} at 0x${q.offset.toString(16)}: iaphold = 1, so the first start of the new firmware opens the STM32 bridge`);
@@ -729,12 +729,12 @@ function offersFor(b) {
       + (stm ? ` + ${named(stm.m.label || 'STM32 app', stm.m.version)}` : '') + ` (${srcLine(m, g.esp.release)})`;
     const bad = [g.esp, stm].filter(Boolean).find(x => !x.m.boards.includes(rev));
     if (bad) { no.push({ l1: 'Full install', l2: what, reason: `This firmware is for board revision ${bad.m.boards.join(', ')}. This board is revision ${rev}.` }); continue; }
-    if (b.mode !== 'rom') continue;
+    const rom = b.mode === 'rom';
     const espName = named(m.label || 'firmware', m.version), stmName = stm && named(stm.m.label || 'STM32 app', stm.m.version);
-    const steps = [{ id: 'esp', text: `ESP32: write ${espName} (only the parts that differ)` }, { id: 'start', text: 'Start the new ESP32 firmware' },
+    const steps = [...(rom ? [] : [{ id: 'loader', text: 'Prepare the board for the install' }]), { id: 'esp', text: `ESP32: write ${espName} (only the parts that differ)` }, { id: 'start', text: 'Start the new ESP32 firmware' },
       ...(stm ? [{ id: 'stm', text: `STM32: update to ${stmName} if its version differs` }] : []), { id: 'check', text: 'Read both versions' }];
     out.push({ l1: 'Install', l2: what, steps,
-      l3: `Installs what differs on the ESP32${stm ? ' and the STM32' : ''}. No action from you.`,
+      l3: `Installs what differs on the ESP32${stm ? ' and the STM32' : ''}. ${stm && !rom ? 'If the STM32 needs an update, you power-cycle the board once.' : 'No action from you.'}`,
       plan: [['Erases', 'all ESP32 settings, logs and files: they return to their defaults (the whole ESP32 when its partition table differs)'],
         ['Writes ESP32', `${espName}: only the parts that differ`],
         ...(stm ? [['Writes STM32', `${stmName}, only if its version differs; its settings and calibration then return to their defaults`]] : []),
@@ -742,8 +742,7 @@ function offersFor(b) {
       go: () => fullInstall(b, g.esp, stm, steps) });
   }
   out.refused = no;
-  if (b.mode !== 'rom') { out.button = true; return out; }
-  const esteps = [{ id: 'esp', text: 'ESP32: erase the whole flash' }];
+  const esteps = [...(b.mode === 'rom' ? [] : [{ id: 'loader', text: 'Prepare the board' }]), { id: 'esp', text: 'ESP32: erase the whole flash' }];
   out.erase = { l1: 'Erase ESP32', l2: 'Erases the whole ESP32 flash and writes no firmware.',
     l3: 'The board then stays in bootloader mode until a Full install.',
     plan: [['Erases', 'the whole ESP32 flash, 4 MB: firmware, settings, logs and Wi-Fi passwords. Nothing stays.'], ['Writes', 'nothing'], ['Keeps', 'the STM32 app and its update loader']],
