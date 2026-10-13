@@ -1,6 +1,6 @@
 'use strict';
 const ESPRESSIF = 0x303A, ROM_PID = 0x0002, APP_PID = 0x80C2;
-const PAGE_VERSION = '1.5.1';
+const PAGE_VERSION = '1.5.2';
 let pageVer = `Page v${PAGE_VERSION} (local copy)`;
 const ESPTOOL = 'https://unpkg.com/esptool-js@0.4.7/bundle.js';
 const ESPTOOL_SRI = 'sha384-esoYAtcIwSlHrIf+6+uZc/SPs/S8v44K26De13juLayamqHofUvCPscyHBXPxVIc';
@@ -190,8 +190,7 @@ async function otaUpdate(b0, build) {
   return `Installed. The ESP32 now runs ${b.firmware} ${b.version || ''}.`;
 }
 
-const S2 = { STRAP: 0x3F404038, SPI_BOOT: 0x8, OPTION1: 0x3F408128, FORCE_DL: 0x1,
-  WDT_CFG0: 0x3F408094, WDT_CFG1: 0x3F408098, WDT_PROTECT: 0x3F4080AC, WDT_KEY: 0x50D83AA1 };
+const S2 = { STRAP: 0x3F404038, SPI_BOOT: 0x8, OPTION1: 0x3F408128, FORCE_DL: 0x1 };
 async function romLoad(b0, build, erase) {
   stage('Checking the firmware files');
   const fl = build.m.esp32.full_load, blobs = [];
@@ -246,7 +245,7 @@ async function romLoad(b0, build, erase) {
   say(`chip: ${await loader.chip.getChipDescription(loader)}`);
   const strap = await loader.readReg(S2.STRAP), opt1 = await loader.readReg(S2.OPTION1);
   const byButton = (strap & S2.SPI_BOOT) === 0 && (opt1 & S2.FORCE_DL) === 0;
-  say(`download mode entry: ${byButton ? 'button "0" (power cycle needed)' : 'firmware (restart by watchdog)'}; strap 0x${(strap >>> 0).toString(16)}, option1 0x${(opt1 >>> 0).toString(16)}`);
+  say(`download mode entry: ${byButton ? 'button "0" (power cycle needed)' : 'firmware (restart by reset)'}; strap 0x${(strap >>> 0).toString(16)}, option1 0x${(opt1 >>> 0).toString(16)}`);
   loader.FLASH_WRITE_SIZE = 0x400; if (loader.chip) loader.chip.FLASH_WRITE_SIZE = 0x400;
   const sizes = blobs.map(x => x.data.length), total = sizes.reduce((a, c) => a + c, 0);
   stage('Writing the ESP32 firmware (about 1 min; keep the board plugged in)', 0);
@@ -255,11 +254,9 @@ async function romLoad(b0, build, erase) {
     eraseAll: false, compress: true, reportProgress: (i, w, t) => { setPct(Math.floor(100 * (sizes.slice(0, i).reduce((a, c) => a + c, 0) + sizes[i] * w / t) / total)); progress(`file ${i + 1} of ${blobs.length}: ${Math.floor(100 * w / t)} %`); } });
   if (!byButton) {
     stage('Starting the new firmware');
-    say('RTC watchdog reset');
-    await loader.writeReg(S2.WDT_PROTECT, S2.WDT_KEY);
-    await loader.writeReg(S2.WDT_CFG1, 5000);
-    await loader.writeReg(S2.WDT_CFG0, ((1 << 31) | (5 << 28) | (1 << 8) | 2) >>> 0);
-    await loader.writeReg(S2.WDT_PROTECT, 0).catch(() => {});
+    await loader.writeReg(S2.OPTION1, 0, S2.FORCE_DL).catch(ex => say(`force-download bit not cleared: ${ex.message}`));
+    say('hard reset: RTS on 200 ms, off');
+    await transport.setRTS(true); await sleep(200); await transport.setRTS(false); await sleep(200);
   }
   entry = byButton ? 'button' : 'firmware';
   } finally { await transport.disconnect().catch(() => {}); if (b.port.readable) await b.port.close().catch(() => {}); }
@@ -269,7 +266,7 @@ async function romLoad(b0, build, erase) {
   if (entry === 'firmware') {
     stage('The board restarts with the new firmware');
     b = await waitBoard(back, 20000, 'The board restarts. When it is back on USB, press "Connect an Rx" again.');
-    if (!b) say('no board on USB 20 s after the watchdog reset: power cycle');
+    if (!b) say('no board on USB 20 s after the hard reset: power cycle');
   }
   if (!b) {
   stage('Waiting for you: unplug and plug in the board');
