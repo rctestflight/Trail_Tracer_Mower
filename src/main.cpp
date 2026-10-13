@@ -195,9 +195,9 @@ void usbLoadService(){
 
 static const char* TAG = "wfrx";
 #ifdef BENCH_FAKE_IMU
-#define ROVER_FW_VERSION "0.5.62+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.5.63+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #else
-#define ROVER_FW_VERSION "0.5.62"  // 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
+#define ROVER_FW_VERSION "0.5.63"  // 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
 
@@ -2052,16 +2052,22 @@ void stm32_boot_handshake() {
   // (for example after an STM32 load), so send HELLO/BOOT anyway. The running app
   // signals a packet on nDATA_READY every 10 ms.
   esp_reset_reason_t reset_reason = esp_reset_reason();
+  // 0.5.63: only UART bytes show a running application. The boot checker also makes nDATA_READY
+  // edges (bench, 2026-10-12: an RTS reset with the STM32 in its boot checker gave "handshake
+  // skipped" and no STM32 start). An application sends a frame at least every frame period, so
+  // 250 ms with no byte means the boot checker.
   if (reset_reason != ESP_RST_POWERON) {
     data_ready = 0;
-    delay(50);
-    if (data_ready > 0 || Serial1.available() > 0) {
-      usbOut.print("STM32 handshake skipped (reset reason: ");
-      usbOut.print((int)reset_reason);
-      usbOut.println(", STM32 app running)");
+    const uint32_t t0 = millis();
+    while (millis() - t0 < 250 && Serial1.available() == 0) delay(1);
+    const int bytes = Serial1.available();
+    if (bytes > 0) {
+      usbOut.printf("STM32 handshake skipped (reset reason: %d, STM32 app running: %d B, %lu edges)\n",
+                    (int)reset_reason, bytes, (unsigned long)data_ready);
       return;
     }
-    usbOut.println("STM32 silent after reset: sending HELLO/BOOT");
+    usbOut.printf("STM32 silent after reset (%lu nDATA_READY edges, no byte in 250 ms): sending HELLO/BOOT\n",
+                  (unsigned long)data_ready);
   }
 
   char t[72];
