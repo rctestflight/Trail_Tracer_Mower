@@ -487,6 +487,28 @@
       "description": "Vehicle log sample rate in Hz. Below 100 Hz an anti-alias filter (two moving averages) runs first. Other values go to the nearest allowed rate",
       "label": "Log rate"
     },
+    "telemetry_bins_hz": {
+      "type": "int",
+      "min": 0,
+      "max": 100,
+      "values": [
+        0,
+        100,
+        50,
+        25,
+        20,
+        10,
+        5,
+        4,
+        2,
+        1
+      ],
+      "default": 5,
+      "live": true,
+      "group": "Radio and log",
+      "description": "Rate in Hz of the coil magnitudes of all 8 frequency bins in the vehicle log, for the per-bin plots. The same anti-alias filter as the log rate runs first. 0 = off",
+      "label": "Coil plot rate"
+    },
     "espnow_tx_power_dbm": {
       "type": "float",
       "min": 2,

@@ -190,6 +190,27 @@ int packEvent(uint8_t* o, uint16_t code, int32_t a, int32_t b, const char* text)
   return n;
 }
 
+int packBins(uint8_t* o, uint8_t frames, uint16_t window_ms, const float hz[BINS], const int32_t v[BINS][4]) {
+  o[0] = BODY_BINS;
+  o[1] = frames;
+  put16(o + 2, window_ms);
+  for (int b = 0; b < BINS; b++) {
+    const float h = hz[b] * 0.5f;
+    put16(o + 4 + 2 * b, (uint16_t)(h <= 0 ? 0 : h >= 65535.0f ? 65535 : lroundf(h)));
+  }
+  uint8_t* p = o + 4 + 2 * BINS;
+  for (int b = 0; b < BINS; b++)
+    for (int k = 0; k < 4; k++) {
+      int32_t x = v[b][k];
+      if (x != BINS_NONE) x = x > 8388607 ? 8388607 : x < -8388607 ? -8388607 : x;
+      const uint32_t u = (uint32_t)x;
+      *p++ = (uint8_t)u;
+      *p++ = (uint8_t)(u >> 8);
+      *p++ = (uint8_t)(u >> 16);
+    }
+  return BINS_BYTES;
+}
+
 bool Block::add(const Sample& s, uint8_t rate_hz) {
   if (n_ == 0) {
     ms0_ = s.ms;

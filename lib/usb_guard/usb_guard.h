@@ -23,7 +23,8 @@ namespace usb_guard {
 constexpr uint32_t DETACH_MS = 300;   // the PC sees the removal
 constexpr uint32_t STUCK_MS = 3000;   // TX FIFO full with no completed transfer this long
 constexpr uint32_t GRACE_MS = 6000;   // after a reconnect: the host enumerates and opens the port
-constexpr uint32_t KICK_MS = 250;     // TX FIFO full with no completed transfer this long: one flush (before STUCK_MS)
+constexpr uint32_t KICK_MS = 250;
+constexpr uint32_t EJECT_MS = 500;    // 0.5.67: drive eject, then this wait, then the detach (as a planned restart)     // TX FIFO full with no completed transfer this long: one flush (before STUCK_MS)
 
 void begin();  // before Serial.begin(): reboot machine off, TX-complete counter on
 
@@ -57,5 +58,8 @@ bool take_saved(char* buf, int n);         // the saved line, once; false if non
 // this boot (first "P" ping or a "monitor" command): from then on an undrained FIFO gets the USB reconnect.
 void set_reconnect(bool on);
 bool reconnect_allowed();
+// 0.5.67: called once before a guard reconnect, EJECT_MS before the detach: the USB drive eject. A drive that
+// goes away unannounced while a PC reads it can stop the PC's USB ports (Windows event 51).
+void set_before_detach(void (*fn)());
 
 }  // namespace usb_guard

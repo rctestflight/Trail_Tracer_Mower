@@ -519,6 +519,7 @@ void setup(const char* version) {
   usb_diag.magic = USB_DIAG_MAGIC;
   Serial.setRxBufferSize(16384);
   usb_guard::begin();
+  usb_guard::set_before_detach(msc_fat_eject);  // a guard reconnect ejects the drive first
   Serial.onEvent(ARDUINO_USB_CDC_RX_OVERFLOW_EVENT, on_usb_event);
   Serial.onEvent(ARDUINO_USB_CDC_RX_EVENT, on_usb_rx_tx);
   Serial.onEvent(ARDUINO_USB_CDC_TX_EVENT, on_usb_rx_tx);
@@ -570,7 +571,7 @@ void loop() {
     out("I %lld restart: no PC input for %lu s after pings (USB input stopped?)\n", esp_timer_get_time(),
         (unsigned long)(HOST_SILENT_MS / 1000));
     {
-      static char regs[900];
+      static char regs[1200];
       usb_guard::snapshot();
       usb_guard::format_snapshot(regs, sizeof(regs));
       usb_guard::save_for_next_boot(regs);  // the line below can be lost in the restart
@@ -626,13 +627,17 @@ void loop() {
       out("I %lld usbdiag kicks=%lu stalls=%lu reconnects=%lu\n", esp_timer_get_time(), (unsigned long)usb_guard::kicks(),
           (unsigned long)usb_guard::stalls(), (unsigned long)usb_guard::restarts());
     }
-    if (pending && host_open() && !usb_guard::reconnecting(millis())) {
-      pending = false;
+    static uint8_t repeats = 0;
+    static uint32_t repeat_ms = 0;
+    if (pending) { repeats = 3; repeat_ms = millis() - 5000; pending = false; }
+    if (repeats && host_open() && !usb_guard::reconnecting(millis()) && millis() - repeat_ms >= 5000) {
+      repeats--;  // bench (0.5.67): three copies 5 s apart; one copy was lost in the output after a reconnect
+      repeat_ms = millis();
       out("I %lld usbstall n=%lu last5s r_lines=%lu out_bytes=%lu waits=%lu cuts=%lu uart_bytes=%lu loop_max_us=%lu heap=%lu kicks=%lu\n",
           esp_timer_get_time(), (unsigned long)seen_stalls, (unsigned long)snap.r_lines, (unsigned long)snap.out_bytes,
           (unsigned long)snap.waits, (unsigned long)snap.cuts, (unsigned long)snap.uart_bytes, (unsigned long)snap.loop_max_us,
           (unsigned long)ESP.getFreeHeap(), (unsigned long)usb_guard::kicks());
-      static char regs[900];
+      static char regs[1200];
       usb_guard::format_snapshot(regs, sizeof(regs));
       out("I %lld %s (output stop)\n", esp_timer_get_time(), regs);
     }

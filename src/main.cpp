@@ -195,9 +195,9 @@ void usbLoadService(){
 
 static const char* TAG = "wfrx";
 #ifdef BENCH_FAKE_IMU
-#define ROVER_FW_VERSION "0.5.65+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.5.68+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #else
-#define ROVER_FW_VERSION "0.5.65"  // 0.5.65: "stm restart" (Rx STM32 command 41, app 2.0.39+): Rx STM32 update with no power cycle; 0.5.64: USB output fix from the bench line (0.5.60-dev10 to dev13): project copy of the TinyUSB ESP32-S2 device driver (lib/tinyusb_dcd_fix) with no zero-length packet on data IN endpoints; USB register record at each output stop and over a restart (monitor). 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
+#define ROVER_FW_VERSION "0.5.68"  // 0.5.68: the 8-bin coil record (0x2E) goes through the log anti-alias filter at telemetry_bins_hz (default 5); 0.5.67: USB driver copy: TX FIFO register of the FIFO in use (DIEPTXF[TxFNum-1]; the CDC output FIFO pointed outside the FIFO RAM: output stops at Monitor Rx start and mid-run), IN endpoints disabled through the core at a bus reset and a close; a guard reconnect ejects the drive first; usbregs with FIFO registers and driver counters, the stop record printed 3 times; 0.5.66: telemetry body 0x2E, the coil magnitudes of all 8 bins of both sensors, 5 a second; 0.5.65: "stm restart" (Rx STM32 command 41, app 2.0.39+): Rx STM32 update with no power cycle; 0.5.64: USB output fix from the bench line (0.5.60-dev10 to dev13): project copy of the TinyUSB ESP32-S2 device driver (lib/tinyusb_dcd_fix) with no zero-length packet on data IN endpoints; USB register record at each output stop and over a restart (monitor). 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
 
@@ -667,6 +667,51 @@ void stmCoilFrame(){
   memset(stm_coil_ssum, 0, sizeof(stm_coil_ssum));
   stm_coil_n = 0;
   stm_coil_t0 = now;
+}
+// Telemetry: the coil magnitudes of all 8 bins of both sensors (body 0x2E, lib/rover_telemetry), for the
+// per-bin plots of the telemetry app. The log's anti-alias filter (decimator.h, two moving averages) at the
+// rate telemetry_bins_hz (0 = off), on |v| and on v of each coil: the record holds the filtered |v| with the
+// sign of the filtered v (as the STMCOIL8 line). One FAST record per output. The filter is on the heap.
+extern bool safe_mode;
+rec::ChannelDecimator* telem_bins_decim = nullptr;
+void telemetryBins(){
+  const int hz = g_deviceConfig.telemetry_bins_hz;
+  if (safe_mode || !g_deviceConfig.telemetry_enabled || hz <= 0) return;
+  if (!telem_bins_decim) {
+    telem_bins_decim = new rec::ChannelDecimator(2 * WFRX_BINS * 2 * 2);
+    telem_bins_decim->setRate(hz);
+  }
+  if (telem_bins_decim->rate() != hz) telem_bins_decim->setRate(hz);
+  float in[2 * WFRX_BINS * 2 * 2] = {};  // [sensor][bin][coil][|v|, v]
+  bool seen[2] = {false, false};
+  for (unsigned k = 0; k < WFRX_RESULTS; k++) {
+    const unsigned sn = (stmDec.lanes >> k) & 1u;  // the sensor this lane reads; both lanes on one sensor: lane 1
+    if (seen[sn]) continue;
+    seen[sn] = true;
+    for (unsigned bn = 0; bn < WFRX_BINS; bn++) {
+      const int32_t v[2] = {wfrx_int24_get(stmDec.coil[k][bn].v1), wfrx_int24_get(stmDec.coil[k][bn].v2)};
+      for (unsigned c = 0; c < 2; c++) {
+        float* p = in + ((sn * WFRX_BINS + bn) * 2 + c) * 2;
+        p[0] = (float)(v[c] < 0 ? -v[c] : v[c]);
+        p[1] = (float)v[c];
+      }
+    }
+  }
+  float out[2 * WFRX_BINS * 2 * 2];
+  uint32_t out_ms;
+  if (!telem_bins_decim->push(in, millis(), out, &out_ms)) return;
+  int32_t v[WFRX_BINS][4];
+  for (unsigned bn = 0; bn < WFRX_BINS; bn++)
+    for (unsigned sn = 0; sn < 2; sn++)
+      for (unsigned c = 0; c < 2; c++) {
+        const float* p = out + ((sn * WFRX_BINS + bn) * 2 + c) * 2;
+        const int32_t m = (int32_t)lroundf(p[0]);
+        v[bn][sn * 2 + c] = !seen[sn] || stm_bin_hz[bn] <= 0 ? rec::BINS_NONE : p[1] < 0 ? -m : m;
+      }
+  uint8_t body[rec::BINS_BYTES];
+  const int f = telem_bins_decim->factor();
+  const int n = rec::packBins(body, (uint8_t)(f < 255 ? f : 255), (uint16_t)(1000 / telem_bins_decim->rate()), stm_bin_hz, v);
+  telemlog_add(TELEMLOG_FAST, out_ms, body, (size_t)n);
 }
 // Channel scan: with the Tx off, the user drives in
 // manual mode over the full throttle range and the ESP32 ranks the bins by interference. Per frame and bin: level
@@ -2863,7 +2908,8 @@ void setup() {
 
   // Start Serial
   TRACE(3);
-  usb_guard::begin();  // before the host opens the port: the DTR/RTS reboot sequence is off
+  usb_guard::begin();  // before the host opens the port
+  usb_guard::set_before_detach(msc_fat_eject);  // a guard reconnect (monitor role only) ejects the drive first: the DTR/RTS reboot sequence is off
   Serial.setRxBufferSize(2048);  // STM32 bridge: one IAP chunk frame is 1048 B
   Serial.begin(115200);  // Start USB VCP
   Serial.setTxTimeoutMs(0);  // Never block if no CDC host is connected
@@ -4009,6 +4055,7 @@ bool stmReadFrame(){
     if (ok && stm_cap && stm_cap_n < stm_cap_want) memcpy(stm_cap + (size_t)STM_FRAME_LEN * stm_cap_n++, f, STM_FRAME_LEN);
     if (ok && stm_acc_want) stmAccFrame();
     if (ok && stm_coil_ms) stmCoilFrame();
+    if (ok) telemetryBins();
     if (ok && scan_on) scanFrame();
     if (ok && stm_link_ver == 0) { stm_link_ver = 2; stm_v2_resync = false; usbOut.println("STM link v2.0 layout 2: 128 B frames"); }
     if (known) {

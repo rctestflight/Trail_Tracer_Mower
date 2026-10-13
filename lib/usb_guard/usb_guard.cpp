@@ -2,6 +2,9 @@
 #include "USB.h"
 #include "soc/usb_struct.h"
 
+extern "C" volatile uint32_t dcd_fix_cnt[4];
+extern "C" volatile uint32_t dcd_fix_old_txf[4];  // FIFO registers as found before the endpoint open  // lib/tinyusb_dcd_fix: bus resets, closes, IN disables, time-outs
+
 namespace usb_guard {
 namespace {
 
@@ -15,6 +18,9 @@ uint32_t detach_ms = 0;
 uint32_t grace_until_ms = 0;
 uint32_t kick_count = 0;   // flushes sent to a full TX FIFO with no progress (KICK_MS)
 bool kicked = false;
+bool ejecting = false;     // the drive eject ran; the detach follows EJECT_MS later
+uint32_t eject_ms = 0;
+void (*before_detach)() = nullptr;
 bool reconnect_on = false; // set_reconnect(): the monitor role after the PC program connected; never the vehicle role
 
 void on_tx(void*, esp_event_base_t, int32_t, void*) { tx_count++; }
@@ -24,6 +30,7 @@ struct Snap {
   uint32_t ms, gintsts, gintmsk, dctl, dsts, daint, daintmsk, empmsk;
   uint32_t in_ctl[EPN], in_siz[EPN], in_fs[EPN], in_int[EPN], out_ctl[EPN], out_siz[EPN], out_int[EPN];
   uint32_t cdc_tx_free, cdc_rx_avail, arduino_rx_avail, tx_events;
+  uint32_t grxfsiz, gnptxfsiz, txf[4];
   bool valid;
 } snap{};
 
@@ -41,6 +48,8 @@ void snapshot() {
   }
   snap.cdc_tx_free = tud_cdc_n_write_available(0); snap.cdc_rx_avail = tud_cdc_n_available(0);
   snap.arduino_rx_avail = Serial.available(); snap.tx_events = tx_count;
+  snap.grxfsiz = USB0.grxfsiz; snap.gnptxfsiz = USB0.gnptxfsiz;
+  for (int f = 0; f < 4; f++) snap.txf[f] = USB0.dieptxf[f];
   snap.valid = true;
 }
 
@@ -68,11 +77,17 @@ bool take_saved(char* buf, int n) {
 
 int format_snapshot(char* buf, int n) {
   int k = snprintf(buf, n, "usbregs ms=%lu gintsts=%08lx gintmsk=%08lx dctl=%08lx dsts=%08lx daint=%08lx daintmsk=%08lx empmsk=%04lx"
-                   " cdc_tx_free=%lu cdc_rx=%lu ard_rx=%lu txev=%lu",
+                   " cdc_tx_free=%lu cdc_rx=%lu ard_rx=%lu txev=%lu bres=%lu clos=%lu dis=%lu dto=%lu",
                    (unsigned long)snap.ms, (unsigned long)snap.gintsts, (unsigned long)snap.gintmsk, (unsigned long)snap.dctl,
                    (unsigned long)snap.dsts, (unsigned long)snap.daint, (unsigned long)snap.daintmsk, (unsigned long)snap.empmsk,
                    (unsigned long)snap.cdc_tx_free, (unsigned long)snap.cdc_rx_avail, (unsigned long)snap.arduino_rx_avail,
-                   (unsigned long)snap.tx_events);
+                   (unsigned long)snap.tx_events, (unsigned long)dcd_fix_cnt[0], (unsigned long)dcd_fix_cnt[1],
+                   (unsigned long)dcd_fix_cnt[2], (unsigned long)dcd_fix_cnt[3]);
+  if (k < n) k += snprintf(buf + k, n - k, " rxf=%08lx nptxf=%08lx txf=%08lx,%08lx,%08lx,%08lx oldtxf=%08lx,%08lx,%08lx,%08lx",
+                           (unsigned long)snap.grxfsiz, (unsigned long)snap.gnptxfsiz, (unsigned long)snap.txf[0],
+                           (unsigned long)snap.txf[1], (unsigned long)snap.txf[2], (unsigned long)snap.txf[3],
+                           (unsigned long)dcd_fix_old_txf[0], (unsigned long)dcd_fix_old_txf[1],
+                           (unsigned long)dcd_fix_old_txf[2], (unsigned long)dcd_fix_old_txf[3]);
   for (int e = 0; e < EPN && k < n; e++)
     k += snprintf(buf + k, n - k, " in%d=%08lx/%08lx/%04lx/%04lx", e, (unsigned long)snap.in_ctl[e], (unsigned long)snap.in_siz[e],
                   (unsigned long)snap.in_fs[e], (unsigned long)snap.in_int[e]);
@@ -114,8 +129,16 @@ void service(uint32_t now, bool) {
     tud_cdc_n_write_flush(0);
   }
   if (now - last_progress_ms >= STUCK_MS) {
-    snapshot();  // the USB core state at the stop, before the reconnect resets it
-    stall_count++;
+    if (!ejecting) {
+      snapshot();  // the USB core state at the stop, before the reconnect resets it
+      stall_count++;
+      if (before_detach) before_detach();  // the drive eject first: the PC stops its drive reads
+      ejecting = true;
+      eject_ms = now;
+      return;
+    }
+    if (now - eject_ms < EJECT_MS) return;
+    ejecting = false;
     reconnect_count++;
     tud_disconnect();
     detached = true;
@@ -128,6 +151,7 @@ uint32_t restarts() { return reconnect_count; }
 uint32_t stalls() { return stall_count; }
 uint32_t tx_events() { return tx_count; }
 uint32_t kicks() { return kick_count; }
+void set_before_detach(void (*fn)()) { before_detach = fn; }
 void set_reconnect(bool on) { reconnect_on = on; }
 bool reconnect_allowed() { return reconnect_on; }
 

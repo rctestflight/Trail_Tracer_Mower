@@ -102,12 +102,39 @@ static uint8_t get_free_fifo(void)
   return 0;
 }
 
+// FIX (project, firmware 0.5.67): disable an enabled IN endpoint through the core (SNAK, then EPDIS, wait for
+// EPDisbld) and clear its transfer size. EPENA is set by software and cleared only by the core: the original
+// close wrote DIEPCTL = 0, which leaves an enabled endpoint enabled. A FIFO flush then empties its data while it
+// keeps its packet count, and it answers every IN token with NAK. Bench (2026-10-13, Monitor Rx start, 2 of 2
+// boards): CDC IN enabled, PktCnt 1, XferSize 0, TX FIFO empty, no transfer complete until the USB guard
+// reconnected. The waits are bounded: a core that does not answer leaves the endpoint as it was.
+// Bench counters (0.5.67): bus resets, endpoint closes, IN endpoints found enabled and disabled, disable time-outs.
+volatile uint32_t dcd_fix_cnt[4];
+volatile uint32_t dcd_fix_old_txf[4];  // bench: each FIFO register as found before the endpoint open wrote it
+static void in_ep_disable(uint8_t n)
+{
+  volatile usb_in_endpoint_t *ep = &USB0.in_ep_reg[n];
+  if (ep->diepctl & USB_D_EPENA1_M) {
+    dcd_fix_cnt[2]++;
+    ep->diepctl |= USB_DI_SNAK1_M;
+    for (int t = 0; t < 2000 && !(ep->diepint & USB_DI_SNAK1_M); t++) ;
+    ep->diepctl |= USB_DI_SNAK1_M | USB_D_EPDIS1_M;
+    int t = 0;
+    for (; t < 2000 && !(ep->diepint & USB_D_EPDISBLD0_M); t++) ;
+    if (t >= 2000) dcd_fix_cnt[3]++;
+    ep->diepint = USB_D_EPDISBLD0_M;
+  }
+  ep->dieptsiz = 0;
+}
+
 // Setup the control endpoint 0.
 static void bus_reset(void)
 {
   for (int ep_num = 0; ep_num < USB_OUT_EP_NUM; ep_num++) {
     USB0.out_ep_reg[ep_num].doepctl |= USB_DO_SNAK0_M; // DOEPCTL0_SNAK
   }
+  dcd_fix_cnt[0]++;
+  for (int n = 1; n < EP_MAX; n++) in_ep_disable(n);  // FIX (0.5.67): before the FIFO flush below
 
   // clear device address
   USB0.dcfg &= ~USB_DEVADDR_M;
@@ -386,7 +413,16 @@ bool dcd_edpt_open(uint8_t rhport, tusb_desc_endpoint_t const *desc_edpt)
     uint32_t const fifo_offset = allocated_size + fifo_size*(fifo_num-1);
 
     // DIEPTXF starts at FIFO #1.
-    USB0.dieptxf[epnum - 1] = (fifo_size << USB_NPTXFDEP_S) | fifo_offset;
+    // FIX (project, firmware 0.5.67): the size and start register of the FIFO this endpoint uses
+    // (DIEPTXF[TxFNum - 1]), not DIEPTXF[epnum - 1]. get_free_fifo() hands out FIFOs in open order, so the
+    // CDC data IN endpoint 4 gets FIFO 2; the original programmed FIFO 4's register, and FIFO 2 kept its
+    // reset or earlier value, which can overlap another FIFO. Bench (2026-10-13, Monitor Rx starts): the
+    // CDC IN endpoint enabled with its last packet written (XferSize 0, PktCnt 1), the FIFO empty, every
+    // IN token answered with NAK. The fake FIFO of endpoint 5 (EP_FIFO_NUM) has no register: not written.
+    if (fifo_num < EP_FIFO_NUM) {
+      dcd_fix_old_txf[fifo_num - 1] = USB0.dieptxf[fifo_num - 1];
+      USB0.dieptxf[fifo_num - 1] = (fifo_size << USB_NPTXFDEP_S) | fifo_offset;
+    }
   }
   return true;
 }
@@ -399,6 +435,7 @@ void dcd_edpt_close_all(uint8_t rhport)
   usb_in_endpoint_t *in_ep = &(USB0.in_ep_reg[0]);
 
   portENTER_CRITICAL_SAFE(&_dcd_lock);
+  dcd_fix_cnt[1]++;
 
   // Disable non-control interrupt
   USB0.daintmsk = USB_OUTEPMSK0_M | USB_INEPMSK0_M;
@@ -413,6 +450,7 @@ void dcd_edpt_close_all(uint8_t rhport)
     xfer_status[n][TUSB_DIR_OUT].max_size = 0;
 
     // disable IN endpoint
+    in_ep_disable(n);  // FIX (0.5.67): through the core; DIEPCTL = 0 alone leaves EPENA set
     in_ep[n].diepctl = 0;
     xfer_status[n][TUSB_DIR_IN].max_size = 0;
   }

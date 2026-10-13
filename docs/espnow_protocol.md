@@ -190,6 +190,22 @@ Below 100 Hz, an anti-alias filter runs before the mower keeps a sample. The fil
 
 At 20 Hz, the frames carry one fifth of the 100 Hz data.
 
+### Body 0x2E: coil magnitudes of all 8 bins (stream 0)
+
+From firmware 0.5.66, with the STM32 link version 2. The telemetry app draws one plot per bin from it. From 0.5.68 the setting `telemetry_bins_hz` sets the rate (default 5 Hz; 0 = off; the same rates as `telemetry_rate_hz`), and the same anti-alias filter as the samples runs first (see "Sample rate"). The record time is the filter output time. In 0.5.66 the record was a plain average over 200 ms, with the window start as its time.
+
+| Offset | Field | Type | Unit |
+|---|---|---|---|
+| 0 | body type 0x2E | u8 | |
+| 1 | filter factor N (0.5.66: frames averaged) | u8 | 100 Hz / rate; 255 at most |
+| 2 | output period (0.5.66: window) | u16 | ms |
+| 4 | bin 0 to 7 frequency | 8 x u16 | Hz / 2; 0 = bin off |
+| 20 | bin 0 to 7 coil values | 8 x 4 x i24 | per bin: sensor 1 coil 1, sensor 1 coil 2, sensor 2 coil 1, sensor 2 coil 2 |
+
+A coil value is the STM32 magnitude in LSB of 2^-24 (about 1/mm for the wire bin at unit gain): the filtered absolute value, with the sign of the filtered value (0.5.66: the mean of the absolute values, with the sign of their sum, as the USB `STMCOIL8` line). 0x800000 (-8388608) means no data: the sensor is on no STM32 lane, or the bin is off.
+
+Size: 14 + 116 = 130 bytes a frame; at 5 Hz about 5 kbit/s.
+
 ### Body 0x21: status (stream 1, once a second)
 
 | Offset | Field | Type | Unit |
