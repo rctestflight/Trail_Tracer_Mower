@@ -1,6 +1,6 @@
 'use strict';
 const ESPRESSIF = 0x303A, ROM_PID = 0x0002, APP_PID = 0x80C2;
-const PAGE_VERSION = '1.12.5';
+const PAGE_VERSION = '1.12.8';
 let pageVer = `Page v${PAGE_VERSION} (local copy)`;
 const ESPTOOL = 'https://unpkg.com/esptool-js@0.4.7/bundle.js';
 const ESPTOOL_SRI = 'sha384-esoYAtcIwSlHrIf+6+uZc/SPs/S8v44K26De13juLayamqHofUvCPscyHBXPxVIc';
@@ -16,6 +16,7 @@ const boards = new Map();
 let builds = [];
 let job = null;
 let bridgeNext = false;
+let expectRover = false;
 
 async function open(port) {
   if (boards.has(port)) return boards.get(port);
@@ -90,7 +91,7 @@ function waitGone(ms) {
 async function personPowerCycle(test) {
   const want = x => test(x) || x.mode === 'rom';
   instruct(BUTTON_STEP);
-  if (!await waitGone(300000)) throw plain(BUTTON_STEP);
+  if ([...boards.values()].some(x => x.state === 'open') && !await waitGone(300000)) throw plain(BUTTON_STEP);
   let b = await waitBoard(want, 10000);
   while (!b && Date.now() - lastConnect < 6000) b = await waitBoard(want, 3000);
   if (!b) { instruct(BUTTON_STEP + '\nIf the page does not show the board, press "Connect an Rx" and choose it.'); b = await waitBoard(want, 170000); }
@@ -157,6 +158,8 @@ async function detect(b) {
   if (b.firmware === 'rover firmware' && b.role !== 'monitor' && !b.table) await ask(b, 'ota status', /^OTA status/, 2000);
   if (b.firmware === 'rover firmware' && b.role !== 'monitor' && !b.stm) b.stm = await readStm(b);
   b.detecting = false; render();
+  if (expectRover && b.firmware !== 'rover firmware' && (b.redetect = (b.redetect || 0) + 1) <= 10 && !b.closing)
+    setTimeout(() => { if (!b.closing && b.state === 'open' && !b.bridge) { say(`read the board again (${b.redetect})`); b.firmware = null; b.hb = false; detect(b); } }, 3000);
   boardOpened(b);
 }
 
@@ -184,7 +187,7 @@ async function run(name, fn) {
     say(`${name}: STOPPED: ${ex.message}`); instruct('');
     for (const x of job.steps || []) if (x.state === 'now') x.state = 'fail';
   }
-  job.done = true; job.pct = null; render();
+  job.done = true; job.pct = null; expectRover = false; render();
 }
 async function fetchBuild(build, path) {
   const f = build.m.files.find(x => x.path === path);
@@ -292,6 +295,14 @@ function md5hex(d) {
   const out = new DataView(new ArrayBuffer(16)); [a0, b0, c0, d0].forEach((w, i) => out.setUint32(i * 4, w, true));
   return [...new Uint8Array(out.buffer)].map(x => x.toString(16).padStart(2, '0')).join('');
 }
+async function flashMd5(loader, addr, size) {
+  const pk = new Uint8Array(16), v = new DataView(pk.buffer);
+  v.setUint32(0, addr, true); v.setUint32(4, size, true);
+  const r = await loader.checkCommand('calculate md5sum', loader.ESP_SPI_FLASH_MD5, pk, 0, loader.timeoutPerMb(loader.MD5_TIMEOUT_PER_MB, size));
+  const text = new TextDecoder().decode(r.slice(0, 32));
+  if (/^[0-9a-fA-F]{32}$/.test(text)) return text.toLowerCase();
+  return [...r.slice(0, 16)].map(x => x.toString(16).padStart(2, '0')).join('');
+}
 async function watchdogReset(loader) {
   say('watchdog reset (esptool watchdog_reset)');
   await loader.writeReg(0x3F4080AC, 0x50D83AA1);
@@ -396,7 +407,7 @@ async function romLoad(b0, build, erase, stmBuild = null) {
   }
   let tableSame = false;
   if (tb) {
-    const fm = await loader.flashMd5sum(tb.address, tb.data.length).catch(() => null);
+    const fm = await flashMd5(loader, tb.address, tb.data.length).catch(() => null);
     tableSame = !!fm && fm === md5hex(tb.data);
     say(`partition table: ${tableSame ? 'the same' : 'differs: full write'}`);
   }
@@ -405,7 +416,7 @@ async function romLoad(b0, build, erase, stmBuild = null) {
   for (let i = blobs.length - 1; i >= 0; i--) {
     const x = blobs[i];
     if (!images.has(x)) continue;
-    const fm = await loader.flashMd5sum(x.address, x.data.length).catch(ex => { say(`MD5 0x${x.address.toString(16)}: ${ex.message}`); return null; });
+    const fm = await flashMd5(loader, x.address, x.data.length).catch(ex => { say(`MD5 0x${x.address.toString(16)}: ${ex.message}`); return null; });
     if (fm && fm === md5hex(x.data)) { say(`0x${x.address.toString(16)} (${x.data.length} B): equal, not written`); blobs.splice(i, 1); }
   }
   loader.FLASH_WRITE_SIZE = 0x400; if (loader.chip) loader.chip.FLASH_WRITE_SIZE = 0x400;
@@ -419,7 +430,8 @@ async function romLoad(b0, build, erase, stmBuild = null) {
   if (build) {
     stage('Starting the new firmware');
     await loader.writeReg(S2.OPTION1, 0, S2.FORCE_DL).catch(ex => say(`force-download bit not cleared: ${ex.message}`));
-    await watchdogReset(loader);
+    if (byButton) await watchdogReset(loader);
+    else { say('RTS reset'); await transport.setRTS(true); await sleep(200); await transport.setRTS(false); await sleep(200); }
   }
   entry = byButton ? 'button' : 'firmware';
   } finally { await transport.disconnect().catch(() => {}); if (b.port.readable) await b.port.close().catch(() => {}); }
@@ -427,6 +439,7 @@ async function romLoad(b0, build, erase, stmBuild = null) {
   if (!build) return 'The ESP32 is erased: 4 MB, nothing kept. It runs no firmware and stays in bootloader mode until a Full install. Press "Connect an Rx" to see it.';
   const rover = build.m.esp32.usb_update, back = x => x.mode === 'app' && !x.detecting && (rover ? x.firmware === 'rover firmware' && !!x.version : !!x.firmware);
   b = null;
+  expectRover = !!rover;
   const appTest = merged ? (x => x.mode === 'app' && x.bridge) : back;
   stage('The board restarts with the new firmware');
   if (merged) bridgeNext = true;
@@ -445,7 +458,7 @@ async function romLoad(b0, build, erase, stmBuild = null) {
       b = nb;
     }
   } finally { bridgeNext = false; }
-  if (b && merged) { mergedBridge = b; return 'Installed. The ESP32 firmware is written.'; }
+  if (b && merged) { expectRover = false; mergedBridge = b; return 'Installed. The ESP32 firmware is written.'; }
   if (!b && merged) {
     say('no new firmware after the reset: the fallback, a power cycle');
     bridgeNext = true;
@@ -458,6 +471,7 @@ async function romLoad(b0, build, erase, stmBuild = null) {
     stage('Waiting for you');
     b = await personPowerCycle(back);
   }
+  expectRover = false;
   say(`ESP32 now: ${b.firmware} ${b.version || ''}`);
   return rover ? `Installed. The ESP32 now runs ${b.firmware} ${b.version || ''}.` : `Installed. The ESP32 now runs ${b.firmware}.`;
 }
