@@ -120,7 +120,7 @@ function waitLine(b, re, ms) {
 async function ask(b, cmd, re, ms = 3000) { const p = waitLine(b, re, ms); await send(b, cmd); return p; }
 async function closeBoard(b) {
   b.closing = true;
-  if (b.rom) { const r = b.rom; b.rom = null; await r.transport.disconnect().catch(() => {}); }
+  if (b.rom) { const r = b.rom; b.rom = null; await romLinkClose(b, r); }
   try { if (b.reader) await b.reader.cancel(); } catch { /* gone */ }
   await b.readDone;
   try { await b.port.close(); } catch (ex) { if (b.port.readable) say(`port close: ${ex.message}`); }
@@ -151,7 +151,7 @@ async function ensureOpen(b) {
   return b;
 }
 async function releaseBoard(b) {
-  if (b.rom) { const r = b.rom; b.rom = null; await r.transport.disconnect().catch(() => {}); if (b.port.readable) await b.port.close().catch(() => {}); }
+  if (b.rom) { const r = b.rom; b.rom = null; await romLinkClose(b, r); if (b.port.readable) await b.port.close().catch(() => {}); }
   if (b.mode !== 'rom' && b.state === 'open') {
     b.closing = true;
     try { if (b.reader) await b.reader.cancel(); } catch { /* gone */ }
@@ -197,7 +197,7 @@ async function personPowerCycle(test, text = BUTTON_STEP) {
   if ([...boards.values()].some(x => x.state === 'open') && !await waitGone(300000)) throw plain(text);
   let b = await waitBoard(want, 10000);
   while (!b && Date.now() - lastConnect < 6000) b = await waitBoard(want, 3000);
-  if (!b) { instruct(text + ' ' + ADD_HINT); b = await waitBoard(want, 170000); }
+  if (!b) { instruct(`${text.replace(/\.?$/, '.')} ${ADD_HINT}`); b = await waitBoard(want, 170000); }
   if (!b) throw plain(text);
   instruct('');
   if (b.mode === 'rom' && !test(b)) {
@@ -297,7 +297,7 @@ async function run(name, fn, extra = {}) {
   }
   job.done = true; if (!job.result.ok) job.pct = null; expectRover = false; render();
   for (const x of [...boards.values()]) if (x.state === 'open' && !x.rom) { x.connected = true; await releaseBoard(x).catch(() => {}); }
-  for (const x of [...boards.values()]) if (x.rom) { const r = x.rom; x.rom = null; await r.transport.disconnect().catch(() => {}); }
+  for (const x of [...boards.values()]) if (x.rom) { const r = x.rom; x.rom = null; await romLinkClose(x, r); }
   await releaseAll();
   for (const x of [...boards.values()]) if (x.state === 'open') x.state = 'closed';
   render();
@@ -456,6 +456,10 @@ async function romRead(b) {
     b.rom = null; await transport.disconnect().catch(() => {}); b.state = 'closed';
   } finally { b.detecting = false; render(); }
 }
+async function romLinkClose(b, r) {
+  if (!b.port.gone) { await Promise.race([watchdogReset(r.loader).catch(() => {}), sleep(1000)]); await sleep(150); }
+  await r.transport.disconnect().catch(() => {});
+}
 async function watchdogReset(loader) {
   say('watchdog reset (esptool watchdog_reset)');
   await loader.writeReg(0x3F4080AC, 0x50D83AA1);
@@ -575,8 +579,8 @@ async function romLoad(b0, build, erase, stmBuild = null) {
   if (build) {
     stage('Starting the new firmware');
     await loader.writeReg(S2.OPTION1, 0, S2.FORCE_DL).catch(ex => say(`force-download bit not cleared: ${ex.message}`));
-    if (byButton) await watchdogReset(loader);
-    else { say('RTS reset'); await transport.setRTS(true); await sleep(100); await transport.setRTS(false); }
+    await watchdogReset(loader);
+    await sleep(150);
   }
   entry = byButton ? 'button' : 'firmware';
   } finally { await transport.disconnect().catch(() => {}); if (b.port.readable) await b.port.close().catch(() => {}); }
@@ -598,7 +602,7 @@ async function romLoad(b0, build, erase, stmBuild = null) {
           const held = async () => ((await loader.readReg(0x3F40403C).catch(() => 1)) & 1) === 0;
           if (await held()) { instruct('Let go of the button.'); for (let i = 0; i < 400 && await held(); i++) await sleep(150); instruct(''); }
           await loader.writeReg(S2.OPTION1, 0, S2.FORCE_DL).catch(() => {});
-          say('fallback: RTS reset'); await tr.setRTS(true); await sleep(200); await tr.setRTS(false); await sleep(200);
+          await watchdogReset(loader); await sleep(150);
         });
         continue;
       }
@@ -610,13 +614,13 @@ async function romLoad(b0, build, erase, stmBuild = null) {
     say('no new firmware after the reset: the fallback, a power cycle');
     bridgeNext = true;
     stage('Waiting for you');
-    try { mergedBridge = await personPowerCycle(x => x.mode === 'app' && x.bridge); } finally { bridgeNext = false; }
+    try { mergedBridge = await personPowerCycle(x => x.mode === 'app' && x.bridge, REPLUG_STEP); } finally { bridgeNext = false; }
     return 'Installed. The ESP32 firmware is written.';
   }
   if (!b) {
     say('no new firmware after the reset: the fallback, a power cycle');
     stage('Waiting for you');
-    b = await personPowerCycle(back);
+    b = await personPowerCycle(back, REPLUG_STEP);
   }
   expectRover = false;
   say(`ESP32 now: ${b.firmware} ${b.version || ''}`);
