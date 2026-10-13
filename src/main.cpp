@@ -195,9 +195,9 @@ void usbLoadService(){
 
 static const char* TAG = "wfrx";
 #ifdef BENCH_FAKE_IMU
-#define ROVER_FW_VERSION "0.5.64+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.5.65+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #else
-#define ROVER_FW_VERSION "0.5.64"  // 0.5.64: USB output fix from the bench line (0.5.60-dev10 to dev13): project copy of the TinyUSB ESP32-S2 device driver (lib/tinyusb_dcd_fix) with no zero-length packet on data IN endpoints; USB register record at each output stop and over a restart (monitor). 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
+#define ROVER_FW_VERSION "0.5.65"  // 0.5.65: "stm restart" (Rx STM32 command 41, app 2.0.39+): Rx STM32 update with no power cycle; 0.5.64: USB output fix from the bench line (0.5.60-dev10 to dev13): project copy of the TinyUSB ESP32-S2 device driver (lib/tinyusb_dcd_fix) with no zero-length packet on data IN endpoints; USB register record at each output stop and over a restart (monitor). 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
 
@@ -1403,6 +1403,7 @@ void benchSend(const char* arg){
 // still), "stm tx <hex>" sends bytes, the board prints "STM rx <hex>" for each read, and "stm off"
 // returns to the 2 Mbaud packet link. A PC tool runs the protocol.
 bool stm_raw = false;
+void stmRestartCommand(const char* arg);
 // STM32 app update through the boot checker (IAP), bench and field: "stm iaphold" sets a one-shot
 // flag in NVS. At the next power-on the handshake sends HELLO only (no BOOT), so the STM32 stays in
 // its boot checker, and the board becomes a transparent bridge between USB and the STM32 UART
@@ -1443,6 +1444,8 @@ void stmIapHoldSet(){
 enum { CAL_IDLE, CAL_READ, CAL_WRITE, CAL_SAVE, CAL_VERIFY };
 uint8_t stm_cal_phase = CAL_IDLE;
 bool stm_cal_then_hold = false;     // the read was for "stm iaphold": set the flag at its end
+bool stm_cal_then_restart = false;  // the read was for "stm restart go": the restart command follows at its end
+void stmRestartBegin();
 uint32_t stm_cal_val[STM_CAL_N];    // the stored copy (raw float bits)
 bool stm_cal_valid = false;
 uint32_t stm_cal_new[STM_CAL_N];    // this read, or the verify read
@@ -1506,6 +1509,10 @@ void stmCalEnd(){
       stm_cal_then_hold = false;
       if (stm_cal_valid) stmCalSetPending(true);
       stmIapHoldSet();
+    }
+    if (stm_cal_then_restart) {
+      stm_cal_then_restart = false;
+      stmRestartBegin();
     }
   } else if (phase == CAL_VERIFY) {
     int eq = 0;
@@ -1733,6 +1740,8 @@ void stmRawCommand(const char* arg){
   } else if (!strcmp(arg, "iaphold")) {
     if (stm_link_ver == 2 && stm_cal_phase == CAL_IDLE) { stm_cal_then_hold = true; stmCalStart(CAL_READ); }  // copy first
     else { if (stm_cal_valid) stmCalSetPending(true); stmIapHoldSet(); }
+  } else if (!strncmp(arg, "restart", 7)) {
+    stmRestartCommand(arg + 7);
   } else if (!strcmp(arg, "cal")) {
     usbOut.printf("STM cal copy %s, restore %s:", stm_cal_valid ? "valid" : "none", stmCalPending() ? "pending" : "off");
     for (int k = 0; k < STM_CAL_N; k++) { float f; memcpy(&f, &stm_cal_val[k], 4); usbOut.printf(" %.7g", f); }
@@ -1744,7 +1753,7 @@ void stmRawCommand(const char* arg){
     else if (!stm_cal_valid) usbOut.println("STM cal: no stored copy");
     else stmCalStart(CAL_WRITE);
   } else {
-    usbOut.println("STM usage: stm rom | stm peek | stm tx <hex> | stm off | stm iaphold | stm cmd <cid> <value> [index] | stm read <cid> [index] | stm dup <cid> <value> [index] | stm pos | stm v2");
+    usbOut.println("STM usage: stm rom | stm peek | stm tx <hex> | stm off | stm iaphold | stm restart clear|add <hex>|go | stm cmd <cid> <value> [index] | stm read <cid> [index] | stm dup <cid> <value> [index] | stm pos | stm v2");
   }
 }
 
@@ -2163,6 +2172,170 @@ int stm32_iap_boot(int hello_tries, char* hello_text, size_t text_len, uint8_t* 
     if (millis() > deadline) return 3;
   }
   return 0;
+}
+
+// Rx STM32 restart into its boot checker, with no power cycle (command 41, Rx STM32 app 2.0.39 and later;
+// TrailTracer-Rx-STM32 docs/RX_STM32_RESTART_COMMAND.md). The PC puts the first 1092 B of the update file
+// set on the board (52 B commit header, then the first 1040 B of the encrypted image: chunk 0 and its tag)
+// with "stm restart add <hex>" lines, then sends "stm restart go". The board copies the calibration (as
+// "stm iaphold"), sets idle mode, sends the bytes in 273 commands, and asks the Rx STM32 to check them.
+// The Rx STM32 runs the boot checker's own checks; a pass restarts it into its boot checker. The board
+// then sends nothing for 60 ms (the boot checker drops a partial frame only after a 50 ms gap), reads the
+// boot checker's status frame, sends HELLO and bridges USB to it as after "stm iaphold" (stmBridgeService).
+// The PC runs the normal update through the bridge. Each step has a progress time-out; a failure prints
+// "STM restart failed" and sets run mode again.
+#define STM_RS_LEN 1092
+#define STM_RS_CID 41
+#define STM_RS_STEP_MS 2000  // one command with no answer this long: failed (the link retries 3 times in 35 ms)
+enum { RS_IDLE, RS_CAL, RS_STOP, RS_START, RS_DATA, RS_CHECK, RS_RESTART };
+uint8_t stm_rs_phase = RS_IDLE;
+uint8_t stm_rs_buf[STM_RS_LEN];
+uint16_t stm_rs_n = 0;       // bytes held
+uint16_t stm_rs_i = 0;       // data words answered
+bool stm_rs_sent = false, stm_rs_got = false;
+uint8_t stm_rs_status = 0;
+uint32_t stm_rs_value = 0, stm_rs_ms = 0, stm_rs_t0 = 0;
+
+void stmRestartFail(const char* why, long a, long b){
+  usbOut.printf("STM restart failed: %s (%ld, %ld) after %lu ms\n", why, a, b, (unsigned long)(millis() - stm_rs_t0));
+  telemetryEvent(rec::EV_STM32, 0, STM_RS_CID, "Rx STM32 restart command failed");
+  stm_rs_phase = RS_IDLE;
+  stm_rs_sent = false;
+  if (stm_v2_autorun) { stmLink.pushInt(STM_RUN_CMD | 0x80000000, 1); stm_v2_run_ms = millis(); }
+}
+
+void stmRestartCommand(const char* arg){
+  while (*arg == ' ') arg++;
+  if (!strcmp(arg, "clear")) {
+    stm_rs_n = 0;
+    usbOut.printf("STM restart held 0 B\n");
+  } else if (!strncmp(arg, "add ", 4)) {
+    const char* h = arg + 4;
+    while (h[0] && h[1] && stm_rs_n < STM_RS_LEN) {
+      unsigned v;
+      if (sscanf(h, "%2x", &v) != 1) break;
+      stm_rs_buf[stm_rs_n++] = (uint8_t)v;
+      h += 2;
+    }
+    usbOut.printf("STM restart held %u B%s\n", (unsigned)stm_rs_n, h[0] ? ", rest refused (full or not hex)" : "");
+  } else if (!strcmp(arg, "go")) {
+    if (stm_rs_phase != RS_IDLE) { usbOut.println("STM restart refused: in progress"); return; }
+    if (stm_rs_n != STM_RS_LEN) { usbOut.printf("STM restart refused: %u B held, %u needed\n", (unsigned)stm_rs_n, STM_RS_LEN); return; }
+    if (stm_link_ver != 2) { usbOut.println("STM restart refused: no v2 link to the Rx STM32"); return; }
+    if (!vehicleStationary()) { usbOut.println("STM restart refused: the vehicle moves"); return; }
+    if (stm_cal_phase != CAL_IDLE) { usbOut.println("STM restart refused: calibration copy busy"); return; }
+    stm_rs_t0 = millis();
+    stm_rs_phase = RS_CAL;
+    stm_cal_then_restart = true;
+    stmCalStart(CAL_READ);  // the calibration copy first: an update erases the Rx STM32 settings
+    usbOut.println("STM restart: calibration copy, then idle mode and command 41");
+  } else {
+    usbOut.println("STM usage: stm restart clear | stm restart add <hex> | stm restart go");
+  }
+}
+
+void stmRestartBegin(){  // from stmCalEnd(): the calibration read is done (passed or not; the stored copy stays)
+  if (stm_rs_phase != RS_CAL) return;
+  stm_rs_phase = RS_STOP;
+  stm_rs_sent = false;
+  stm_rs_ms = millis();
+}
+
+// One v2 answer (before stmLink.onAnswerV2). A pass of the check sets RS_RESTART at once, so no command
+// goes out in this frame's window.
+void stmRestartOnAnswer(const stmv2::Answer& a){
+  if (stm_rs_phase < RS_START || stm_rs_phase > RS_CHECK || !stm_rs_sent || !a.present) return;
+  const uint8_t idx = stm_rs_phase == RS_START ? 0 : stm_rs_phase == RS_DATA ? 1 : 2;
+  if (a.cid != (STM_RS_CID | ESP_CID_WRITE) || a.index != idx) return;
+  stm_rs_got = true;
+  stm_rs_status = a.status;
+  stm_rs_value = a.value;
+  if (stm_rs_phase == RS_CHECK && a.status == RSP_OK && a.value == 1) stm_rs_phase = RS_RESTART;
+}
+
+// Once a v2 frame, after stmLink.onAnswerV2: the next command when the last one is done.
+void stmRestartService(uint32_t now){
+  if (stm_rs_phase < RS_STOP || stm_rs_phase > RS_CHECK) return;
+  if (stm_rs_sent) {
+    if (stmLink.busy()) {
+      if (now - stm_rs_ms >= STM_RS_STEP_MS) stmRestartFail("no progress", stm_rs_phase, stm_rs_i);
+      return;
+    }
+    stm_rs_sent = false;
+    if (stm_rs_phase == RS_STOP) {
+      stm_rs_phase = RS_START;
+    } else if (!stm_rs_got) {
+      stmRestartFail("no answer", stm_rs_phase, stm_rs_i);
+      return;
+    } else if (stm_rs_status != RSP_OK && stm_rs_status != RSP_OK_CLAMPED) {
+      // check refused: the value is the reason (1 byte count, 2 header CRC, 3 magic, 4 product ID,
+      // 5 chunk size, 6 image size, 7 chunk count, 8 tag); -1: the Rx STM32 is in run mode
+      stmRestartFail(stm_rs_phase == RS_CHECK ? "check refused, status and reason" : "command refused, status and value",
+                     stm_rs_status, (long)(int32_t)stm_rs_value);
+      return;
+    } else if (stm_rs_phase == RS_START) {
+      stm_rs_phase = RS_DATA;
+      stm_rs_i = 0;
+    } else if (stm_rs_phase == RS_DATA) {
+      if (stm_rs_value != 4u * (stm_rs_i + 1u)) { stmRestartFail("bytes held", (long)stm_rs_value, 4L * (stm_rs_i + 1)); return; }
+      if (++stm_rs_i == STM_RS_LEN / 4) stm_rs_phase = RS_CHECK;
+    } else {  // RS_CHECK with an OK status, but not the value 1
+      stmRestartFail("check value", (long)(int32_t)stm_rs_value, 1);
+      return;
+    }
+  }
+  if (stmLink.busy()) return;
+  stm_rs_got = false;
+  if (stm_rs_phase == RS_STOP) {
+    stmLink.pushInt(STM_RUN_CMD | 0x80000000, 0);  // idle mode: command 41 runs only there
+  } else if (stm_rs_phase == RS_START) {
+    stmLink.push(STM_RS_CID | stmset::WRITE, 0, 0);
+  } else if (stm_rs_phase == RS_DATA) {
+    const uint8_t* q = stm_rs_buf + 4 * stm_rs_i;
+    stmLink.push(STM_RS_CID | stmset::WRITE, (uint32_t)q[0] | ((uint32_t)q[1] << 8) | ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24), 1);
+  } else {
+    stmLink.push(STM_RS_CID | stmset::WRITE, 0, 2);
+  }
+  stm_rs_sent = true;
+  stm_rs_ms = now;
+}
+
+// From loop() after the check passed: the Rx STM32 restarts into its boot checker. Then the USB bridge.
+void stmRestartEnter(){
+  stm_rs_phase = RS_IDLE;
+  stm_rs_n = 0;
+  if (stm_cal_valid) stmCalSetPending(true);  // the next v2 start writes the copy back (an update erases it)
+  delay(60);  // nothing to the Rx STM32 for at least 50 ms
+  uint8_t st[16];
+  size_t k = 0;
+  const uint32_t t0 = millis();
+  while (millis() - t0 < 500 && k < 7) {  // the boot checker's 7 B status frame: about 0.1 s plus the app CRC time
+    if (Serial1.available()) st[k++] = (uint8_t)Serial1.read();
+    else delay(1);
+  }
+  char hx[3 * sizeof(st) + 1];
+  hx[0] = 0;
+  for (size_t j = 0; j < k; j++) snprintf(hx + 3 * j, 4, " %02x", st[j]);
+  uint8_t frame[6], payload[IAP_MAX_FRAME], plen = 0;
+  uint16_t cid = 0;
+  bool ok = false;
+  for (int i = 0; i < IAP_HELLO_RETRIES && !ok; i++) {
+    serial1Drain();
+    iap_encode_frame(IAP_CID_HELLO, frame);
+    Serial1.write(frame, 6);
+    ok = iap_read_frame(IAP_HELLO_TIMEOUT_MS, &cid, payload, &plen) && cid == IAP_CID_HELLO;
+  }
+  usbOut.printf("STM restart passed in %lu ms; status frame %u B:%s\n", (unsigned long)(millis() - stm_rs_t0), (unsigned)k, hx);
+  usbOut.printf("STM bridge on: Rx STM32 in its boot checker by command 41 (HELLO %s); USB is now the STM32 UART, no text until it ends\n",
+                ok ? "answered" : "not answered");
+  telemetryEvent(rec::EV_STM32, 1, STM_RS_CID, "Rx STM32 restart command passed: USB bridge to the boot checker");
+  usbOut.drain(500);
+  serial1Drain();
+  data_ready = 0;  // the boot checker leaves nDATA_READY floating: its edges are not an application
+  stm_bridge_rx_ms = 0;
+  stm_bridge_up = stm_bridge_down = 0;
+  stm_bridge = true;
+  stm_bridge_start_ms = millis();
 }
 
 // An STM32 that restarts alone stays in its boot checker: IAP 0.1.0 (TrailTracer-Rx-STM32
@@ -2832,6 +3005,7 @@ void loop() {
   stmCaptureService();  // bench: captured STM32 frames, printed at the USB pace
   usb_guard::service(millis(), vehicleStationary());  // USB output stop: a USB reconnect, no restart (lib/usb_guard)
   usbLoadService();  // bench: paced USB output
+  if (stm_rs_phase == RS_RESTART) { mark(SEC_BRIDGE); stmRestartEnter(); return; }  // command 41 passed: bridge to the boot checker
   if (stm_bridge) { mark(SEC_BRIDGE); stmBridgeService(); return; }  // STM32 app update through the boot checker: nothing else runs
   if (update_mode) {
     stage(ST_UPDATE);
@@ -3642,6 +3816,7 @@ void espPacketFifo_sendCmd(){
       stm_rtt_wait = false;
     }
     stmCalOnAnswer(stmAns);
+    stmRestartOnAnswer(stmAns);
     dspOnAnswer(stmAns);
     if (stmAns.present && (stmAns.cid & 0x7F) == 20 && stmAns.index < WFRX_BINS && (stmAns.status == RSP_OK || stmAns.status == RSP_OK_CLAMPED))
       memcpy(&stm_bin_hz[stmAns.index], &stmAns.value, 4);  // the bin frequency in effect, for STMCOIL8
@@ -3654,6 +3829,8 @@ void espPacketFifo_sendCmd(){
     if (reset_now && !reset_prev && stm_v2_autorun && now - stm_v2_run_ms >= 1000) dspApply();  // DSP settings, then run
     reset_prev = reset_now;
     stmCalService(now);
+    stmRestartService(now);
+    if (stm_rs_phase == RS_RESTART) return;  // the Rx STM32 restarts after this frame: nothing more to it
   } else {
     stmLink.onPacket(now, stmPacket.items.status_bits, stmPacket.items.rid, (uint32_t)stmPacket.items.response.int32);
   }
