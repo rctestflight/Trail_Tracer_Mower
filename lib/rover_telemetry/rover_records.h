@@ -23,11 +23,12 @@ const int BLOCK_BYTES = 3 + SAMPLES_PER_BLOCK * SAMPLE_BYTES;  // 227, the large
 // IMU axes). 0x2A 100 Hz, 0x2B with IMU, 0x2C decimated, 0x2D decimated with IMU. Layout 1 stays readable.
 const uint8_t BODY_SAMPLES3 = 0x2A, BODY_SAMPLES3_IMU = 0x2B, BODY_SAMPLES3_DEC = 0x2C, BODY_SAMPLES3_IMU_DEC = 0x2D;
 const int SAMPLE3_BYTES = 50, SAMPLES3_PER_BLOCK = 4, IMU_SAMPLE3_BYTES = 60, IMU_SAMPLES3_PER_BLOCK = 3;
-// 0x2E (0.5.66, stream 0, 5 a second): the coil magnitudes of all 8 frequency bins of both sensors, averaged
-// over the window, for the per-bin plots of the telemetry app. type, frames averaged (u8, 255 at most), window
-// ms (u16), 8 x bin frequency in Hz/2 (u16, 0 = bin off), then per bin: sensor 1 coil 1, sensor 1 coil 2,
-// sensor 2 coil 1, sensor 2 coil 2 as int24 in Rx STM32 magnitude LSB (2^-24), signed as the USB STMCOIL8 line
-// (mean of |v| with the sign of the sum). BINS_NONE: no data (the sensor is on no lane, or the bin is off).
+// 0x2E (0.5.66, stream 0): the coil magnitudes of all 8 frequency bins of both sensors, for the per-bin plots
+// of the telemetry app. From 0.5.68 at the rate telemetry_bins_hz, through the log's anti-alias filter
+// (decimator.h). type, filter factor N (u8; 0.5.66: frames averaged), output period ms (u16; 0.5.66: window),
+// 8 x bin frequency in Hz/2 (u16, 0 = bin off), then per bin: sensor 1 coil 1, sensor 1 coil 2, sensor 2 coil 1,
+// sensor 2 coil 2 as int24 in Rx STM32 magnitude LSB (2^-24): the filtered |v| with the sign of the filtered v.
+// BINS_NONE: no data (the sensor is on no lane, or the bin is off).
 const uint8_t BODY_BINS = 0x2E;
 const int BINS = 8, BINS_BYTES = 4 + BINS * 2 + BINS * 4 * 3;  // 116
 const int32_t BINS_NONE = -8388608;  // 0x800000

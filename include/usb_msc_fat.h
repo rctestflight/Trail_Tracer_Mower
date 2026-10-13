@@ -76,6 +76,7 @@ struct DeviceConfig {
     // Features
     bool   espnow_enabled;
     bool   telemetry_enabled;  // binary telemetry log over ESP-NOW (starts ESP-NOW by itself)
+    int    telemetry_bins_hz;  // 8-bin coil record rate: 0 (off), 100, 50, 25, 20, 10, 5, 4, 2 or 1 (same filter)
     int    telemetry_rate_hz;  // log sample rate: 100, 50, 25, 20, 10, 5, 4, 2 or 1 (anti-alias filter below 100)
 
     // Rover autopilot (lib/rover_autopilot): replaces wire following in mode 2 when enabled

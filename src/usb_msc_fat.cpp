@@ -251,6 +251,7 @@ static void populate_defaults(DeviceConfig& c,
     c.espnow_enabled        = false;
     c.telemetry_enabled     = true;
     c.telemetry_rate_hz     = 20;
+    c.telemetry_bins_hz     = 5;
     c.rover_enabled            = false;
     c.rover_goal_cw            = true;
     c.rover_sensor_height_mm   = 150.0;
@@ -291,6 +292,7 @@ static void validate_config(DeviceConfig& c)
     // Channel
     if (c.rx_channel < 1 || c.rx_channel > 5) c.rx_channel = 1;
     c.telemetry_rate_hz = rec::rateNearest(c.telemetry_rate_hz);  // 100/N Hz only
+    c.telemetry_bins_hz = c.telemetry_bins_hz <= 0 ? 0 : rec::rateNearest(c.telemetry_bins_hz);  // 0 = off
     if (c.battery_cells < 1 || c.battery_cells > 12) c.battery_cells = 2;
 
     // Throttle range sanity
@@ -420,6 +422,7 @@ static void prefs_save(const DeviceConfig& c)
     p.putBool("espNow",    c.espnow_enabled);
     p.putBool("telEn",     c.telemetry_enabled);
     p.putInt("telHz",      c.telemetry_rate_hz);
+    p.putInt("binHz",      c.telemetry_bins_hz);
     p.putBool("rvEn",      c.rover_enabled);
     p.putBool("rvCW",      c.rover_goal_cw);
     p.putDouble("rvH",     c.rover_sensor_height_mm);
@@ -492,6 +495,7 @@ static bool prefs_load(DeviceConfig& c)
     c.espnow_enabled        = p.getBool("espNow",    c.espnow_enabled);
     c.telemetry_enabled     = p.getBool("telEn",     c.telemetry_enabled);
     c.telemetry_rate_hz     = p.getInt("telHz",      c.telemetry_rate_hz);
+    c.telemetry_bins_hz     = p.getInt("binHz",      c.telemetry_bins_hz);
     c.rover_enabled            = p.getBool("rvEn",      c.rover_enabled);
     c.rover_goal_cw            = p.getBool("rvCW",      c.rover_goal_cw);
     c.rover_sensor_height_mm   = p.getDouble("rvH",     c.rover_sensor_height_mm);
@@ -776,6 +780,7 @@ static void config_to_doc(const DeviceConfig& c, JsonDocument& doc, bool with_ef
     doc["espnow_enabled"]        = c.espnow_enabled;
     doc["telemetry_enabled"]     = c.telemetry_enabled;
     doc["telemetry_rate_hz"]     = c.telemetry_rate_hz;
+    doc["telemetry_bins_hz"]     = c.telemetry_bins_hz;
     doc["rover_enabled"]            = c.rover_enabled;
     doc["rover_goal_cw"]            = c.rover_goal_cw;
     doc["rover_sensor_height_mm"]   = c.rover_sensor_height_mm;
@@ -1021,6 +1026,7 @@ static bool config_from_json_text(DeviceConfig& c, const String& json_no_comment
     JSON_GET_BOOL("espnow_enabled",         espnow_enabled);
     JSON_GET_BOOL("telemetry_enabled",      telemetry_enabled);
     JSON_GET_INT("telemetry_rate_hz",       telemetry_rate_hz);
+    JSON_GET_INT("telemetry_bins_hz",       telemetry_bins_hz);
     JSON_GET_BOOL("rover_enabled",           rover_enabled);
     JSON_GET_BOOL("rover_goal_cw",           rover_goal_cw);
     JSON_GET_DBL("rover_sensor_height_mm",   rover_sensor_height_mm);

@@ -57,4 +57,26 @@ class Decimator {
   Sample last_, plast_;        // the block's last input: wheel positions, their ages, heading
 };
 
+// The same filter and rates for a set of plain channels, with no special channels (body 0x2E: the coil
+// magnitudes of the 8 bins). The output carries the time of the previous block's last input, as above.
+class ChannelDecimator {
+ public:
+  static const int MAX_CH = 64;
+  explicit ChannelDecimator(int channels) : nch_(channels < MAX_CH ? channels : MAX_CH) {}
+  void setRate(int out_hz);    // nearest allowed rate; clears the filter
+  int rate() const { return rate_; }
+  int factor() const { return n_; }
+  // One input per channel. Returns true when out[] holds a new output (time *out_ms).
+  bool push(const float* in, uint32_t ms, float* out, uint32_t* out_ms);
+
+ private:
+  int nch_;
+  int rate_ = DECIM_IN_HZ;
+  int n_ = 1;
+  int i_ = 0;
+  int blocks_ = 0;
+  float s_[MAX_CH] = {}, m_[MAX_CH] = {}, ps_[MAX_CH] = {}, pm_[MAX_CH] = {};
+  uint32_t ms_ = 0, pms_ = 0;
+};
+
 }  // namespace rec
