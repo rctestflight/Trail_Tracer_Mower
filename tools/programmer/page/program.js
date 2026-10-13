@@ -13,6 +13,33 @@ const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;',
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const enc = new TextEncoder();
 const boards = new Map();
+const openPorts = new Set();
+const streamLocks = new WeakMap();
+for (const [C, m] of [[globalThis.ReadableStream, 'getReader'], [globalThis.WritableStream, 'getWriter']]) {
+  if (!C || C.prototype[m].guarded) continue;
+  const orig = C.prototype[m];
+  C.prototype[m] = function (...a) { const l = orig.apply(this, a); streamLocks.set(this, l); return l; };
+  C.prototype[m].guarded = true;
+}
+function guardPort(port) {
+  if (!port || port.guarded) return port;
+  const open = port.open.bind(port), close = port.close.bind(port);
+  port.open = async o => { await open(o); openPorts.add(port); };
+  port.close = async () => { try { await close(); } finally { if (!port.readable && !port.writable) openPorts.delete(port); } };
+  port.guarded = true;
+  return port;
+}
+async function forceClose(port) {
+  if (!port) return;
+  const r = port.readable && streamLocks.get(port.readable), w = port.writable && streamLocks.get(port.writable);
+  if (r) { await Promise.race([r.cancel().catch(() => {}), sleep(500)]); try { r.releaseLock(); } catch { /* released */ } }
+  if (w) { await Promise.race([w.abort().catch(() => {}), sleep(500)]); try { w.releaseLock(); } catch { /* released */ } }
+  if (port.readable || port.writable) await Promise.race([port.close().catch(() => {}), sleep(1000)]);
+  openPorts.delete(port);
+}
+async function releaseAll(keep = null) {
+  for (const port of [...openPorts]) if (port !== keep) await forceClose(port);
+}
 let builds = [];
 let job = null;
 let bridgeNext = false;
@@ -22,6 +49,7 @@ const perm = (() => { try { return JSON.parse(localStorage.getItem('tt.perm') ||
 function notePerm(mode) { if (perm[mode]) return; perm[mode] = true; try { localStorage.setItem('tt.perm', JSON.stringify(perm)); } catch { /* no storage */ } }
 const firstVisit = () => !perm.app && !perm.rom;
 function newBoard(port, state) {
+  guardPort(port);
   const b = { port, info: port.getInfo(), state, lines: [], buf: '', waiters: [], binMode: false, bin: new Uint8Array(0), binWait: null, t0: Date.now() };
   b.mode = b.info.usbProductId === ROM_PID ? 'rom' : 'app';
   notePerm(b.mode);
@@ -79,7 +107,8 @@ function gotLine(b, line) {
 async function send(b, text) {
   if (!b.port.writable) throw new Error('The board left USB.');
   const w = b.port.writable.getWriter();
-  try { await w.write(typeof text === 'string' ? enc.encode(text + '\n') : text); } finally { w.releaseLock(); }
+  const t = setTimeout(() => w.abort().catch(() => {}), 3000);
+  try { await w.write(typeof text === 'string' ? enc.encode(text + '\n') : text); } finally { clearTimeout(t); try { w.releaseLock(); } catch { /* aborted */ } }
 }
 function waitLine(b, re, ms) {
   return new Promise(resolve => {
@@ -268,6 +297,9 @@ async function run(name, fn, extra = {}) {
   }
   job.done = true; if (!job.result.ok) job.pct = null; expectRover = false; render();
   for (const x of [...boards.values()]) if (x.state === 'open' && !x.rom) { x.connected = true; await releaseBoard(x).catch(() => {}); }
+  for (const x of [...boards.values()]) if (x.rom) { const r = x.rom; x.rom = null; await r.transport.disconnect().catch(() => {}); }
+  await releaseAll();
+  for (const x of [...boards.values()]) if (x.state === 'open') x.state = 'closed';
   render();
 }
 async function fetchBuild(build, path) {
@@ -755,6 +787,7 @@ function render() {
   else if (job && job.result) {
     if (job.result.ok) { I = job.kind === 'erase' ? 'ESP32 erased. Press Disconnect.' : '✓ Update done. Press Disconnect.'; tone = 'good'; }
     else if (job.result.text === NO_LOADER) { I = NO_LOADER; tone = 'bad'; }
+    else if (job.steps && job.steps.some(x => x.id === 'esp' && x.state === 'done')) { I = 'Stopped. Plug in the Rx again, then press Find Rx Boards.'; tone = 'bad'; }
     else { I = `Stopped. ${CONNECT_STEP}, then press Find Rx Boards.`; tone = 'bad'; arrows = true; }
   }
   else if (!b) { I = ''; arrows = !ready1; }
@@ -884,8 +917,9 @@ function currentRef() {
 const builtOn = t => { const d = new Date(t); return isNaN(d) ? '' : `${d.getUTCDate()} ${d.toLocaleString('en', { month: 'short', timeZone: 'UTC' })} ${d.getUTCFullYear()}`; };
 const refName = r => r.ver && !/\d+\.\d+\.\d+/.test(r.title) ? `${r.title.replace(/ \(latest, untested\)/, '')} ${r.ver}` : r.title;
 const refWhere = (r, sha = r.commit) => `${r.ref} ${sha.slice(0, 7)}`;
+const refWhen = r => { const st = r.parts.find(x => x.startsWith('Rx STM32 app ')); return builtOn(r.t) + (st ? ` · STM32 ${st.slice(13)}` : ''); };
 const optHtml = (r, on, latest) => `<button class="refopt${on ? ' on' : ''}" data-v="${esc(JSON.stringify({ repo: r.repo, ref: r.ref }))}"><b>${esc(refName(r))}${latest ? '<span class="latest">latest</span>' : ''}</b>`
-  + `<span class="dim">${esc(builtOn(r.t))}</span><span class="gitref">${esc(refWhere(r))}</span></button>`;
+  + `<span class="dim">${esc(refWhen(r))}</span><span class="gitref">${esc(refWhere(r))}</span></button>`;
 function drawRefMenu() {
   const refs = refsOf(), sel = currentRef(), list = $('refList');
   let cur = sel && sel !== '*' && refs.find(r => r.repo === sel.repo && r.ref === sel.ref);
@@ -898,7 +932,7 @@ function drawRefMenu() {
       const pb = offerBuilds(sel).find(x => x.m.source.repo === sel.repo && x.m.source.branch === sel.ref);
       l3 = pb ? `${refWhere(cur, pb.m.source.commit)} (exact version)` : `${cur.ref} ${sel.commit.slice(0, 7)}: not on this site`;
     }
-    F = [refName(cur), builtOn(cur.t), l3];
+    F = [refName(cur), refWhen(cur), l3];
   }
   ['fwL1', 'fwL2', 'fwL3'].forEach((id, i) => { setText($(id), F[i]); $(id).title = F[i]; });
   $('refBtn').hidden = !refs.length || sel === '*'; $('refBtn').textContent = cur ? 'Change' : 'Choose';
@@ -1103,7 +1137,7 @@ async function start() {
   });
   $('findBtn').onclick = async () => {
     try {
-      const port = await navigator.serial.requestPort({ filters: [{ usbVendorId: ESPRESSIF }] });
+      const port = guardPort(await navigator.serial.requestPort({ filters: [{ usbVendorId: ESPRESSIF }] }));
       note(`browser list: selected ${usbId(port)}`);
       known(port);
       if (!job || job.done) { selPort = port; connectBoard(boards.get(port)); }
@@ -1132,10 +1166,17 @@ async function start() {
       note(`USB disconnect: ${usbId(port)}`);
       port.gone = true;
       disconnects++;
+      forceClose(port).catch(() => {});
       if (b) { b.state = 'unplugged'; closeBoard(b).catch(() => {}); }
       if (port === selPort && !(job && !job.done)) fresh();
     });
-    addEventListener('pagehide', () => { for (const b of boards.values()) { b.closing = true; b.port.close().catch(() => {}); } });
+    addEventListener('pagehide', () => { for (const b of boards.values()) b.closing = true; releaseAll(); });
+    setInterval(() => {
+      if ((job && !job.done) || [...boards.values()].some(x => x.detecting)) return;
+      const link = [...boards.values()].find(x => x.rom && x.connected);
+      const keep = link ? link.port : null;
+      if ([...openPorts].some(p => p !== keep)) { note('sweep: a port was left open; closed'); releaseAll(keep).then(render); }
+    }, 2000);
     const permitted = await navigator.serial.getPorts();
     note(`the browser permits ${permitted.length} port${permitted.length === 1 ? '' : 's'} on USB now${permitted.length ? ': ' + permitted.map(usbId).join(', ') : ''}; modes allowed before in this browser: ${['app', 'rom'].filter(m => perm[m]).map(m => m === 'rom' ? 'update mode' : 'firmware runs').join(', ') || 'none'}`);
     for (const p of permitted) known(p);
