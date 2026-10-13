@@ -1,6 +1,6 @@
 'use strict';
 const ESPRESSIF = 0x303A, ROM_PID = 0x0002, APP_PID = 0x80C2;
-const PAGE_VERSION = '1.12.0';
+const PAGE_VERSION = '1.12.2';
 let pageVer = `Page v${PAGE_VERSION} (local copy)`;
 const ESPTOOL = 'https://unpkg.com/esptool-js@0.4.7/bundle.js';
 const ESPTOOL_SRI = 'sha384-esoYAtcIwSlHrIf+6+uZc/SPs/S8v44K26De13juLayamqHofUvCPscyHBXPxVIc';
@@ -254,53 +254,15 @@ function nvsIapholdPage() {
   });
   return p;
 }
-function nvsPartition(table) {
+function partitionTable(table) {
+  const out = [];
   for (let i = 0; i + 32 <= table.length; i += 32) {
     const v = new DataView(table.buffer, table.byteOffset + i);
     if (v.getUint16(0, true) !== 0x50AA) break;
-    if (table[i + 2] === 0x01 && table[i + 3] === 0x02) return { offset: v.getUint32(4, true), size: v.getUint32(8, true) };
+    out.push({ type: table[i + 2], subtype: table[i + 3], offset: v.getUint32(4, true), size: v.getUint32(8, true),
+      label: new TextDecoder().decode(table.subarray(i + 12, i + 28)).replace(/\0.*$/s, '') });
   }
-  return null;
-}
-function md5hex(d) {
-  const K = new Uint32Array(64), S = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21];
-  for (let i = 0; i < 64; i++) K[i] = Math.floor(Math.abs(Math.sin(i + 1)) * 2 ** 32) >>> 0;
-  const n = ((d.length + 8) >>> 6) + 1, m = new Uint8Array(n * 64);
-  m.set(d); m[d.length] = 0x80;
-  const v = new DataView(m.buffer); v.setUint32(n * 64 - 8, (d.length * 8) >>> 0, true); v.setUint32(n * 64 - 4, Math.floor(d.length / 0x20000000), true);
-  let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
-  for (let o = 0; o < m.length; o += 64) {
-    let a = a0, b = b0, c = c0, e = d0;
-    for (let i = 0; i < 64; i++) {
-      let f, g;
-      if (i < 16) { f = (b & c) | (~b & e); g = i; } else if (i < 32) { f = (e & b) | (~e & c); g = (5 * i + 1) % 16; }
-      else if (i < 48) { f = b ^ c ^ e; g = (3 * i + 5) % 16; } else { f = c ^ (b | ~e); g = (7 * i) % 16; }
-      const s = S[(i >> 4) * 4 + (i & 3)], x = (a + f + K[i] + v.getUint32(o + g * 4, true)) >>> 0;
-      a = e; e = c; c = b; b = (b + ((x << s) | (x >>> (32 - s)))) >>> 0;
-    }
-    a0 = (a0 + a) >>> 0; b0 = (b0 + b) >>> 0; c0 = (c0 + c) >>> 0; d0 = (d0 + e) >>> 0;
-  }
-  const out = new DataView(new ArrayBuffer(16)); [a0, b0, c0, d0].forEach((w, i) => out.setUint32(i * 4, w, true));
-  return [...new Uint8Array(out.buffer)].map(x => x.toString(16).padStart(2, '0')).join('');
-}
-async function watchdogReset(loader) {
-  say('watchdog reset (esptool watchdog_reset)');
-  await loader.writeReg(0x3F4080AC, 0x50D83AA1);
-  await loader.writeReg(0x3F408098, 2000);
-  await loader.writeReg(0x3F408094, ((1 << 31) | (5 << 28) | (1 << 8) | 2) >>> 0);
-  await loader.writeReg(0x3F4080AC, 0).catch(() => {});
-  await sleep(500);
-}
-async function withLoader(b, fn) {
-  const { ESPLoader, Transport } = await loadEsptool();
-  const term = { clean() {}, writeLine: t => say('esptool: ' + t), write: t => { if (t.trim()) say('esptool: ' + t.trim()); } };
-  if (b.port.readable) await b.port.close().catch(() => {});
-  const transport = new Transport(b.port, true);
-  try {
-    const loader = new ESPLoader({ transport, baudrate: 115200, romBaudrate: 115200, terminal: term, debugLogging: true });
-    await loader.detectChip('no_reset');
-    return await fn(loader, transport);
-  } finally { await transport.disconnect().catch(() => {}); if (b.port.readable) await b.port.close().catch(() => {}); boards.delete(b.port); render(); }
+  return out;
 }
 let mergedBridge = null;
 const S2 = { STRAP: 0x3F404038, SPI_BOOT: 0x8, OPTION1: 0x3F408128, FORCE_DL: 0x1 };
@@ -375,13 +337,16 @@ async function romLoad(b0, build, erase, stmBuild = null) {
     }
   }
   let merged = false;
-  const tb = blobs.find(x => x.address === 0x8000), nvs = tb && nvsPartition(tb.data);
-  if (build && stmBuild) {
-    if (nvs) {
-      blobs.push({ data: nvsIapholdPage(), address: nvs.offset });
-      if (nvs.size > 4096) blobs.push({ data: new Uint8Array(nvs.size - 4096).fill(0xFF), address: nvs.offset + 4096 });
-      merged = true; say(`NVS at 0x${nvs.offset.toString(16)}: iaphold = 1, so the first start of the new firmware opens the STM32 bridge`);
-    } else say('no NVS partition in the partition table: the STM32 update takes the normal path');
+  const tb = blobs.find(x => x.address === 0x8000), table = tb ? partitionTable(tb.data) : [], images = new Set(blobs);
+  if (build) {
+    for (const q of table.filter(q => q.type === 0x01)) {
+      if (blobs.some(x => x.address === q.offset)) continue;
+      if (q.subtype === 0x02 && stmBuild) {
+        blobs.push({ data: nvsIapholdPage(), address: q.offset });
+        if (q.size > 4096) blobs.push({ data: new Uint8Array(q.size - 4096).fill(0xFF), address: q.offset + 4096 });
+        merged = true; say(`${q.label} at 0x${q.offset.toString(16)}: iaphold = 1, so the first start of the new firmware opens the STM32 bridge`);
+      } else { blobs.push({ data: new Uint8Array(q.size).fill(0xFF), address: q.offset }); say(`${q.label} at 0x${q.offset.toString(16)}: overwritten (${q.size} B)`); }
+    }
   }
   let tableSame = false;
   if (tb) {
@@ -393,6 +358,7 @@ async function romLoad(b0, build, erase, stmBuild = null) {
   stage('Checking the board', null);
   for (let i = blobs.length - 1; i >= 0; i--) {
     const x = blobs[i];
+    if (!images.has(x)) continue;
     const fm = await loader.flashMd5sum(x.address, x.data.length).catch(ex => { say(`MD5 0x${x.address.toString(16)}: ${ex.message}`); return null; });
     if (fm && fm === md5hex(x.data)) { say(`0x${x.address.toString(16)} (${x.data.length} B): equal, not written`); blobs.splice(i, 1); }
   }
@@ -769,10 +735,10 @@ function offersFor(b) {
       ...(stm ? [{ id: 'stm', text: `STM32: update to ${stmName} if its version differs` }] : []), { id: 'check', text: 'Read both versions' }];
     out.push({ l1: 'Install', l2: what, steps,
       l3: `Installs what differs on the ESP32${stm ? ' and the STM32' : ''}. No action from you.`,
-      plan: [['Erases', stm ? 'the ESP32 settings; the whole ESP32 when its partition table differs' : 'the whole ESP32 only when its partition table differs'],
+      plan: [['Erases', 'all ESP32 settings, logs and files: they return to their defaults (the whole ESP32 when its partition table differs)'],
         ['Writes ESP32', `${espName}: only the parts that differ`],
         ...(stm ? [['Writes STM32', `${stmName}, only if its version differs; its settings and calibration then return to their defaults`]] : []),
-        ['Keeps', 'logs and files, when the partition table is the same']],
+        ['Keeps', stm ? 'the STM32 app and its settings when its version is current' : 'the STM32']],
       go: () => fullInstall(b, g.esp, stm, steps) });
   }
   out.refused = no;
