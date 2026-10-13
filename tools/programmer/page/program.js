@@ -884,8 +884,9 @@ function currentRef() {
 const builtOn = t => { const d = new Date(t); return isNaN(d) ? '' : `${d.getUTCDate()} ${d.toLocaleString('en', { month: 'short', timeZone: 'UTC' })} ${d.getUTCFullYear()}`; };
 const refName = r => r.ver && !/\d+\.\d+\.\d+/.test(r.title) ? `${r.title.replace(/ \(latest, untested\)/, '')} ${r.ver}` : r.title;
 const refWhere = (r, sha = r.commit) => `${r.ref} ${sha.slice(0, 7)}`;
+const refWhen = r => { const st = r.parts.find(x => x.startsWith('Rx STM32 app ')); return builtOn(r.t) + (st ? ` · STM32 ${st.slice(13)}` : ''); };
 const optHtml = (r, on, latest) => `<button class="refopt${on ? ' on' : ''}" data-v="${esc(JSON.stringify({ repo: r.repo, ref: r.ref }))}"><b>${esc(refName(r))}${latest ? '<span class="latest">latest</span>' : ''}</b>`
-  + `<span class="dim">${esc(builtOn(r.t))}</span><span class="gitref">${esc(refWhere(r))}</span></button>`;
+  + `<span class="dim">${esc(refWhen(r))}</span><span class="gitref">${esc(refWhere(r))}</span></button>`;
 function drawRefMenu() {
   const refs = refsOf(), sel = currentRef(), list = $('refList');
   let cur = sel && sel !== '*' && refs.find(r => r.repo === sel.repo && r.ref === sel.ref);
@@ -898,7 +899,7 @@ function drawRefMenu() {
       const pb = offerBuilds(sel).find(x => x.m.source.repo === sel.repo && x.m.source.branch === sel.ref);
       l3 = pb ? `${refWhere(cur, pb.m.source.commit)} (exact version)` : `${cur.ref} ${sel.commit.slice(0, 7)}: not on this site`;
     }
-    F = [refName(cur), builtOn(cur.t), l3];
+    F = [refName(cur), refWhen(cur), l3];
   }
   ['fwL1', 'fwL2', 'fwL3'].forEach((id, i) => { setText($(id), F[i]); $(id).title = F[i]; });
   $('refBtn').hidden = !refs.length || sel === '*'; $('refBtn').textContent = cur ? 'Change' : 'Choose';
