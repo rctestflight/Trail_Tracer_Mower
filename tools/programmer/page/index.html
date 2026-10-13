@@ -53,11 +53,12 @@ details summary { cursor: pointer; color: var(--dim); margin-top: 8px; }
   <p>Plug an Rx into this PC, then press "Connect an Rx" and choose it. After each restart or replug of the board, press "Connect an Rx" and choose it again (the Rx has no USB serial number, so the browser forgets it).</p>
   <p id="release" class="note"></p>
   <button id="connectBtn">Connect an Rx</button>
-  <div id="refBox" class="refbox" hidden><span class="note">Firmware to offer</span><button id="refBtn" class="refbtn"></button><div id="refList" class="reflist" hidden></div></div>
+  <div id="refBox" class="refbox" hidden><span class="note">Firmware to offer</span><button id="refBtn" class="refbtn"></button><div id="refList" class="reflist" hidden></div><a id="refLink" class="note" href="#" title="Copy this link to share exactly this firmware version">Link to this exact version</a></div>
   <div id="steps" class="card steps" hidden></div>
   <div id="job" class="card" hidden></div>
   <div id="boards"></div>
 </main>
+<footer id="pageVer" class="note" style="padding: 8px 16px 16px"></footer>
 <script src="program.js"></script>
 </body>
 </html>

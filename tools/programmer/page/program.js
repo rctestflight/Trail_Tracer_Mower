@@ -1,5 +1,7 @@
 'use strict';
 const ESPRESSIF = 0x303A, ROM_PID = 0x0002, APP_PID = 0x80C2;
+const PAGE_VERSION = '1.4.1';
+let pageVer = `Page v${PAGE_VERSION} (local copy)`;
 const ESPTOOL = 'https://unpkg.com/esptool-js@0.4.7/bundle.js';
 const ESPTOOL_SRI = 'sha384-esoYAtcIwSlHrIf+6+uZc/SPs/S8v44K26De13juLayamqHofUvCPscyHBXPxVIc';
 async function loadEsptool() {
@@ -122,6 +124,7 @@ function setPct(p) { if (job && job.pct !== p) { job.pct = p; render(); } }
 async function run(name, fn) {
   if (job && !job.done) return alert('A job runs. Wait for its end.');
   job = { name, log: [], done: false, stage: 'Starting', pct: null, result: null, devOpen: false };
+  say(pageVer);
   say(`${name}: start`);
   try { const r = await fn(); job.result = { ok: true, text: typeof r === 'string' ? r : 'Done.' }; say(`${name}: done`); }
   catch (ex) { job.result = { ok: false, text: ex.message }; say(`${name}: STOPPED: ${ex.message}`); instruct(''); }
@@ -190,11 +193,15 @@ async function otaUpdate(b0, build) {
 async function romLoad(b0, build, erase) {
   stage('Checking the firmware files');
   const fl = build.m.esp32.full_load, blobs = [];
-  if (erase) for (const r of fl.erase_if_other_table) {
-    const from = parseInt(r.from, 16), to = parseInt(r.to, 16);
-    blobs.push({ data: new Uint8Array(to - from).fill(0xFF), address: from }); say(`erase ${r.from} to ${r.to}`);
-  }
   for (const x of fl.parts) { blobs.push({ data: await fetchBuild(build, x.file), address: parseInt(x.offset, 16) }); say(`${x.file} at ${x.offset}: ${blobs.at(-1).data.length} B, SHA-256 checked`); }
+  if (erase) {
+    const SECTOR = 0x1000, SIZE = 0x400000, used = blobs.map(x => [Math.floor(x.address / SECTOR) * SECTOR, Math.ceil((x.address + x.data.length) / SECTOR) * SECTOR]).sort((a, c) => a[0] - c[0]);
+    let at = 0;
+    for (const [s, e] of [...used, [SIZE, SIZE]]) {
+      if (s > at) { blobs.unshift({ data: new Uint8Array(s - at).fill(0xFF), address: at }); say(`erase 0x${at.toString(16)} to 0x${s.toString(16)}`); }
+      at = Math.max(at, e);
+    }
+  }
   let b = b0;
   if (b.mode !== 'rom') {
     stage('Restarting the board into its loader');
@@ -377,6 +384,24 @@ const srcLine = (m, rel) => rel && rel === m.source.branch
   + (rel ? `, release ${rel}` : rel === false ? ', development branch' : '');
 let refSel = (() => { try { return JSON.parse(localStorage.getItem('tt.ref') || 'null'); } catch { return null; } })();
 let refInfo = {};
+let allBuilds = [];
+function refFromUrl() {
+  const q = new URLSearchParams(location.search), fw = q.get('fw');
+  if (!fw || !fw.includes('/')) return null;
+  const i = fw.indexOf('/'), short = fw.slice(0, i), ref = fw.slice(i + 1), commit = (q.get('commit') || '').toLowerCase();
+  const b = allBuilds.find(x => x.m.source.repo.split('/').pop() === short && x.m.source.branch === ref);
+  return b ? { repo: b.m.source.repo, ref, ...(/^[0-9a-f]{7,40}$/.test(commit) ? { commit } : {}) } : null;
+}
+function urlFor(sel, pin) {
+  const u = new URL(location.href), enc = s => s.split('/').map(encodeURIComponent).join('/');
+  u.search = `?fw=${enc(sel.repo.split('/').pop() + '/' + sel.ref)}` + (pin ? `&commit=${encodeURIComponent(pin)}` : '');
+  return u.toString();
+}
+function offerBuilds(sel) {
+  if (sel === '*' || !sel.commit) return builds;
+  const pinned = allBuilds.filter(x => x.m.source.repo === sel.repo && x.m.source.branch === sel.ref && x.m.source.commit.startsWith(sel.commit));
+  return pinned.length ? [...pinned, ...builds.filter(x => !(x.m.source.repo === sel.repo && x.m.source.branch === sel.ref))] : builds;
+}
 const stmOnly = repo => builds.filter(x => x.m.source.repo === repo).every(x => x.m.chip === 'stm32g070');
 const repoName = repo => ({ Trail_Tracer_Mower: 'Trail Tracer Mower', 'Trail-Tracer': 'Trail Tracer V1.0' })[repo.split('/').pop()]
   || repo.split('/').pop().replace(/[_-]+/g, ' ');
@@ -408,7 +433,8 @@ function refsOf() {
 }
 function currentRef() {
   if (refSel === '*') return '*';
-  const refs = refsOf();
+  const refs = refsOf(), fromUrl = refFromUrl();
+  if (fromUrl) return fromUrl;
   if (refSel && refs.some(r => r.repo === refSel.repo && r.ref === refSel.ref)) return refSel;
   const newest = list => [...list].sort((a, b) => b.t.localeCompare(a.t));
   const rel = newest(refs.filter(r => r.kind === 'release')), mains = newest(refs.filter(r => r.ref === 'main'));
@@ -420,8 +446,19 @@ const refHtml = r => `<b>${esc(r.title)}</b><span class="rdesc">${esc(r.descript
 function drawRefMenu() {
   const refs = refsOf(), sel = currentRef(), list = $('refList');
   $('refBox').hidden = !refs.length || sel === '*';
-  const cur = sel !== '*' && refs.find(r => r.repo === sel.repo && r.ref === sel.ref);
+  let cur = sel !== '*' && refs.find(r => r.repo === sel.repo && r.ref === sel.ref);
+  if (cur && sel.commit) {
+    const pb = offerBuilds(sel).find(x => x.m.source.repo === sel.repo && x.m.source.branch === sel.ref);
+    if (pb) cur = { ...cur, git: `${sel.ref}, ${pb.m.source.commit.slice(0, 7)} (this exact version)` };
+  }
   if (cur) { const h = refHtml(cur); if ($('refBtn').dataset.h !== h) { $('refBtn').dataset.h = h; $('refBtn').innerHTML = h; } }
+  if (cur) {
+    const newest = builds.find(x => x.m.source.repo === cur.repo && x.m.source.branch === cur.ref);
+    const pinC = sel.commit ? (offerBuilds(sel).find(x => x.m.source.repo === cur.repo && x.m.source.branch === cur.ref) || newest) : newest;
+    const link = urlFor(cur, pinC && pinC.m.source.commit.slice(0, 12));
+    if ($('refLink').href !== link) $('refLink').href = link;
+    if (!window.PROGRAM_TEST) { const want = urlFor(cur, sel.commit); if (location.href !== want) history.replaceState(null, '', want); }
+  }
   const key = refs.map(r => [r.repo, r.ref, r.commit, r.title, r.description].join(' ')).join('|') + (cur ? cur.repo + cur.ref : '');
   if (list.dataset.key === key) return;
   list.dataset.key = key;
@@ -431,47 +468,55 @@ function drawRefMenu() {
 }
 function chooseRef(v) {
   refSel = JSON.parse(v); $('refList').hidden = true;
+  if (!window.PROGRAM_TEST) history.replaceState(null, '', urlFor(refSel));
   try { localStorage.setItem('tt.ref', v); } catch { /* no storage */ }
   render();
 }
 
+const named = (label, v, sep = ' ') => `${label.replace(/\s*\bv?\d+\.\d+\.\d+[^\s,()]*/g, '').trim()}${sep}${v}`;
 function offersFor(b) {
-  const out = [], no = [], rover = b.firmware === 'rover firmware', rom = b.mode === 'rom', v1 = !rover && !rom && !!b.firmware;
-  const stmVer = (b.stm || '').match(/^app (\d+\.\d+\.\d+)/), stmV2 = stmVer && +stmVer[1].split('.')[0] >= 2;
-  const rev = b.board || 'RX_REVA', full = 'You unplug and plug in the board once at the end.';
-  const sel = currentRef();
-  for (const build of builds) {
-    const m = build.m, l2 = srcLine(m, build.release), name = m.chip === 'stm32g070' ? `${m.label || 'STM32 app'} ${m.version}` : m.esp32.usb_update ? `${m.label || 'ESP32 rover firmware'} ${m.version}` : `${m.label || m.source.repo.split('/').pop() + ' firmware'}, ${m.version}`;
-    if (!inSel(build, sel)) continue;
-    const refuse = reason => no.push({ l1: name, l2, reason });
-    if (!m.boards.includes(rev)) { refuse(`This image is for board revision ${m.boards.join(', ')}. This board is revision ${rev}.`); continue; }
-    if (m.chip === 'esp32s2' && m.esp32.usb_update) {
-      const otherTable = rover && b.tableCrc && b.tableCrc !== m.esp32.partition_table.crc32;
-      if (rover && !otherTable) out.push({ l1: `Install ${name}`, l2, l3: `${change(b.version, m.version)} Settings kept. The old version comes back by itself if the new one fails.`, go: () => otaUpdate(b, build) });
-      else if (rover) out.push({ l1: `Install ${name} (all areas)`, l2, l3: `${change(b.version, m.version)} The board has another partition table: erases all settings. ${full}`, go: () => romLoad(b, build, true) });
-      else if (v1) out.push({ l1: `Replace the ${b.firmware.startsWith('Monitor') ? 'Monitor firmware' : 'board\'s firmware'} with ${name}`, l2, l3: `Erases all settings. ${full}`, go: () => romLoad(b, build, true) });
-      else if (rom) out.push({ l1: `Install ${name} (all areas)`, l2, l3: `Erases all settings. ${full}`, go: () => romLoad(b, build, true) });
-    } else if (m.chip === 'esp32s2') {
-      if (rover) out.push({ l1: `Replace rover firmware ${b.version} with ${name}`, l2, l3: `Erases all settings and the flight log. The USB update does not work after it. ${full}`, go: () => romLoad(b, build, true) });
-      else if (v1 || rom) out.push({ l1: `Install ${name}`, l2, l3: `Erases all settings. ${full}`, go: () => romLoad(b, build, true) });
-    } else if (m.chip === 'stm32g070') {
-      if (rom || !b.firmware) refuse('No firmware runs on the ESP32. Install the ESP32 rover firmware first.');
-      else if (!rover) refuse(`The STM32 install needs ESP32 rover firmware ${m.stm32.needs_esp32} or later. Install it first.`);
-      else if (vcmp(b.version, m.stm32.needs_esp32) < 0) refuse(`The STM32 install needs ESP32 rover firmware ${m.stm32.needs_esp32} or later. This board has ${b.version}. Install it first.`);
-      else if (b.role === 'monitor') refuse('The board runs as a monitor. Switch it to vehicle first.');
-      else if (!stmV2) out.push({ l1: `Install ${name}`, l2, l3: `Replaces STM32 app 1.x. The page checks the STM32 update loader first; without it nothing is written and a one-time ST-LINK load is needed. You unplug and plug in the board once.`, go: () => stmLoad(b, build) });
-      else out.push({ l1: `${vcmp(m.version, stmVer[1]) === 0 ? 'Reinstall' : 'Install'} ${name}`, l2, l3: `${change(stmVer[1], m.version)} STM32 settings kept. You unplug and plug in the board once.`, go: () => stmLoad(b, build) });
-    }
+  const out = [], no = [], sel = currentRef(), rev = b.board || 'RX_REVA';
+  const pool = offerBuilds(sel).filter(x => inSel(x, sel));
+  const stmExtra = pool.filter(x => stmOnly(x.m.source.repo) && x.m.chip === 'stm32g070');
+  const groups = new Map();
+  for (const x of pool) {
+    if (stmOnly(x.m.source.repo)) continue;
+    const k = x.m.source.repo + ' ' + x.m.source.branch, g = groups.get(k) || {};
+    if (x.m.chip === 'esp32s2' && !g.esp) g.esp = x;
+    if (x.m.chip === 'stm32g070' && !g.stm) g.stm = x;
+    groups.set(k, g);
   }
-  if (rover && b.role === 'monitor') out.push({ l1: 'Switch to vehicle', l2: 'This board', l3: 'The board restarts as a vehicle. Nothing is written.', go: async () => { await send(b, 'restart'); say('sent "restart"'); return 'The board restarts as a vehicle.'; } });
-  if (rover && b.role !== 'monitor') out.push({ l1: 'Switch to monitor', l2: 'This board', l3: 'The board restarts as a monitor until the next power-off. Nothing is written.', go: async () => { await send(b, 'monitor'); say('sent "monitor"'); return 'The board restarts as a monitor.'; } });
+  for (const g of groups.values()) {
+    if (!g.esp) continue;
+    const m = g.esp.m, rover = !!m.esp32.usb_update, stm = rover ? (g.stm || stmExtra[0]) : null;
+    const what = `${rover ? named(m.label || 'ESP32 rover firmware', m.version) : named(m.label || m.source.repo.split('/').pop() + ' firmware', m.version, ', ')}`
+      + (stm ? ` + ${named(stm.m.label || 'STM32 app', stm.m.version)}` : '') + ` (${srcLine(m, g.esp.release)})`;
+    const bad = [g.esp, stm].filter(Boolean).find(x => !x.m.boards.includes(rev));
+    if (bad) { no.push({ l1: 'Full install', l2: what, reason: `This firmware is for board revision ${bad.m.boards.join(', ')}. This board is revision ${rev}.` }); continue; }
+    out.push({ l1: 'Full install', l2: what,
+      l3: `Erases the whole board, then installs the ESP32 firmware${stm ? ' and the STM32 app' : ''}. You unplug and plug in the board ${stm ? 'twice' : 'once'}.`,
+      go: () => fullInstall(b, g.esp, stm) });
+  }
   out.refused = no;
   return out;
+}
+async function fullInstall(b, esp, stm) {
+  const r1 = await romLoad(b, esp, true);
+  if (!stm) return r1;
+  const nb = [...boards.values()].find(x => x.mode === 'app' && x.firmware === 'rover firmware' && x.state === 'open');
+  if (!nb) throw new Error(`${r1} The STM32 part did not start: the board is not on USB.`);
+  try { return `${r1} ${await stmLoad(nb, stm)}`; }
+  catch (ex) { throw new Error(`The ESP32 firmware is installed. The STM32 part stopped: ${ex.message}`); }
 }
 
 async function start() {
   $('refBtn').onclick = e => { e.stopPropagation(); $('refList').hidden = !$('refList').hidden; };
   addEventListener('click', e => { if (!$('refBox').contains(e.target)) $('refList').hidden = true; });
+  try {
+    const v = await (await fetch('version.json', { cache: 'no-store' })).json();
+    if (v && v.version) pageVer = `Page v${v.version}, ${v.date}, ${v.commit}`;
+  } catch { /* no version.json: a local copy */ }
+  $('pageVer').textContent = pageVer;
   if (window.PROGRAM_TEST) return render();
   try {
     let r = await fetch('sources.json').catch(() => null);
@@ -487,6 +532,7 @@ async function start() {
       }
     }
     builds.sort((a, b) => b.m.source.built_utc.localeCompare(a.m.source.built_utc));
+    allBuilds = [...builds];
     const seen = new Set();
     builds = builds.filter(x => { const k = [x.m.source.repo, x.m.source.branch, x.m.chip].join(' '); return !seen.has(k) && seen.add(k); });
   } catch (ex) { console.error(ex); }
