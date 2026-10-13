@@ -1,6 +1,6 @@
 'use strict';
 const ESPRESSIF = 0x303A, ROM_PID = 0x0002, APP_PID = 0x80C2;
-const PAGE_VERSION = '1.5.0';
+const PAGE_VERSION = '1.5.1';
 let pageVer = `Page v${PAGE_VERSION} (local copy)`;
 const ESPTOOL = 'https://unpkg.com/esptool-js@0.4.7/bundle.js';
 const ESPTOOL_SRI = 'sha384-esoYAtcIwSlHrIf+6+uZc/SPs/S8v44K26De13juLayamqHofUvCPscyHBXPxVIc';
@@ -208,13 +208,23 @@ async function romLoad(b0, build, erase) {
   if (b.mode !== 'rom') {
     stage('Restarting the board into its loader');
     const oldPort = b.port;
-    if (b.firmware === 'rover firmware') { say('rover firmware: "dld"'); await send(b, 'dld'); await closeBoard(b).catch(() => {}); }
+    if (b.firmware === 'rover firmware') { say('rover firmware: "dld"'); await send(b, 'dld'); await closeBoard(b).catch(() => {}); b = null; }
     else {
-      say('USB reset into ROM download mode');
-      for (const [d, r] of [[false, true], [true, true], [true, false], [false, false]]) { await b.port.setSignals({ dataTerminalReady: d, requestToSend: r }).catch(() => {}); await sleep(60); }
       await closeBoard(b).catch(() => {});
+      say('1200-baud touch');
+      try { await oldPort.open({ baudRate: 1200 }); await oldPort.setSignals({ dataTerminalReady: false }).catch(() => {}); await sleep(100); await oldPort.close(); }
+      catch (ex) { say(`1200-baud touch: ${ex.message}`); }
+      b = await waitBoard(x => x.mode === 'rom', 8000, 'The board restarts into ROM download mode.');
+      if (!b && !oldPort.gone) {
+        say('no ROM download mode 8 s after the touch: USB reset');
+        try {
+          await oldPort.open({ baudRate: 115200 });
+          for (const [d, r] of [[false, true], [true, true], [true, false], [false, false]]) { await oldPort.setSignals({ dataTerminalReady: d, requestToSend: r }).catch(() => {}); await sleep(60); }
+          await oldPort.close();
+        } catch (ex) { say(`USB reset: ${ex.message}`); }
+      }
     }
-    b = await waitBoard(x => x.mode === 'rom', 15000, 'The board restarts into ROM download mode.');
+    if (!b) b = await waitBoard(x => x.mode === 'rom', 15000, 'The board restarts into ROM download mode.');
     if (!b) {
       stage('Waiting for you: start the board in its loader');
       instruct('1. Unplug USB.\n2. Hold the button "0" on the board.\n3. Plug in USB.\n4. Release the button "0".\n5. Press "Connect an Rx".\n6. Choose "ESP32-S2" in the browser list.');
