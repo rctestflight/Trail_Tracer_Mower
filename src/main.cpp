@@ -118,6 +118,8 @@ static void serviceMpu() {
 #include "stm_v2.h"        // STM32 link version 2: 98 B frames, 8 B command frames with seq and CRC (lib/stm_v2)
 #include <stdarg.h>
 #include "cpu_prof.h"      // CPU share per FreeRTOS task and per loop part, by sampling (lib/cpu_prof; bench "cpu")
+#include "wifi_link.h"        // radio_mode "wifi": telemetry over a Wi-Fi network as UDP (lib/wifi_telem)
+#include "wifi_telem_proto.h" // the "wifi set" arguments and the log text of a command (lib/wifi_telem)
 
 // USB text output that never blocks loop(). Serial.write() on the ESP32-S2 repeats until all
 // bytes are in the 64-byte CDC transmit buffer while a host holds the port (DTR set), even with
@@ -195,9 +197,9 @@ void usbLoadService(){
 
 static const char* TAG = "wfrx";
 #ifdef BENCH_FAKE_IMU
-#define ROVER_FW_VERSION "0.5.70+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.5.71+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #else
-#define ROVER_FW_VERSION "0.5.70"  // 0.5.70: "set" takes text settings (vehicle_name, drive_output) as the rest of the line; 0.5.69: settings from the operator review: drive_output (servos as V1.0, or CAN; auto), servo map by function, vehicle_name, 4S limit, steer_lpf_hz, charge time as it is; 0.5.68: the 8-bin coil record (0x2E) goes through the log anti-alias filter at telemetry_bins_hz (default 5); 0.5.67: USB driver copy: TX FIFO register of the FIFO in use (DIEPTXF[TxFNum-1]; the CDC output FIFO pointed outside the FIFO RAM: output stops at Monitor Rx start and mid-run), IN endpoints disabled through the core at a bus reset and a close; a guard reconnect ejects the drive first; usbregs with FIFO registers and driver counters, the stop record printed 3 times; 0.5.66: telemetry body 0x2E, the coil magnitudes of all 8 bins of both sensors, 5 a second; 0.5.65: "stm restart" (Rx STM32 command 41, app 2.0.39+): Rx STM32 update with no power cycle; 0.5.64: USB output fix from the bench line (0.5.60-dev10 to dev13): project copy of the TinyUSB ESP32-S2 device driver (lib/tinyusb_dcd_fix) with no zero-length packet on data IN endpoints; USB register record at each output stop and over a restart (monitor). 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
+#define ROVER_FW_VERSION "0.5.71"  // 0.5.71: radio_mode wifi: telemetry as UDP over a Wi-Fi network (lib/wifi_telem, the 2026-10-12 work, ported); 0.5.70: "set" takes text settings (vehicle_name, drive_output) as the rest of the line; 0.5.69: settings from the operator review: drive_output (servos as V1.0, or CAN; auto), servo map by function, vehicle_name, 4S limit, steer_lpf_hz, charge time as it is; 0.5.68: the 8-bin coil record (0x2E) goes through the log anti-alias filter at telemetry_bins_hz (default 5); 0.5.67: USB driver copy: TX FIFO register of the FIFO in use (DIEPTXF[TxFNum-1]; the CDC output FIFO pointed outside the FIFO RAM: output stops at Monitor Rx start and mid-run), IN endpoints disabled through the core at a bus reset and a close; a guard reconnect ejects the drive first; usbregs with FIFO registers and driver counters, the stop record printed 3 times; 0.5.66: telemetry body 0x2E, the coil magnitudes of all 8 bins of both sensors, 5 a second; 0.5.65: "stm restart" (Rx STM32 command 41, app 2.0.39+): Rx STM32 update with no power cycle; 0.5.64: USB output fix from the bench line (0.5.60-dev10 to dev13): project copy of the TinyUSB ESP32-S2 device driver (lib/tinyusb_dcd_fix) with no zero-length packet on data IN endpoints; USB register record at each output stop and over a restart (monitor). 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
 
@@ -895,7 +897,7 @@ volatile uint32_t sim_dropped_tx = 0, sim_dropped_rx = 0;
 #define ESPNOW_TYPE_CMD     0x10
 #define ESPNOW_TYPE_ACK     0x11
 #define ESPNOW_TYPE_STOP    0x12  // u8 type, u16 seq, u32 fleet key: stop at once (docs/espnow_protocol.md)
-#define SETTINGS_DEF_VERSION 7  // docs/settings_def.json version (6: DSP settings dsp_*, groups for users; 7: servo map, drive_output, vehicle_name, steer_lpf_hz)
+#define SETTINGS_DEF_VERSION 8  // docs/settings_def.json version (6: DSP settings dsp_*, groups for users; 7: servo map, drive_output, vehicle_name, steer_lpf_hz; 8: radio_mode, wifi_ssid, wifi_password)
 #define ESPNOW_TYPE_RESTART 0x7F
 #define ESPNOW_TYPE_MON     0x44  // monitor broadcast, once a second: u8 type, u8 version, u32 monitor ms, u64 PC unix ms (0 = unknown), u8 n
 // The last MON frame (set in the Wi-Fi task, read in loop()).
@@ -948,7 +950,12 @@ inline void mark(uint8_t s) { cpuprof::section(s); rtprof::part(s); last_state.s
 const char* const SEC_NAMES[SEC_N] = {"usb", "update", "bridge", "monitor", "drive", "msc", "packet", "rover", "sample",
                                       "stmcmd", "radio", "log", "bench", "debug", "mpu"};
 bool safe_mode = false;
-bool espnowWanted(){ return !safe_mode && (g_deviceConfig.espnow_enabled || g_deviceConfig.telemetry_enabled); }
+// Radio mode (setting radio_mode), fixed at boot: ESP-NOW or a Wi-Fi network, never both. A change
+// takes effect at the next start. In "wifi" mode the same flags (espnow_enabled, telemetry_enabled)
+// switch the radio on, and the same frames go to the PC telemetry server as UDP (lib/wifi_telem).
+bool radio_wifi = false;
+bool espnowWanted(){ return !safe_mode && !radio_wifi && (g_deviceConfig.espnow_enabled || g_deviceConfig.telemetry_enabled); }
+bool wifiWanted(){ return !safe_mode && radio_wifi && (g_deviceConfig.espnow_enabled || g_deviceConfig.telemetry_enabled); }
 
 void receiveCallback(const uint8_t *macAddr, const uint8_t *data, int dataLen)
 // Called when data is received (Wi-Fi task): copy a PING, CMD or RESTART for loop(), nothing else
@@ -1155,6 +1162,85 @@ void espnowSendAck(const uint8_t* mac, uint16_t seq, uint8_t result, const char*
   if (esp_now_send(mac, frame, 4 + n) != ESP_OK) espnow_send_err++;
 }
 
+// Wi-Fi telemetry (radio_mode "wifi", lib/wifi_telem) ------------------------------------------------
+// The same payloads as the ESP-NOW path: the log frames (live, INFO, backfill) and the text telemetry
+// message. Each goes to the PC telemetry server as one unicast UDP datagram. Telemetry only: no
+// command comes in over Wi-Fi.
+void wifiEvent(int32_t a, int32_t b, const char* text){ telemetryEvent(rec::EV_WIFI, a, b, text); }
+// A payload from the server: only a REQ (backfill request) is used, and the log takes it as from
+// ESP-NOW. The MAC is a fixed stand-in: in wifi mode every send goes to the server.
+void wifiFrame(const uint8_t* data, int len){
+  static const uint8_t server_mac[6] = {0x02, 0x57, 0x49, 0x46, 0x49, 0x00};  // locally administered
+  if (len >= 1 && data[0] == TELEMLOG_T_REQ) telemlog_on_frame(server_mac, data, len);
+}
+bool wifiTelemetrySend(const uint8_t mac[6], const uint8_t* buf, size_t len){
+  (void)mac;  // the server address replaces it
+  if (sim_loss_tx && esp_random() % 100 < sim_loss_tx) { sim_dropped_tx++; return true; }  // bench loss simulation, as telemetrySend()
+  return wifilink::send(buf, len);  // false before the server is known: counted as unsent
+}
+// Radio start in wifi mode, once; stops loop() for about 220 ms, as espnowStart() does.
+void wifiStart(){
+  if (wifilink::started()) return;
+  char pass[WIFI_PASS_MAX + 1];
+  msc_fat_wifi_password(pass, sizeof(pass));
+  wifilink::begin(msc_fat_wifi_ssid(), pass);
+  memset(pass, 0, sizeof(pass));
+  applyTxPower();  // espnow_tx_power_dbm sets the Wi-Fi transmit power too
+}
+// The text telemetry message that broadcastTelemetry() queues, over UDP (telemetryFifo_sendMessage() for Wi-Fi).
+void wifiTelemetryFifoSend(){
+  if (millis() - lastTelemetrySendTime < 100 || telemetry_fifo_head == telemetry_fifo_tail) return;
+  const String& m = telemetryFifo[telemetry_fifo_tail].message;
+  wifiTelemetrySend(nullptr, (const uint8_t*)m.c_str(), m.length());
+  telemetry_fifo_tail = (telemetry_fifo_tail + 1) % TELEMETRY_FIFO_LENGTH;
+  lastTelemetrySendTime = millis();
+}
+
+// USB "wifi" commands. The password goes to NVS only; no line, event or log record carries it.
+//   wifi                          status: mode, network, association, RSSI, IP, server, beacon age, counters
+//   wifi scan                     one line per network: SSID, RSSI, channel, security
+//   wifi set <ssid> <password>    "wifi set "<ssid with spaces>" <password>"; no password: an open network
+//   wifi clear                    removes the network and the password
+bool vehicleStationary();
+void wifiUsbCommand(const char* line){
+  const char* mode = radio_wifi ? "wifi" : "espnow";
+  const char* setting = g_deviceConfig.radio_mode == RADIO_MODE_WIFI ? "wifi" : "espnow";
+  if (!strcmp(line, "wifi")) {
+    wifilink::printStatus(mode, setting, msc_fat_wifi_ssid());
+    usbOut.printf("WIFI password=%s\n", wifitelem::passwordState(msc_fat_wifi_has_password()));
+  } else if (!strcmp(line, "wifi scan")) {
+    // In espnow mode the scan takes the radio off the ESP-NOW channel for about 2 s: not while the vehicle moves.
+    if (!radio_wifi && !espnow_started) usbOut.println("WIFI scan refused: the radio is off (espnow_enabled and telemetry_enabled false)");
+    else if (radio_wifi && !wifilink::started()) usbOut.println("WIFI scan refused: the radio is off (espnow_enabled and telemetry_enabled false)");
+    else if (!radio_wifi && !vehicleStationary()) usbOut.println("WIFI scan refused: the vehicle moves (ESP-NOW is lost during a scan)");
+    else wifilink::scanStart();
+  } else if (!strncmp(line, "wifi set ", 9) || !strcmp(line, "wifi clear")) {
+    if (!vehicleStationary()) { usbOut.println("WIFI refused: the vehicle moves (an NVS write can stop the CPU)"); return; }
+    if (!strcmp(line, "wifi clear")) {
+      msc_fat_wifi_clear();
+      if (wifilink::started()) wifilink::setCredentials("", "");
+      usbOut.println("WIFI cleared: no network stored");
+      telemetryEvent(rec::EV_SETTING, 0, 0, "wifi clear");
+      return;
+    }
+    char ssid[WIFI_SSID_MAX + 1], pass[WIFI_PASS_MAX + 1];
+    const wifitelem::SetResult r = wifitelem::parseWifiSet(line + 9, ssid, pass);
+    if (r == wifitelem::SET_USAGE) usbOut.println("WIFI usage: wifi set <ssid> <password> | wifi set \"<ssid>\" <password>");
+    else if (r == wifitelem::SET_SSID_LENGTH) usbOut.println("WIFI refused: the SSID must be 1 to 32 bytes");
+    else if (r == wifitelem::SET_PASS_LENGTH) usbOut.println("WIFI refused: the password must be 8 to 63 characters, 64 hex digits, or none");
+    else if (!msc_fat_wifi_set(ssid, pass)) usbOut.println("WIFI NVS write failed");
+    else {
+      if (wifilink::started()) wifilink::setCredentials(ssid, pass);
+      usbOut.printf("WIFI stored ssid=\"%s\" password=%s%s\n", ssid, wifitelem::passwordState(pass[0] != 0),
+                    radio_wifi ? "" : " (radio_mode is espnow: set radio_mode wifi, save, restart)");
+      telemetryEvent(rec::EV_SETTING, 0, 0, "wifi set (value not logged)");
+    }
+    memset(pass, 0, sizeof(pass));
+  } else {
+    usbOut.println("WIFI usage: wifi | wifi scan | wifi set <ssid> <password> | wifi clear");
+  }
+}
+
 uint8_t configCommand(const char* t, bool over_espnow, String& reply);
 uint8_t configCommandRun(const char* t, bool over_espnow, String& reply);
 
@@ -1333,9 +1419,16 @@ uint8_t configCommand(const char* t, bool over_espnow, String& reply){
     reply = drive_mode_status == 2 ? "run=running" : "run=stopped";
     return 0;
   }
+  if (!strncmp(t, "wifi", 4)) {  // Wi-Fi network and password: USB "wifi set" only, never over the radio
+    reply = "wifi: USB only";
+    telemetryEvent(rec::EV_SETTING, 4, over_espnow ? 1 : 0, "wifi (value not logged) -> refused");
+    return 4;
+  }
   const uint8_t r = configCommandRun(t, over_espnow, reply);
   if (strncmp(t, "get ", 4)) {  // one event per set or save, applied or refused: the log shows what was tried
-    telemetryEvent(rec::EV_SETTING, r, over_espnow ? 1 : 0, (String(t) + " -> " + reply).c_str());
+    char safe[ESPNOW_CMD_TEXT_MAX + 32];
+    wifitelem::logSafeCommand(t, safe, sizeof(safe));  // "set wifi_..." keeps no value: the log never holds a password
+    telemetryEvent(rec::EV_SETTING, r, over_espnow ? 1 : 0, (String(safe) + " -> " + reply).c_str());
   }
   return r;
 }
@@ -1386,11 +1479,18 @@ uint8_t configCommandRun(const char* t, bool over_espnow, String& reply){
       reply = String(key) + "=true";  // would cut the link that carries the command
       return 4;
     }
+    if (over_espnow && !strcmp(key, "radio_mode") && strcmp(value, "espnow") && strcmp(value, "\"espnow\"")) {
+      reply = String(key) + "=\"espnow\"";  // would cut the link that carries the command (after the next start)
+      return 4;
+    }
     const int r = msc_fat_set_key(&g_deviceConfig, key, value);
     if (r != 0) { reply = key; return (uint8_t)r; }
     applyDeviceConfig(g_deviceConfig);
     msc_fat_get_key(&g_deviceConfig, key, &out);
     reply = String(key) + "=" + out;
+    if (!strcmp(key, "radio_mode") && !over_espnow)  // the reply stays "key=value" for the PC; the note is a line of its own
+      usbOut.printf("RADIO radio_mode=%s in effect from the next start (save, then restart); now %s\n", out.c_str(),
+                    radio_wifi ? "wifi" : "espnow");
     return 0;
   }
   reply = "unknown command";
@@ -2031,6 +2131,9 @@ void benchSerial(){
       usbOut.printf("STMLINK ver=%u frames=%lu crc_err=%lu ver_err=%lu seq_lost=%lu refused=%lu stm_resets=%lu\n",
         (unsigned)stm_link_ver, (unsigned long)stmDec.st.frames, (unsigned long)stmDec.st.crc_err,
         (unsigned long)stmDec.st.ver_err, (unsigned long)stmDec.st.seq_lost, (unsigned long)c.refused, (unsigned long)c.stm_resets);
+    } else if (!strcmp(line, "wifi") || !strncmp(line, "wifi ", 5)) {
+      wifiUsbCommand(line);  // never echoes the line: it can hold the password
+      memset(line, 0, sizeof(line));  // and the line buffer keeps no copy of it
     } else if (!strcmp(line, "list")) {
       String kv;
       int n_keys = 0;
@@ -2951,6 +3054,8 @@ void setup() {
   }
   TRACE(2);
   applyDeviceConfig(g_deviceConfig);
+  radio_wifi = g_deviceConfig.radio_mode == RADIO_MODE_WIFI;  // fixed for this boot: ESP-NOW or Wi-Fi, never both
+  wifilink::attach(wifilink::Hooks{&usbOut, wifiEvent, wifiFrame});  // no radio action
   if (!safe_mode) telemetryBegin();  // boot_id, the log rings (kept over a warm reset), the boot event
 
   // Start Serial
@@ -3079,6 +3184,7 @@ void setup() {
     TRACE(10);
     espnowStart();  // ESP-NOW Setup
   }
+  if (wifiWanted()) wifiStart();  // radio_mode "wifi": station start; association runs on in the Wi-Fi task
   TRACE(11);
   enableLoopWDT();  // loop() must run at least each 5 s (task watchdog, panic restart), as in the monitor role
   boot_setup_ms = millis();
@@ -3445,6 +3551,16 @@ void loop() {
     espnowCommands();  // config commands (CMD/ACK) and restarts
     monitorLinkService();  // MON frames: "monitor heard" and PC time events
     if (espnow_started) telemlog_poll(millis(), telemetrySend);  // live log frames, INFO, backfill
+  }
+  if (wifiWanted() && radioSlotOpen()) {  // radio_mode "wifi": the same frames as UDP; nothing here waits for the network
+    wifiStart();  // no-op once started; starts it after a config.json change
+    stage(ST_RADIO);
+    wifilink::service(millis());  // association watch, reconnect, server beacon, mDNS answer, scan lines
+    broadcastTelemetry();  // Queue telemetry message if needed
+    wifiTelemetryFifoSend();  // ... and send one from the queue over UDP (throttled to 100ms)
+    telemlog_poll(millis(), wifiTelemetrySend);  // live log frames, INFO, backfill
+  } else if (!radio_wifi) {
+    wifilink::scanService();  // espnow mode: the lines of a "wifi scan"
   }
   stage(ST_LOG);
   mark(SEC_LOG);

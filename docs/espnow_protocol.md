@@ -145,6 +145,7 @@ u8 body type 0x20, u8 n (1 to 7), then n samples of 32 bytes. One sample is take
 | 14 | wheel speed, node 0 (even side) | i16 | 0.001 rev/s, ODrive encoder estimate as received |
 | 16 | wheel speed, node 1 (odd side) | i16 | 0.001 rev/s |
 | 18 | gyro z | i16 | 0.02 deg/s; -32768 = no gyro. Logged only: the autopilot does not use the gyro |
+| 19 | Wi-Fi link (`radio_mode` `wifi`, `lib/wifi_telem`) | 1 associated, 2 association lost, 3 server address learned, 4 no server beacon and no mDNS (multicast DNS) answer 30 s after the association | 1: received signal strength, dBm; 3: server port; 4: 30 | 1: `ssid=<ssid> ip=<ip> ch=<channel>`; 2: `ssid=<ssid>`; 3: `server <ip>:<port> via beacon` or `via mdns`; 4: `no telemetry server on this network`. The text never holds the password. |
 | 20 | beacon 1 (`s1_btx_radius[0]`) | u8 | 4 mm, 255 = 1020 mm or more |
 | 21 | beacon 2 (`s1_btx_radius[1]`) | u8 | 4 mm |
 | 22 | sensor 1 coil 1, real | bf16 | `coil_data[0][0]`, bfloat16: the top 16 bits of the float32, rounded to nearest even (relative error 0.4 % at most; the float32 range, because the Goertzel output's scale is not fixed) |

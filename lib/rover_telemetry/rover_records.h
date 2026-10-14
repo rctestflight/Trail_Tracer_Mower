@@ -56,6 +56,8 @@ enum EventCode : uint16_t {
   EV_STM32 = 15,      // power-on STM32 handshake: a 1 HELLO answered (text: its payload in hex) 0 no answer, b payload bytes
   EV_TIME = 16,       // PC time from a monitor (MON 0x44): a unix seconds, b millis() at that time, text unix ms
   EV_MONITOR = 17,    // a monitor heard (a 1) or no MON frame for 5 s (a 0); text its MAC
+  EV_WIFI = 19,       // radio_mode "wifi" (lib/wifi_telem): a 1 associated (b RSSI dBm), 2 association lost, 3 server address
+                      // learned (b port), 4 no server in 30 s (b 30); text SSID, IP, server. Never the password
   EV_STM32_CMD = 18,  // STM32 command link (lib/stm_settings, 0.5.25): a kind (stmset::Kind), b command ID, gap ms or HELLO/BOOT result; text
 };
 

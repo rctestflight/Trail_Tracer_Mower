@@ -50,6 +50,7 @@ static const char* TAG = "msc_fat";
 #define CONFIG_PATH_SUFFIX        "-config.json"
 #define DEFAULT_CONFIG_PATH       "0:/config.json"
 #define NVS_NAMESPACE             "wfrx_cfg"       // ≤ 15 chars
+#define NVS_WIFI_NAMESPACE        "wfrx_wifi"      // Wi-Fi network: "ssid", "pass" (not in config.json)
 #define MSC_WRITE_STABLE_MS       3000u             // idle window before parse
 
 // PWM safety limits enforced during validation
@@ -281,6 +282,7 @@ static void populate_defaults(DeviceConfig& c,
     c.dsp_pga                  = -1;
     c.dsp_lanes                = 2;
     c.usb_drive                = true;
+    c.radio_mode               = RADIO_MODE_ESPNOW;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -395,6 +397,7 @@ static void validate_config(DeviceConfig& c)
     c.dsp_slow_adc        = constrain(c.dsp_slow_adc, 0, 1);
     c.dsp_pga             = constrain(c.dsp_pga, -1, 2);
     c.dsp_lanes           = constrain(c.dsp_lanes, 0, 3);
+    if (c.radio_mode > RADIO_MODE_WIFI) c.radio_mode = RADIO_MODE_ESPNOW;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -474,6 +477,7 @@ static void prefs_save(const DeviceConfig& c)
     p.putInt("dspPga",     c.dsp_pga);
     p.putInt("dspLanes",   c.dsp_lanes);
     p.putBool("usbDrive",  c.usb_drive);
+    p.putUChar("radioMode", c.radio_mode);
     p.end();
 }
 
@@ -557,6 +561,7 @@ static bool prefs_load(DeviceConfig& c)
     c.dsp_pga                  = p.getInt("dspPga",     c.dsp_pga);
     c.dsp_lanes                = p.getInt("dspLanes",   c.dsp_lanes);
     c.usb_drive                = p.getBool("usbDrive",  c.usb_drive);
+    c.radio_mode               = p.getUChar("radioMode", c.radio_mode);
     p.end();
     return true;
 }
@@ -841,6 +846,7 @@ static void config_to_doc(const DeviceConfig& c, JsonDocument& doc, bool with_ef
     doc["dsp_pga"]                  = c.dsp_pga;
     doc["dsp_lanes"]                = c.dsp_lanes;
     doc["usb_drive"]                = c.usb_drive;
+    doc["radio_mode"]               = c.radio_mode == RADIO_MODE_WIFI ? "wifi" : "espnow";
     if (!with_eff) return;
     auto eff = [&](const String& key, int i, bool is_int) {
         if (isnan(g_dsp_eff[i])) doc[key] = nullptr;
@@ -854,6 +860,9 @@ static void config_to_doc(const DeviceConfig& c, JsonDocument& doc, bool with_ef
     eff("dsp_slow_adc_eff", DSP_EFF_SLOW, true);
     eff("dsp_pga_eff", DSP_EFF_PGA, true);
     eff("dsp_lanes_eff", DSP_EFF_LANES, true);
+    // Wi-Fi network (NVS only, not in config.json): the SSID, and whether a password is stored. Never the password.
+    doc["wifi_ssid"]                = msc_fat_wifi_ssid();
+    doc["wifi_password"]            = msc_fat_wifi_has_password() ? "set" : "not set";
 }
 
 static bool config_write_json(const DeviceConfig& c)
@@ -1107,6 +1116,11 @@ static bool config_from_json_text(DeviceConfig& c, const String& json_no_comment
     JSON_GET_INT("dsp_pga",                 dsp_pga);
     JSON_GET_INT("dsp_lanes",               dsp_lanes);
     JSON_GET_BOOL("usb_drive",              usb_drive);
+    if (doc["radio_mode"].is<const char*>()) {  // "espnow" or "wifi"; any other text keeps the value
+        const char* m = doc["radio_mode"].as<const char*>();
+        if (!strcmp(m, "espnow")) c.radio_mode = RADIO_MODE_ESPNOW;
+        else if (!strcmp(m, "wifi")) c.radio_mode = RADIO_MODE_WIFI;
+    }
     if (legacy_file && doc["CHARGE_MAX_SECONDS"].is<int>()) c.CHARGE_MAX_SECONDS = doc["CHARGE_MAX_SECONDS"].as<int>() * 2;  // see legacy_file
 
 #undef JSON_GET_INT
@@ -1419,10 +1433,19 @@ int msc_fat_set_key(DeviceConfig* cfg, const char* key, const char* value_json)
 {
     const size_t n = strlen(key);
     if (n > 4 && !strcmp(key + n - 4, "_eff")) return 4;  // read-only: the value in effect, from the STM32
+    if (!strncmp(key, "wifi_", 5)) return 4;              // read-only: the USB command "wifi set" writes them
     JsonDocument cur;
     config_to_doc(*cfg, cur);
     JsonVariant old = cur[key];
     if (old.isNull()) return 1;                       // unknown key
+    // A text key takes a JSON string, or a bare word (letters, digits, '_'), as "set radio_mode wifi".
+    String quoted;
+    if (old.is<const char*>() && value_json[0] != '"') {
+        for (const char* q = value_json; *q; q++)
+            if (!isalnum((unsigned char)*q) && *q != '_') return 2;
+        quoted = String("\"") + value_json + "\"";
+        value_json = quoted.c_str();
+    }
     JsonDocument val;
     if (deserializeJson(val, value_json)) return 2;   // not a JSON literal
     JsonVariant nv = val.as<JsonVariant>();
@@ -1441,6 +1464,11 @@ int msc_fat_set_key(DeviceConfig* cfg, const char* key, const char* value_json)
     DeviceConfig tmp = *cfg;
     if (!config_from_json_text(tmp, text)) return 2;
     validate_config(tmp);                             // the same clamps as a config.json edit
+    if (old.is<const char*>()) {                      // a text key: the value must survive the clamps unchanged
+        JsonDocument chk;
+        config_to_doc(tmp, chk);
+        if (strcmp(chk[key].as<const char*>(), nv.as<const char*>())) return 2;
+    }
     *cfg = tmp;
     return 0;
 }
@@ -1460,4 +1488,71 @@ bool msc_fat_key_at(const DeviceConfig* cfg, int index, String* line)
         return true;
     }
     return false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Wi-Fi network (radio_mode "wifi"): NVS only. The SSID is cached for "list" and "get"; the
+// password is read only by msc_fat_wifi_password(), for the Wi-Fi start.
+// ─────────────────────────────────────────────────────────────────────────────
+static char s_wifi_ssid[33] = "";
+static bool s_wifi_pass = false;
+static bool s_wifi_loaded = false;
+
+static void wifi_load()
+{
+    if (s_wifi_loaded) return;
+    s_wifi_loaded = true;
+    Preferences p;
+    if (!p.begin(NVS_WIFI_NAMESPACE, true)) return;  // namespace not made yet: nothing stored
+    String ssid = p.getString("ssid", "");
+    snprintf(s_wifi_ssid, sizeof(s_wifi_ssid), "%s", ssid.c_str());
+    s_wifi_pass = p.isKey("pass");
+    p.end();
+}
+
+bool msc_fat_wifi_set(const char* ssid, const char* pass)
+{
+    Preferences p;
+    if (!p.begin(NVS_WIFI_NAMESPACE, false)) return false;
+    bool ok = p.putString("ssid", ssid) == strlen(ssid);
+    if (pass && pass[0]) ok = ok && p.putString("pass", pass) == strlen(pass);
+    else if (p.isKey("pass")) p.remove("pass");  // an open network: no password stored
+    p.end();
+    s_wifi_loaded = false;
+    wifi_load();
+    return ok;
+}
+
+void msc_fat_wifi_clear()
+{
+    Preferences p;
+    if (p.begin(NVS_WIFI_NAMESPACE, false)) {
+        p.clear();
+        p.end();
+    }
+    s_wifi_ssid[0] = 0;
+    s_wifi_pass = false;
+    s_wifi_loaded = true;
+}
+
+const char* msc_fat_wifi_ssid()
+{
+    wifi_load();
+    return s_wifi_ssid;
+}
+
+bool msc_fat_wifi_has_password()
+{
+    wifi_load();
+    return s_wifi_pass;
+}
+
+void msc_fat_wifi_password(char* out, size_t cap)
+{
+    if (!cap) return;
+    out[0] = 0;
+    Preferences p;
+    if (!p.begin(NVS_WIFI_NAMESPACE, true)) return;
+    if (p.isKey("pass")) p.getString("pass", out, cap);
+    p.end();
 }

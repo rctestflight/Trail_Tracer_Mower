@@ -1,6 +1,6 @@
 {
-  "version": 7,
-  "about": "Rover settings definition, owned by Trail_Tracer_Mower (docs/settings_def.json). The PC uses an unchanged copy. Words from the PC draft (Trail-Tracer-PC-Telemetry 22deeea); values checked against src/usb_msc_fat.cpp (defaults, limits) and src/main.cpp (STATIONARY_KEYS). Format: Trail-Tracer-PC-Telemetry docs/control_api.md, section 3. 'list' ends 'end <n> def 6'. Version 6: groups in user order ('groups'), a 'label' per setting, DSP settings (dsp_*) with read-only values in effect (dsp_*_eff, 'readonly': true; 'effect' names the _eff key of a setting). Version 7 (firmware 0.5.69): 'string' and 'choice' types, 'max_len', 'pattern' and 'dec'; the servo outputs by function (steer_*, throttle_*) replace PWM_OUT_n_*; drive_output, vehicle_name, steer_lpf_hz; CHARGE_MAX_SECONDS is the charge time.",
+  "version": 8,
+  "about": "Rover settings definition, owned by Trail_Tracer_Mower (docs/settings_def.json). The PC uses an unchanged copy. Words from the PC draft (Trail-Tracer-PC-Telemetry 22deeea); values checked against src/usb_msc_fat.cpp (defaults, limits) and src/main.cpp (STATIONARY_KEYS). Format: Trail-Tracer-PC-Telemetry docs/control_api.md, section 3. 'list' ends 'end <n> def 6'. Version 6: groups in user order ('groups'), a 'label' per setting, DSP settings (dsp_*) with read-only values in effect (dsp_*_eff, 'readonly': true; 'effect' names the _eff key of a setting). Version 7 (firmware 0.5.69): 'string' and 'choice' types, 'max_len', 'pattern' and 'dec'; the servo outputs by function (steer_*, throttle_*) replace PWM_OUT_n_*; drive_output, vehicle_name, steer_lpf_hz; CHARGE_MAX_SECONDS is the charge time. Version 8 (firmware 0.5.71): radio_mode (espnow or wifi, from the next start), read-only wifi_ssid and wifi_password (set or not set; USB 'wifi set' writes them).",
   "groups": [
     {
       "name": "Vehicle",
@@ -570,6 +570,34 @@
         false
       ],
       "label": "Telemetry"
+    },
+    "radio_mode": {
+      "type": "choice",
+      "choices": [
+        "espnow",
+        "wifi"
+      ],
+      "default": "espnow",
+      "live": true,
+      "restart": true,
+      "group": "Radio and log",
+      "label": "Radio link",
+      "description": "How the vehicle sends its telemetry. espnow: straight to a monitor, with no network. wifi: through a Wi-Fi network to the PC telemetry server; the vehicle then takes no commands over the radio. A change takes effect after a save and a restart. The vehicle refuses wifi over ESP-NOW.",
+      "refuse": [
+        "wifi"
+      ]
+    },
+    "wifi_ssid": {
+      "readonly": true,
+      "group": "Radio and log",
+      "label": "Wi-Fi network",
+      "description": "The network name for radio_mode wifi. Set it over USB with: wifi set <network> <password>. The vehicle keeps it in its own memory, not in config.json."
+    },
+    "wifi_password": {
+      "readonly": true,
+      "group": "Radio and log",
+      "label": "Wi-Fi password",
+      "description": "Shows set or not set. The vehicle never shows or sends the password. Set it over USB with the wifi set command."
     },
     "cmd_key": {
       "type": "int",

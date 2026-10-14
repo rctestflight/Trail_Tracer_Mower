@@ -114,7 +114,12 @@ struct DeviceConfig {
     int     dsp_lanes;               // CID 13: lane map 0..3 (with dsp_sensors 1, bit 0 selects the sensor)
     bool    usb_drive;               // true (default): config.json as a USB drive; false: no drive, settings by command only
                                      // (from the next start). A PC that read the drive when the board left USB lost ports.
+    uint8_t radio_mode;              // RADIO_MODE_ESPNOW (default, "espnow" in config.json) or RADIO_MODE_WIFI ("wifi"):
+                                     // telemetry over ESP-NOW or over a Wi-Fi network, never both (from the next start)
 };
+
+#define RADIO_MODE_ESPNOW 0
+#define RADIO_MODE_WIFI   1
 
 // The shortest frame period setting: the fastest STM32 period (2336 us, set-up S2N) plus 50 %, rounded up.
 // The ESP32 then has margin to serve the radio, the log and USB between frames.
@@ -190,3 +195,16 @@ bool msc_fat_save_all(const DeviceConfig* cfg);
 bool msc_fat_get_key(const DeviceConfig* cfg, const char* key, String* value_json);
 int  msc_fat_set_key(DeviceConfig* cfg, const char* key, const char* value_json);
 bool msc_fat_key_at(const DeviceConfig* cfg, int index, String* line);
+
+/**
+ * Wi-Fi network for radio_mode "wifi" (USB "wifi set" / "wifi clear"). NVS only, in its own
+ * namespace: never in config.json, never in DeviceConfig. "list" and "get" show wifi_ssid and
+ * wifi_password = "set" or "not set"; this file never reads the password except in
+ * msc_fat_wifi_password(), for the Wi-Fi start.
+ * set: ssid 1..32 bytes; pass "" = an open network (no password key in NVS). false: NVS write failed.
+ */
+bool msc_fat_wifi_set(const char* ssid, const char* pass);
+void msc_fat_wifi_clear();
+const char* msc_fat_wifi_ssid();          // "" = none stored
+bool msc_fat_wifi_has_password();
+void msc_fat_wifi_password(char* out, size_t cap);  // "" = none
