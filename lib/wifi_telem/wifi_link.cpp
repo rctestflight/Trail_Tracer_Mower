@@ -51,7 +51,7 @@ static int s_scan_i = -1;  // next network to print; -1 = not done yet
 
 static void line(const char* fmt, ...) {
   if (!s_h.out) return;
-  char b[200];
+  char b[420];  // the "wifi" status line is about 260 characters; 200 cut off mdns, reqs, reconnects and the line end
   va_list ap;
   va_start(ap, fmt);
   vsnprintf(b, sizeof(b), fmt, ap);
@@ -125,6 +125,7 @@ void begin(const char* ssid, const char* pass) {
 
 bool started() { return s_started; }
 bool connected() { return s_conn; }
+bool ready() { return s_conn && s_server_known && s_tx >= 0; }
 
 void setCredentials(const char* ssid, const char* pass) {
   snprintf(s_ssid, sizeof(s_ssid), "%s", ssid ? ssid : "");

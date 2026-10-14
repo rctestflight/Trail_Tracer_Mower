@@ -30,6 +30,7 @@ void setCredentials(const char* ssid, const char* pass);  // "wifi set" / "wifi 
 void service(uint32_t now_ms);                            // each loop() pass
 bool send(const uint8_t* payload, size_t len);            // one datagram to the server; false: not sent (counted)
 bool connected();                                         // associated, with an IP address
+bool ready();                                             // connected and the server known: a send can go out
 
 // "wifi scan": start, then scanService() each loop() pass prints one line per network.
 // Works in either radio mode while the radio runs; espnow mode loses its frames during the scan.

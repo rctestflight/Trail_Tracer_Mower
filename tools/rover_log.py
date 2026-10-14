@@ -30,7 +30,7 @@ NO_SEQ = 0xFFFFFFFF
 AP_STATES = ["roam", "seek", "acquire", "follow", "depart", "halted"]
 EVENTS = {1: "boot", 2: "mode", 3: "ap_state", 4: "stuck", 5: "charge_step", 6: "odrive_error",
           7: "halted", 8: "setting", 9: "stall", 10: "bad_key", 11: "run", 12: "imu", 13: "restart_refused", 14: "prev_boot", 15: "stm32", 16: "time", 17: "monitor",
-          18: "stm32_cmd"}
+          18: "stm32_cmd", 19: "wifi"}
 # Event 18 (stm32_cmd), field a: lib/stm_settings/stm_settings.h, enum Kind
 STM32_CMD_KINDS = {1: "no_answer", 2: "wrong_answer", 3: "read_back_differs", 4: "packet_gap", 5: "queue_full",
                    6: "hello_boot", 7: "stm_reset", 8: "refused", 9: "cal_restore"}

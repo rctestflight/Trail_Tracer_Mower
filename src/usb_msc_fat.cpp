@@ -74,6 +74,11 @@ static bool              s_cache_dirty  = false;
 
 // FatFS state
 static FATFS s_fatfs;
+// The one file object for config.json (read and write; loop() only, never two at once). With
+// CONFIG_FATFS_PER_FILE_CACHE a FIL holds a 4 KB sector buffer. On the stack it took config_write_json
+// to 4288 B; under "save" from the USB command path (loop, benchSerial, configCommand, msc_fat_save_all)
+// that overflowed the 8 KB loop() stack: a panic restart on 4 of 8 USB saves, 36 B free after a save that passed (bench, ESP-3, 2026-10-13).
+static FIL s_fil;
 static BYTE  s_pdrv = FF_DRV_NOT_USED;
 
 // USB MSC
@@ -742,8 +747,13 @@ static bool fatfs_mount()
 
     ESP_LOGW(TAG, "f_mount failed (%d); formatting...", res);
     // Format the volume (FM_FAT = FAT12/16, au=0 = default cluster size)
-    BYTE work[FF_MAX_SS];
-    res = f_mkfs(FAT_DRIVE, FM_FAT, 0, work, sizeof(work));
+    BYTE* work = (BYTE*)malloc(FF_MAX_SS);  // 4 KB: not on the loop() stack
+    if (!work) {
+        ESP_LOGE(TAG, "f_mkfs work buffer: no memory");
+        return false;
+    }
+    res = f_mkfs(FAT_DRIVE, FM_FAT, 0, work, FF_MAX_SS);
+    free(work);
     if (res != FR_OK) {
         ESP_LOGE(TAG, "f_mkfs failed (%d)", res);
         return false;
@@ -896,7 +906,7 @@ static bool config_write_json(const DeviceConfig& c)
     out_str += json_str;
     out_str += "\n";
 
-    FIL fil;
+    FIL& fil = s_fil;  // not on the stack: a FIL holds a 4 KB sector buffer (see s_fil)
     FRESULT res = f_open(&fil, s_config_path, FA_CREATE_ALWAYS | FA_WRITE);
     if (res != FR_OK) {
         ESP_LOGE(TAG, "f_open write failed (%d)", res);
@@ -923,7 +933,7 @@ static bool s_rate_config_missing = false;
 
 static bool config_read_json(DeviceConfig& c)
 {
-    FIL fil;
+    FIL& fil = s_fil;  // not on the stack (see s_fil)
     FRESULT res = f_open(&fil, s_config_path, FA_READ);
     if (res != FR_OK) {
         ESP_LOGW(TAG, "config.json not found (%d)", res);
