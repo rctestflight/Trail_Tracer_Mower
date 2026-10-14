@@ -195,9 +195,9 @@ void usbLoadService(){
 
 static const char* TAG = "wfrx";
 #ifdef BENCH_FAKE_IMU
-#define ROVER_FW_VERSION "0.5.69+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.5.70+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #else
-#define ROVER_FW_VERSION "0.5.69"  // 0.5.69: settings from the operator review: drive_output (servos as V1.0, or CAN; auto), servo map by function, vehicle_name, 4S limit, steer_lpf_hz, charge time as it is; 0.5.68: the 8-bin coil record (0x2E) goes through the log anti-alias filter at telemetry_bins_hz (default 5); 0.5.67: USB driver copy: TX FIFO register of the FIFO in use (DIEPTXF[TxFNum-1]; the CDC output FIFO pointed outside the FIFO RAM: output stops at Monitor Rx start and mid-run), IN endpoints disabled through the core at a bus reset and a close; a guard reconnect ejects the drive first; usbregs with FIFO registers and driver counters, the stop record printed 3 times; 0.5.66: telemetry body 0x2E, the coil magnitudes of all 8 bins of both sensors, 5 a second; 0.5.65: "stm restart" (Rx STM32 command 41, app 2.0.39+): Rx STM32 update with no power cycle; 0.5.64: USB output fix from the bench line (0.5.60-dev10 to dev13): project copy of the TinyUSB ESP32-S2 device driver (lib/tinyusb_dcd_fix) with no zero-length packet on data IN endpoints; USB register record at each output stop and over a restart (monitor). 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
+#define ROVER_FW_VERSION "0.5.70"  // 0.5.70: "set" takes text settings (vehicle_name, drive_output) as the rest of the line; 0.5.69: settings from the operator review: drive_output (servos as V1.0, or CAN; auto), servo map by function, vehicle_name, 4S limit, steer_lpf_hz, charge time as it is; 0.5.68: the 8-bin coil record (0x2E) goes through the log anti-alias filter at telemetry_bins_hz (default 5); 0.5.67: USB driver copy: TX FIFO register of the FIFO in use (DIEPTXF[TxFNum-1]; the CDC output FIFO pointed outside the FIFO RAM: output stops at Monitor Rx start and mid-run), IN endpoints disabled through the core at a bus reset and a close; a guard reconnect ejects the drive first; usbregs with FIFO registers and driver counters, the stop record printed 3 times; 0.5.66: telemetry body 0x2E, the coil magnitudes of all 8 bins of both sensors, 5 a second; 0.5.65: "stm restart" (Rx STM32 command 41, app 2.0.39+): Rx STM32 update with no power cycle; 0.5.64: USB output fix from the bench line (0.5.60-dev10 to dev13): project copy of the TinyUSB ESP32-S2 device driver (lib/tinyusb_dcd_fix) with no zero-length packet on data IN endpoints; USB register record at each output stop and over a restart (monitor). 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
 
@@ -1357,7 +1357,24 @@ uint8_t configCommandRun(const char* t, bool over_espnow, String& reply){
     return 0;
   }
   if (sscanf(t, "set %47s %63s", key, value) == 2) {
-    if (strpbrk(value, ",{}[]:\"")) { reply = key; return 2; }  // one literal only: no JSON injection of other keys
+    // A text setting (vehicle_name, drive_output; 0.5.69): the rest of the line, spaces included, with no
+    // quotes needed; letters, digits, space, '_', '-' and '.' only. It goes to the parser as one JSON string.
+    String cur;
+    if (msc_fat_get_key(&g_deviceConfig, key, &cur) && cur.startsWith("\"")) {
+      const char* v = t + 4;
+      while (*v == ' ') v++;
+      v += strlen(key);
+      while (*v == ' ') v++;
+      String raw = v;
+      raw.trim();
+      if (raw.length() >= 2 && raw.startsWith("\"") && raw.endsWith("\"")) raw = raw.substring(1, raw.length() - 1);
+      if (raw.length() == 0 || raw.length() > 32) { reply = key; return 2; }
+      for (size_t i = 0; i < raw.length(); i++) {
+        const char ch = raw[i];
+        if (!isalnum((unsigned char)ch) && ch != ' ' && ch != '_' && ch != '-' && ch != '.') { reply = key; return 2; }
+      }
+      snprintf(value, sizeof(value), "\"%s\"", raw.c_str());
+    } else if (strpbrk(value, ",{}[]:\"")) { reply = key; return 2; }  // one literal only: no JSON injection of other keys
     if (over_espnow && !strcmp(key, "cmd_key")) { reply = "cmd_key not over ESP-NOW"; return 4; }
     if (stationaryKey(key) && !vehicleStationary()) {
       msc_fat_get_key(&g_deviceConfig, key, &out);
