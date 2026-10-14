@@ -198,9 +198,9 @@ void usbLoadService(){
 
 static const char* TAG = "wfrx";
 #ifdef BENCH_FAKE_IMU
-#define ROVER_FW_VERSION "0.5.73b+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.5.74+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #else
-#define ROVER_FW_VERSION "0.5.73b"  // 0.5.73b: raw tests up to 5 Mbaud; 0.5.73: raw stream pass-through and rate tests (raw usb, raw pass, raw loop); 0.5.72: log sample coil values signed (were |v|); 0.5.71: radio_mode wifi: telemetry as UDP over a Wi-Fi network (lib/wifi_telem, the 2026-10-12 work, ported); 0.5.70: "set" takes text settings (vehicle_name, drive_output) as the rest of the line; 0.5.69: settings from the operator review: drive_output (servos as V1.0, or CAN; auto), servo map by function, vehicle_name, 4S limit, steer_lpf_hz, charge time as it is; 0.5.68: the 8-bin coil record (0x2E) goes through the log anti-alias filter at telemetry_bins_hz (default 5); 0.5.67: USB driver copy: TX FIFO register of the FIFO in use (DIEPTXF[TxFNum-1]; the CDC output FIFO pointed outside the FIFO RAM: output stops at Monitor Rx start and mid-run), IN endpoints disabled through the core at a bus reset and a close; a guard reconnect ejects the drive first; usbregs with FIFO registers and driver counters, the stop record printed 3 times; 0.5.66: telemetry body 0x2E, the coil magnitudes of all 8 bins of both sensors, 5 a second; 0.5.65: "stm restart" (Rx STM32 command 41, app 2.0.39+): Rx STM32 update with no power cycle; 0.5.64: USB output fix from the bench line (0.5.60-dev10 to dev13): project copy of the TinyUSB ESP32-S2 device driver (lib/tinyusb_dcd_fix) with no zero-length packet on data IN endpoints; USB register record at each output stop and over a restart (monitor). 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
+#define ROVER_FW_VERSION "0.5.74"  // 0.5.74: stm raw: Rx STM32 raw stream (command 42) end to end to USB; 0.5.73b: raw tests up to 5 Mbaud; 0.5.73: raw stream pass-through and rate tests (raw usb, raw pass, raw loop); 0.5.72: log sample coil values signed (were |v|); 0.5.71: radio_mode wifi: telemetry as UDP over a Wi-Fi network (lib/wifi_telem, the 2026-10-12 work, ported); 0.5.70: "set" takes text settings (vehicle_name, drive_output) as the rest of the line; 0.5.69: settings from the operator review: drive_output (servos as V1.0, or CAN; auto), servo map by function, vehicle_name, 4S limit, steer_lpf_hz, charge time as it is; 0.5.68: the 8-bin coil record (0x2E) goes through the log anti-alias filter at telemetry_bins_hz (default 5); 0.5.67: USB driver copy: TX FIFO register of the FIFO in use (DIEPTXF[TxFNum-1]; the CDC output FIFO pointed outside the FIFO RAM: output stops at Monitor Rx start and mid-run), IN endpoints disabled through the core at a bus reset and a close; a guard reconnect ejects the drive first; usbregs with FIFO registers and driver counters, the stop record printed 3 times; 0.5.66: telemetry body 0x2E, the coil magnitudes of all 8 bins of both sensors, 5 a second; 0.5.65: "stm restart" (Rx STM32 command 41, app 2.0.39+): Rx STM32 update with no power cycle; 0.5.64: USB output fix from the bench line (0.5.60-dev10 to dev13): project copy of the TinyUSB ESP32-S2 device driver (lib/tinyusb_dcd_fix) with no zero-length packet on data IN endpoints; USB register record at each output stop and over a restart (monitor). 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
 
@@ -1569,6 +1569,7 @@ void benchSend(const char* arg){
 // returns to the 2 Mbaud packet link. A PC tool runs the protocol.
 bool stm_raw = false;
 void stmRestartCommand(const char* arg);
+void stmRawStreamCommand(const char* arg);
 // STM32 app update through the boot checker (IAP), bench and field: "stm iaphold" sets a one-shot
 // flag in NVS. At the next power-on the handshake sends HELLO only (no BOOT), so the STM32 stays in
 // its boot checker, and the board becomes a transparent bridge between USB and the STM32 UART
@@ -1763,6 +1764,15 @@ uint32_t raw_baud = 0, raw_t0 = 0, raw_end_ms = 0, raw_seq = 0;
 uint64_t raw_in = 0, raw_out = 0, raw_drop = 0, raw_err = 0;
 uint8_t raw_expect = 0, raw_tx = 0;
 bool raw_first = true;
+// "stm raw" (Rx STM32 command 42, RAW_STREAM_INTERFACE.md section 4): the packets pass from the first A5 5A to the
+// end packet A5 5B (14 B); bytes before the first sync are dropped (the baud switch), a lost boundary resyncs.
+bool raw_stm = false;           // pass mode for an Rx STM32 stream (packet framing, stop at the end packet)
+uint8_t raw_stm_state = 0;      // 0 wait for the CID 42 answer, 1 before the first sync, 2 in the stream
+uint16_t raw_pkt_len = 40;      // 8 + 32 x coils
+uint32_t raw_pkt_pos = 0, raw_pkts = 0, raw_resync = 0, raw_presync = 0, raw_cmd_ms = 0, raw_last_rx_ms = 0;
+uint8_t raw_prev = 0;
+bool raw_end_pkt = false;
+uint32_t raw_stm_value = 0, raw_stm_sec = 0, raw_stm_baud = 0;
 void rawUartBegin(uint32_t baud, size_t rxbuf){
   Serial1.end();
   Serial1.setRxBufferSize(rxbuf);
@@ -1783,11 +1793,63 @@ void rawStop(){
     data_ready = 0;
   }
   const double s = ms / 1000.0;
+  if (raw_stm) usbOut.printf("\nRAW stm packets=%lu resyncs=%lu presync=%lu end_packet=%d\n", (unsigned long)raw_pkts,
+                             (unsigned long)raw_resync, (unsigned long)raw_presync, (int)raw_end_pkt);
+  raw_stm = false;
+  raw_stm_state = 0;
   usbOut.printf("\nRAW end mode=%s baud=%lu ms=%lu in=%llu out=%llu dropped=%llu errors=%llu kBps_in=%.1f kBps_out=%.1f heap=%lu\n",
                 mode == 1 ? "usb" : mode == 2 ? "pass" : "loop", (unsigned long)raw_baud, (unsigned long)ms,
                 (unsigned long long)raw_in, (unsigned long long)raw_out, (unsigned long long)raw_drop, (unsigned long long)raw_err,
                 s > 0 ? raw_in / 1000.0 / s : 0.0, s > 0 ? raw_out / 1000.0 / s : 0.0, (unsigned long)ESP.getFreeHeap());
 }
+// "stm raw <mask> <shift> <seconds> [baud]": Rx STM32 command 42 (idle mode first), then on its answer 1 the UART
+// goes to the stream baud at once (the first packet comes 50 ms after the answer frame) and the stream passes to USB.
+void stmRawStreamCommand(const char* arg){
+  unsigned long mask = 0, shift = 0, sec = 0, baud = 4923077;
+  const int n = sscanf(arg, "%lu %lu %lu %lu", &mask, &shift, &sec, &baud);
+  int coils = 0;
+  for (int i = 0; i < 4; i++) coils += (mask >> i) & 1;
+  if (n < 3 || coils < 1 || coils > 4 || mask > 15 || shift > 9 || sec < 1 || sec > 600 || baud < 115200 || baud > 5000000) {
+    usbOut.println("STM raw usage: stm raw <coil mask 1..15> <shift 0..9> <seconds 1..600> [baud, default 4923077]");
+    return;
+  }
+  if (stm_link_ver != 2) { usbOut.println("STM raw refused: no v2 link to the Rx STM32"); return; }
+  if (!vehicleStationary()) { usbOut.println("STM raw refused: the vehicle moves"); return; }
+  if (raw_mode || raw_stm_state) { usbOut.println("STM raw refused: busy"); return; }
+  raw_stm_value = (uint32_t)mask | ((uint32_t)shift << 8) | ((uint32_t)sec << 16);
+  raw_stm_sec = sec;
+  raw_stm_baud = baud;
+  raw_pkt_len = (uint16_t)(8 + 32 * coils);
+  raw_stm_state = 0xFE;  // waiting for the idle mode answer, then command 42
+  stmLink.pushInt(STM_RUN_CMD | 0x80000000, 0);
+  stmLink.push(42 | stmset::WRITE, raw_stm_value, 0);
+  raw_cmd_ms = millis();
+  usbOut.printf("STM raw: command 42 value=0x%08lx (packet %u B), stream at %lu baud\n", (unsigned long)raw_stm_value,
+                (unsigned)raw_pkt_len, baud);
+}
+// One v2 answer (before stmLink.onAnswerV2). Answer 1 to command 42: the UART switches now; nothing more goes out.
+void stmRawStreamOnAnswer(const stmv2::Answer& a){
+  if (raw_stm_state != 0xFE || !a.present || a.cid != (42 | ESP_CID_WRITE)) return;
+  if (a.status != RSP_OK || a.value != 1) {
+    raw_stm_state = 0;
+    usbOut.printf("STM raw refused by the Rx STM32: status %u value %ld\n", (unsigned)a.status, (long)(int32_t)a.value);
+    if (stm_v2_autorun) { stmLink.pushInt(STM_RUN_CMD | 0x80000000, 1); stm_v2_run_ms = millis(); }
+    return;
+  }
+  raw_in = raw_out = raw_drop = raw_err = 0;
+  raw_pkts = raw_resync = raw_presync = 0;
+  raw_pkt_pos = 0; raw_prev = 0; raw_end_pkt = false;
+  raw_baud = raw_stm_baud;
+  rawUartBegin(raw_stm_baud, 16384);  // within the 50 ms before the first packet
+  raw_stm = true;
+  raw_stm_state = 1;
+  raw_mode = 2;
+  raw_t0 = millis();
+  raw_last_rx_ms = raw_t0;
+  raw_end_ms = raw_t0 + raw_stm_sec * 1000 + 3000;  // the stream time, the end packet and a margin
+  usbOut.printf("RAW start mode=stm baud=%lu s=%lu\n", (unsigned long)raw_stm_baud, (unsigned long)raw_stm_sec);
+}
+
 void rawCommand(const char* arg){
   char m[8] = {0};
   unsigned long baud = 0, sec = 0;
@@ -1847,11 +1909,46 @@ void rawService(){
       }
       continue;
     }
+    raw_last_rx_ms = millis();
+    size_t from = 0, to = k;
+    if (raw_stm) {  // framing: drop bytes before the first sync; stop after the end packet
+      size_t i = 0;
+      for (; i < k; i++) {
+        const uint8_t c = b[i];
+        if (raw_stm_state == 1) {  // before the first sync
+          if (raw_prev == 0xA5 && c == 0x5A) {  // the first sync: the packet starts at its A5
+            raw_stm_state = 2; raw_pkt_pos = 2; raw_pkts = 1;
+            if (i == 0) { const uint8_t a5 = 0xA5; raw_out += Serial.write(&a5, 1); from = 0; }  // its A5 came in the last read
+            else from = i - 1;
+          }
+          else raw_presync++;
+          raw_prev = c;
+          continue;
+        }
+        raw_pkt_pos++;
+        if (raw_pkt_pos == 2 && raw_prev == 0xA5) {  // the second byte of a packet
+          if (c == 0x5A) raw_pkts++;
+          else if (c == 0x5B) raw_end_pkt = true;
+        }
+        if (raw_pkt_pos == 1 && c != 0xA5) { raw_resync++; raw_pkt_pos = 0; }  // a lost boundary: wait for A5
+        raw_prev = c;
+        const uint32_t len = raw_end_pkt ? 14 : raw_pkt_len;
+        if (raw_pkt_pos >= len) {
+          raw_pkt_pos = 0;
+          if (raw_end_pkt) { to = i + 1; break; }
+        }
+      }
+      if (raw_stm_state == 1) { continue; }  // nothing to pass yet
+    }
+    const size_t n = to - from;
     const int room = Serial.availableForWrite();
-    const size_t w = room <= 0 ? 0 : Serial.write(b, (size_t)room < k ? (size_t)room : k);
+    const size_t w = room <= 0 ? 0 : Serial.write(b + from, (size_t)room < n ? (size_t)room : n);
     raw_out += w;
-    raw_drop += k - w;
+    raw_drop += n - w;
+    if (raw_stm && raw_end_pkt) { rawStop(); return; }
   }
+  // An Rx STM32 stream with no byte for 500 ms after its start: over (interface step 5)
+  if (raw_stm && raw_stm_state >= 1 && millis() - raw_last_rx_ms > 500) rawStop();
 }
 
 void stmRawService(){
@@ -2008,6 +2105,8 @@ void stmRawCommand(const char* arg){
   } else if (!strcmp(arg, "iaphold")) {
     if (stm_link_ver == 2 && stm_cal_phase == CAL_IDLE) { stm_cal_then_hold = true; stmCalStart(CAL_READ); }  // copy first
     else { if (stm_cal_valid) stmCalSetPending(true); stmIapHoldSet(); }
+  } else if (!strncmp(arg, "raw ", 4)) {
+    stmRawStreamCommand(arg + 4);
   } else if (!strncmp(arg, "restart", 7)) {
     stmRestartCommand(arg + 7);
   } else if (!strcmp(arg, "cal")) {
@@ -4131,6 +4230,7 @@ void espPacketFifo_sendCmd(){
     }
     stmCalOnAnswer(stmAns);
     stmRestartOnAnswer(stmAns);
+    stmRawStreamOnAnswer(stmAns);
     dspOnAnswer(stmAns);
     if (stmAns.present && (stmAns.cid & 0x7F) == 20 && stmAns.index < WFRX_BINS && (stmAns.status == RSP_OK || stmAns.status == RSP_OK_CLAMPED))
       memcpy(&stm_bin_hz[stmAns.index], &stmAns.value, 4);  // the bin frequency in effect, for STMCOIL8
@@ -4145,6 +4245,7 @@ void espPacketFifo_sendCmd(){
     stmCalService(now);
     stmRestartService(now);
     if (stm_rs_phase == RS_RESTART) return;  // the Rx STM32 restarts after this frame: nothing more to it
+    if (raw_mode) return;  // a raw stream started on this answer: any byte to the Rx STM32 would stop it
   } else {
     stmLink.onPacket(now, stmPacket.items.status_bits, stmPacket.items.rid, (uint32_t)stmPacket.items.response.int32);
   }

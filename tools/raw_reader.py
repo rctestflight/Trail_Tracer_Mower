@@ -1,4 +1,4 @@
-r"""Reader for the ESP32 raw stream tests (firmware 0.5.73, USB commands "raw usb", "raw pass", "raw loop").
+r"""Reader for the ESP32 raw stream tests (firmware 0.5.73, USB commands "raw usb", "raw pass", "raw loop"; 0.5.74 "stm raw").
 
   python raw_reader.py <port> "<raw command>" [--out capture.bin]
 
@@ -41,7 +41,7 @@ def main():
                         print(buf[i:j].decode(errors="replace"))
                         start = j + 1
                         last_n, last_t = len(buf), time.time()
-                elif b"RAW usage" in buf or b"RAW refused" in buf:
+                elif b"usage" in buf or b"refused" in buf:
                     print(buf.decode(errors="replace").strip())
                     return 1
             else:
@@ -57,6 +57,11 @@ def main():
             return 1
         k = buf.find(b"RAW end", start)
         data = bytes(buf[start:k if k >= 0 else len(buf)])
+        m = data.rfind(b"\nRAW stm ")  # stm raw: the packet count line before RAW end
+        stm_line = ""
+        if m >= 0:
+            stm_line = data[m + 1:].split(b"\n")[0].decode(errors="replace")
+            data = data[:m]
         if data.endswith(b"\n"):
             data = data[:-1]
         end_line = buf[k:buf.find(b"\n", k)].decode(errors="replace") if k >= 0 else "(no RAW end line)"
@@ -77,6 +82,8 @@ def main():
                 missing += seq - prev - 1 if seq > prev else 1
             prev = seq
         print(f"RAWU blocks {n_blocks}, bad {bad}, missing {missing}, partial tail {len(data) % 512} B")
+    if stm_line:
+        print(stm_line)
     print(end_line)
     return 0
 
