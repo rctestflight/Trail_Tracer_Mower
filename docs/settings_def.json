@@ -1,46 +1,21 @@
 {
-  "version": 6,
-  "about": "Rover settings definition, owned by Trail_Tracer_Mower (docs/settings_def.json). The PC uses an unchanged copy. Words from the PC draft (Trail-Tracer-PC-Telemetry 22deeea); values checked against src/usb_msc_fat.cpp (defaults, limits) and src/main.cpp (STATIONARY_KEYS). Format: Trail-Tracer-PC-Telemetry docs/control_api.md, section 3. 'list' ends 'end <n> def 6'. Version 6: groups in user order ('groups'), a 'label' per setting, DSP settings (dsp_*) with read-only values in effect (dsp_*_eff, 'readonly': true; 'effect' names the _eff key of a setting).",
+  "version": 7,
+  "about": "Rover settings definition, owned by Trail_Tracer_Mower (docs/settings_def.json). The PC uses an unchanged copy. Words from the PC draft (Trail-Tracer-PC-Telemetry 22deeea); values checked against src/usb_msc_fat.cpp (defaults, limits) and src/main.cpp (STATIONARY_KEYS). Format: Trail-Tracer-PC-Telemetry docs/control_api.md, section 3. 'list' ends 'end <n> def 6'. Version 6: groups in user order ('groups'), a 'label' per setting, DSP settings (dsp_*) with read-only values in effect (dsp_*_eff, 'readonly': true; 'effect' names the _eff key of a setting). Version 7 (firmware 0.5.69): 'string' and 'choice' types, 'max_len', 'pattern' and 'dec'; the servo outputs by function (steer_*, throttle_*) replace PWM_OUT_n_*; drive_output, vehicle_name, steer_lpf_hz; CHARGE_MAX_SECONDS is the charge time.",
   "groups": [
     {
       "name": "Vehicle",
       "advanced": false,
-      "description": "Vehicle number, battery and the motion sensor"
+      "description": "Name, battery, drive output and the motion sensor"
     },
     {
-      "name": "Wire and sensors",
-      "advanced": false,
-      "description": "Which wire signal the vehicle follows, and with which sensors"
-    },
-    {
-      "name": "Speed",
+      "name": "Throttle",
       "advanced": false,
       "description": "Throttle for wire following and for the slow approach"
     },
     {
-      "name": "Steering",
+      "name": "Steering PID",
       "advanced": false,
-      "description": "How hard the vehicle steers back to the wire"
-    },
-    {
-      "name": "Steering: gyro",
-      "advanced": false,
-      "description": "Turn-rate control with the gyro"
-    },
-    {
-      "name": "Beacons",
-      "advanced": false,
-      "description": "Beacon detection and the slow approach after a beacon"
-    },
-    {
-      "name": "Stuck detection",
-      "advanced": false,
-      "description": "When the vehicle counts as stuck"
-    },
-    {
-      "name": "Swerve",
-      "advanced": false,
-      "description": "Side-to-side swerve while the vehicle follows the wire"
+      "description": "How hard the vehicle steers back to the wire, and the filter on its output"
     },
     {
       "name": "Charging",
@@ -51,6 +26,36 @@
       "name": "Rover mode",
       "advanced": false,
       "description": "The autopilot: bounce inside the wire loop, go home to charge"
+    },
+    {
+      "name": "Beacons",
+      "advanced": false,
+      "description": "Beacon detection and the slow approach after a beacon"
+    },
+    {
+      "name": "Swerve",
+      "advanced": false,
+      "description": "Side-to-side swerve while the vehicle follows the wire"
+    },
+    {
+      "name": "Stuck detection",
+      "advanced": false,
+      "description": "When the vehicle counts as stuck"
+    },
+    {
+      "name": "Wire and sensors",
+      "advanced": false,
+      "description": "Which wire signal the vehicle follows, and with which sensors"
+    },
+    {
+      "name": "Gyro PID",
+      "advanced": true,
+      "description": "Turn-rate control with the gyro (motor controller drive)"
+    },
+    {
+      "name": "Servo outputs",
+      "advanced": true,
+      "description": "Which servo output each function uses, with its centre and end points"
     },
     {
       "name": "Radio and log",
@@ -66,14 +71,19 @@
       "name": "Signal processing: advanced",
       "advanced": true,
       "description": "Sensor board details; change them only for a test"
-    },
-    {
-      "name": "Servo outputs",
-      "advanced": true,
-      "description": "Pulse limits of the four servo outputs"
     }
   ],
   "settings": {
+    "vehicle_name": {
+      "type": "string",
+      "max_len": 16,
+      "pattern": "^[A-Za-z0-9 _-]{1,16}$",
+      "default": "Vehicle",
+      "live": true,
+      "group": "Vehicle",
+      "description": "Vehicle name on the telemetry screen: letters, digits, space, _ and -; 16 at most",
+      "label": "Vehicle name"
+    },
     "vehicleID": {
       "type": "int",
       "min": 0,
@@ -81,13 +91,27 @@
       "default": 1,
       "live": true,
       "group": "Vehicle",
-      "description": "Vehicle number on the screen",
-      "label": "Vehicle number"
+      "description": "Vehicle number in the radio status text (V1.0 compatible); the telemetry screen shows the name",
+      "label": "Vehicle number",
+      "advanced": true
+    },
+    "drive_output": {
+      "type": "choice",
+      "values": [
+        "auto",
+        "servo",
+        "can"
+      ],
+      "default": "auto",
+      "live": false,
+      "group": "Vehicle",
+      "description": "How the vehicle drives: servo = steering and throttle servos (as V1.0); can = motor controllers over CAN (mower); auto = can once a motor controller answers, else servo",
+      "label": "Drive output"
     },
     "battery_cells": {
       "type": "int",
       "min": 1,
-      "max": 12,
+      "max": 4,
       "default": 2,
       "live": true,
       "group": "Vehicle",
@@ -130,23 +154,23 @@
     },
     "CRUISE_THROTTLE": {
       "type": "int",
-      "unit": "\u00b5s",
+      "unit": "µs",
       "min": 1000,
       "max": 2000,
       "default": 1650,
       "live": true,
-      "group": "Speed",
+      "group": "Throttle",
       "description": "Throttle pulse when the vehicle follows the wire",
       "label": "Cruise throttle"
     },
     "CREEP_THROTTLE": {
       "type": "int",
-      "unit": "\u00b5s",
+      "unit": "µs",
       "min": 1000,
       "max": 2000,
       "default": 1620,
       "live": true,
-      "group": "Speed",
+      "group": "Throttle",
       "description": "Throttle pulse for the slow approach",
       "label": "Slow throttle"
     },
@@ -154,7 +178,7 @@
       "type": "bool",
       "default": false,
       "live": false,
-      "group": "Steering",
+      "group": "Steering PID",
       "description": "Steering direction: true reverses it",
       "label": "Reverse steering"
     },
@@ -163,60 +187,77 @@
       "min": 0,
       "default": 3.0,
       "live": true,
-      "group": "Steering",
+      "group": "Steering PID",
       "description": "Proportional part of the steering PID",
-      "label": "Steering gain (P)"
+      "label": "Steering gain (P)",
+      "dec": 3
     },
     "ki": {
       "type": "float",
       "min": 0,
       "default": 0.0,
       "live": true,
-      "group": "Steering",
+      "group": "Steering PID",
       "description": "Integral part of the steering PID",
-      "label": "Steering gain (I)"
+      "label": "Steering gain (I)",
+      "dec": 3
     },
     "kd": {
       "type": "float",
       "min": 0,
       "default": 0.0,
       "live": true,
-      "group": "Steering",
+      "group": "Steering PID",
       "description": "Derivative part of the steering PID",
       "label": "Steering gain (D)"
+    },
+    "steer_lpf_hz": {
+      "type": "float",
+      "unit": "Hz",
+      "min": 0,
+      "max": 50,
+      "dec": 1,
+      "default": 5.0,
+      "live": true,
+      "group": "Steering PID",
+      "description": "Low-pass filter on the steering PID output (2nd order), against jitter from the D term. 0 = off",
+      "label": "Steering output filter"
     },
     "steering_rate_kp": {
       "type": "float",
       "min": 0,
       "default": 0.02,
       "live": true,
-      "group": "Steering: gyro",
+      "group": "Gyro PID",
       "description": "Proportional part of the yaw-rate steering PID (gyro feedback; output -1..1)",
-      "label": "Gyro steering gain (P)"
+      "label": "Gyro steering gain (P)",
+      "dec": 3
     },
     "steering_rate_ki": {
       "type": "float",
       "min": 0,
       "default": 0.01,
       "live": true,
-      "group": "Steering: gyro",
+      "group": "Gyro PID",
       "description": "Integral part of the yaw-rate steering PID",
-      "label": "Gyro steering gain (I)"
+      "label": "Gyro steering gain (I)",
+      "dec": 3
     },
     "steering_rate_kd": {
       "type": "float",
       "min": 0,
       "default": 0.0,
       "live": true,
-      "group": "Steering: gyro",
+      "group": "Gyro PID",
       "description": "Derivative part of the yaw-rate steering PID",
-      "label": "Gyro steering gain (D)"
+      "label": "Gyro steering gain (D)",
+      "dec": 3
     },
     "steering_rate_pid_direction": {
       "type": "bool",
       "default": false,
       "live": true,
-      "group": "Steering: gyro",
+      "group": "Gyro PID",
       "description": "Yaw-rate PID direction: true reverses it",
       "label": "Reverse gyro steering"
     },
@@ -226,7 +267,7 @@
       "max": 500,
       "default": 90.0,
       "live": true,
-      "group": "Steering: gyro",
+      "group": "Gyro PID",
       "description": "Yaw rate in deg/s at full steering command",
       "label": "Turn rate at full steer"
     },
@@ -336,13 +377,13 @@
     "CHARGE_MAX_SECONDS": {
       "type": "int",
       "unit": "s",
-      "min": 5,
+      "min": 10,
       "default": 180,
       "live": false,
       "group": "Charging",
-      "description": "Half the longest charge: the STM32 stops a charge after 2 x this value (at most 3600 s)",
-      "max": 1800,
-      "label": "Charge time limit (half)"
+      "description": "Longest charge: the sensor board stops a charge after this time",
+      "max": 3600,
+      "label": "Charge time limit"
     },
     "rover_enabled": {
       "type": "bool",
@@ -384,7 +425,7 @@
     },
     "rover_full_yaw_rate_dps": {
       "type": "float",
-      "unit": "\u00b0/s",
+      "unit": "°/s",
       "min": 10,
       "default": 115,
       "live": false,
@@ -818,137 +859,99 @@
       "label": "Position slots (bit mask) (in effect)",
       "description": "The value that the sensor board uses now (its answer). Empty until the board answers; it can differ from the setting when the board rounds or limits it."
     },
-    "PWM_OUT_1_DEFAULT": {
+    "steer_output": {
       "type": "int",
-      "unit": "\u00b5s",
+      "values": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "default": 1,
+      "live": false,
+      "group": "Servo outputs",
+      "description": "Servo output of the steering",
+      "label": "Steering output"
+    },
+    "steer_center_us": {
+      "type": "int",
+      "unit": "µs",
       "min": 1000,
       "max": 2000,
       "default": 1500,
       "live": false,
       "group": "Servo outputs",
-      "description": "Centre pulse of output 1",
-      "label": "Output 1 centre pulse"
+      "description": "Steering centre pulse (also the centre of the motor controller steering)",
+      "label": "Steering centre"
     },
-    "PWM_OUT_1_MIN": {
+    "steer_min_us": {
       "type": "int",
-      "unit": "\u00b5s",
-      "min": 1000,
-      "max": 2000,
+      "unit": "µs",
+      "min": 800,
+      "max": 2200,
       "default": 1000,
       "live": false,
       "group": "Servo outputs",
-      "description": "Lowest pulse of output 1",
-      "label": "Output 1 lowest pulse"
+      "description": "Steering end point, low pulse",
+      "label": "Steering end, low"
     },
-    "PWM_OUT_1_MAX": {
+    "steer_max_us": {
       "type": "int",
-      "unit": "\u00b5s",
-      "min": 1000,
-      "max": 2000,
+      "unit": "µs",
+      "min": 800,
+      "max": 2200,
       "default": 2000,
       "live": false,
       "group": "Servo outputs",
-      "description": "Highest pulse of output 1",
-      "label": "Output 1 highest pulse"
+      "description": "Steering end point, high pulse",
+      "label": "Steering end, high"
     },
-    "PWM_OUT_2_DEFAULT": {
+    "throttle_output": {
       "type": "int",
-      "unit": "\u00b5s",
+      "values": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "default": 2,
+      "live": false,
+      "group": "Servo outputs",
+      "description": "Servo output of the throttle",
+      "label": "Throttle output"
+    },
+    "throttle_center_us": {
+      "type": "int",
+      "unit": "µs",
       "min": 1000,
       "max": 2000,
       "default": 1500,
       "live": false,
       "group": "Servo outputs",
-      "description": "Centre pulse of output 2",
-      "label": "Output 2 centre pulse"
+      "description": "Throttle neutral pulse",
+      "label": "Throttle neutral"
     },
-    "PWM_OUT_2_MIN": {
+    "throttle_min_us": {
       "type": "int",
-      "unit": "\u00b5s",
-      "min": 1000,
-      "max": 2000,
+      "unit": "µs",
+      "min": 800,
+      "max": 2200,
       "default": 1000,
       "live": false,
       "group": "Servo outputs",
-      "description": "Lowest pulse of output 2",
-      "label": "Output 2 lowest pulse"
+      "description": "Throttle end point, low pulse (full reverse or brake)",
+      "label": "Throttle end, low"
     },
-    "PWM_OUT_2_MAX": {
+    "throttle_max_us": {
       "type": "int",
-      "unit": "\u00b5s",
-      "min": 1000,
-      "max": 2000,
+      "unit": "µs",
+      "min": 800,
+      "max": 2200,
       "default": 2000,
       "live": false,
       "group": "Servo outputs",
-      "description": "Highest pulse of output 2",
-      "label": "Output 2 highest pulse"
-    },
-    "PWM_OUT_3_DEFAULT": {
-      "type": "int",
-      "unit": "\u00b5s",
-      "min": 1000,
-      "max": 2000,
-      "default": 1500,
-      "live": false,
-      "group": "Servo outputs",
-      "description": "Centre pulse of output 3",
-      "label": "Output 3 centre pulse"
-    },
-    "PWM_OUT_3_MIN": {
-      "type": "int",
-      "unit": "\u00b5s",
-      "min": 1000,
-      "max": 2000,
-      "default": 1000,
-      "live": false,
-      "group": "Servo outputs",
-      "description": "Lowest pulse of output 3",
-      "label": "Output 3 lowest pulse"
-    },
-    "PWM_OUT_3_MAX": {
-      "type": "int",
-      "unit": "\u00b5s",
-      "min": 1000,
-      "max": 2000,
-      "default": 2000,
-      "live": false,
-      "group": "Servo outputs",
-      "description": "Highest pulse of output 3",
-      "label": "Output 3 highest pulse"
-    },
-    "PWM_OUT_4_DEFAULT": {
-      "type": "int",
-      "unit": "\u00b5s",
-      "min": 1000,
-      "max": 2000,
-      "default": 1500,
-      "live": false,
-      "group": "Servo outputs",
-      "description": "Centre pulse of output 4",
-      "label": "Output 4 centre pulse"
-    },
-    "PWM_OUT_4_MIN": {
-      "type": "int",
-      "unit": "\u00b5s",
-      "min": 1000,
-      "max": 2000,
-      "default": 1000,
-      "live": false,
-      "group": "Servo outputs",
-      "description": "Lowest pulse of output 4",
-      "label": "Output 4 lowest pulse"
-    },
-    "PWM_OUT_4_MAX": {
-      "type": "int",
-      "unit": "\u00b5s",
-      "min": 1000,
-      "max": 2000,
-      "default": 2000,
-      "live": false,
-      "group": "Servo outputs",
-      "description": "Highest pulse of output 4",
-      "label": "Output 4 highest pulse"
+      "description": "Throttle end point, high pulse (full forward)",
+      "label": "Throttle end, high"
     }
   }
 }

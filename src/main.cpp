@@ -195,9 +195,9 @@ void usbLoadService(){
 
 static const char* TAG = "wfrx";
 #ifdef BENCH_FAKE_IMU
-#define ROVER_FW_VERSION "0.5.68+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.5.69+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #else
-#define ROVER_FW_VERSION "0.5.68"  // 0.5.68: the 8-bin coil record (0x2E) goes through the log anti-alias filter at telemetry_bins_hz (default 5); 0.5.67: USB driver copy: TX FIFO register of the FIFO in use (DIEPTXF[TxFNum-1]; the CDC output FIFO pointed outside the FIFO RAM: output stops at Monitor Rx start and mid-run), IN endpoints disabled through the core at a bus reset and a close; a guard reconnect ejects the drive first; usbregs with FIFO registers and driver counters, the stop record printed 3 times; 0.5.66: telemetry body 0x2E, the coil magnitudes of all 8 bins of both sensors, 5 a second; 0.5.65: "stm restart" (Rx STM32 command 41, app 2.0.39+): Rx STM32 update with no power cycle; 0.5.64: USB output fix from the bench line (0.5.60-dev10 to dev13): project copy of the TinyUSB ESP32-S2 device driver (lib/tinyusb_dcd_fix) with no zero-length packet on data IN endpoints; USB register record at each output stop and over a restart (monitor). 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
+#define ROVER_FW_VERSION "0.5.69"  // 0.5.69: settings from the operator review: drive_output (servos as V1.0, or CAN; auto), servo map by function, vehicle_name, 4S limit, steer_lpf_hz, charge time as it is; 0.5.68: the 8-bin coil record (0x2E) goes through the log anti-alias filter at telemetry_bins_hz (default 5); 0.5.67: USB driver copy: TX FIFO register of the FIFO in use (DIEPTXF[TxFNum-1]; the CDC output FIFO pointed outside the FIFO RAM: output stops at Monitor Rx start and mid-run), IN endpoints disabled through the core at a bus reset and a close; a guard reconnect ejects the drive first; usbregs with FIFO registers and driver counters, the stop record printed 3 times; 0.5.66: telemetry body 0x2E, the coil magnitudes of all 8 bins of both sensors, 5 a second; 0.5.65: "stm restart" (Rx STM32 command 41, app 2.0.39+): Rx STM32 update with no power cycle; 0.5.64: USB output fix from the bench line (0.5.60-dev10 to dev13): project copy of the TinyUSB ESP32-S2 device driver (lib/tinyusb_dcd_fix) with no zero-length packet on data IN endpoints; USB register record at each output stop and over a restart (monitor). 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
 
@@ -254,6 +254,10 @@ int PWM_OUT_3_MAX; // Maximum PWM value for output 3 (typically 2000)
 int PWM_OUT_4_DEFAULT;
 int PWM_OUT_4_MIN;
 int PWM_OUT_4_MAX;
+// Drive output (0.5.69, config.json drive_output): 0 auto, 1 servos, 2 motor controllers over CAN; the servo
+// output channel of each function (steer_output, throttle_output). Outputs with no function hold 1500 us.
+uint8_t drive_output = 0, steer_output = 1, throttle_output = 2;
+void servoIdle();  // every servo output to its function's centre (1500 us with no function)
 double kp; // Steering controller proportional gain (higher number = more aggressive steering)
 double ki; // Steering controller integral gain (usually set to 0 or a small value, helps eliminate steady-state error but can cause instability if too high)
 double kd; // Steering controller derivative gain (usually never needed)
@@ -891,7 +895,7 @@ volatile uint32_t sim_dropped_tx = 0, sim_dropped_rx = 0;
 #define ESPNOW_TYPE_CMD     0x10
 #define ESPNOW_TYPE_ACK     0x11
 #define ESPNOW_TYPE_STOP    0x12  // u8 type, u16 seq, u32 fleet key: stop at once (docs/espnow_protocol.md)
-#define SETTINGS_DEF_VERSION 6  // docs/settings_def.json version (6: DSP settings dsp_*, groups for users)
+#define SETTINGS_DEF_VERSION 7  // docs/settings_def.json version (6: DSP settings dsp_*, groups for users; 7: servo map, drive_output, vehicle_name, steer_lpf_hz)
 #define ESPNOW_TYPE_RESTART 0x7F
 #define ESPNOW_TYPE_MON     0x44  // monitor broadcast, once a second: u8 type, u8 version, u32 monitor ms, u64 PC unix ms (0 = unknown), u8 n
 // The last MON frame (set in the Wi-Fi task, read in loop()).
@@ -1181,10 +1185,7 @@ void restartApp(){
 bool vehicleStationary();
 bool otaMayStart(){
   if (!vehicleStationary()) return false;
-  writePwmMicros(1, PWM_OUT_1_DEFAULT);
-  writePwmMicros(2, PWM_OUT_2_DEFAULT);
-  writePwmMicros(3, PWM_OUT_3_DEFAULT);
-  writePwmMicros(4, PWM_OUT_4_DEFAULT);
+  servoIdle();
   if (!update_mode) {
     usbOut.println("UPDATE mode on: USB and the update only; loop watchdog paused");
     disableLoopWDT();  // the image check at "ota end" can run past 5 s (bench test)
@@ -1280,7 +1281,8 @@ void espnowCommands(){
 // docs/rover_guide.md, "Settings", has the same list.
 static const char* const STATIONARY_KEYS[] = {
   "rx_channel", "enable_sensor_2", "pid_direction",
-  "PWM_OUT_1_DEFAULT", "PWM_OUT_1_MIN", "PWM_OUT_1_MAX", "PWM_OUT_2_DEFAULT", "PWM_OUT_2_MIN", "PWM_OUT_2_MAX",
+  "drive_output", "steer_output", "throttle_output", "steer_center_us", "steer_min_us", "steer_max_us",
+  "throttle_center_us", "throttle_min_us", "throttle_max_us",
   "PWM_OUT_3_DEFAULT", "PWM_OUT_3_MIN", "PWM_OUT_3_MAX", "PWM_OUT_4_DEFAULT", "PWM_OUT_4_MIN", "PWM_OUT_4_MAX",
   "CHARGE_VBATT_STOP", "CHARGE_MAX_CURRENT", "CHARGE_MAX_SECONDS", "BTxFollowChannel",
   "espnow_enabled", "telemetry_enabled",
@@ -2687,6 +2689,34 @@ void odrive_outputUpdate(bool frame_now) {
 }
 
 // Nonblocking alarm; start immediately on a fault and repeat every two seconds.
+// Drive output (0.5.69). Servos: the steering and throttle pulses on their outputs, as V1.0 does; stopped:
+// both centres. Motor controllers over CAN: as before (odrive_setDriveOutput). drive_output auto: CAN once a
+// motor controller heartbeat arrived in this boot, servos until then.
+bool driveUsesCan(){
+  if (drive_output == 1) return false;
+  if (drive_output == 2) return true;
+  static bool seen = false;
+  for (int n = 0; n < ODRIVE_NODE_COUNT && !seen; n++) seen = odrive_heartbeat_received[n];
+  return seen;
+}
+void servoIdle(){
+  for (uint8_t ch = 1; ch <= 4; ch++)
+    writePwmMicros(ch, ch == steer_output ? PWM_OUT_1_DEFAULT : ch == throttle_output ? PWM_OUT_2_DEFAULT : 1500);
+}
+void driveOutput(double throttle_us, double steering_us, bool enabled){
+  if (driveUsesCan()) {
+    odrive_setDriveOutput(throttle_us, steering_us, enabled);
+    servoIdle();
+    return;
+  }
+  odrive_setDriveOutput(PWM_OUT_2_DEFAULT, PWM_OUT_1_DEFAULT, false);  // motor controllers idle
+  servoIdle();
+  if (enabled) {
+    writePwmMicros(steer_output, (uint32_t)lround(steering_us));
+    writePwmMicros(throttle_output, (uint32_t)lround(throttle_us));
+  }
+}
+
 void odrive_updateBuzzer() {
   static bool fault_was_present = false;
   static uint32_t pulse_started_ms = 0;
@@ -2979,10 +3009,7 @@ void setup() {
   ledcAttachPin(PWM_OUT_2, 2);
   ledcAttachPin(PWM_OUT_3, 3);
   ledcAttachPin(PWM_OUT_4, 4);
-  writePwmMicros(1, PWM_OUT_1_DEFAULT);
-  writePwmMicros(2, PWM_OUT_2_DEFAULT);
-  writePwmMicros(3, PWM_OUT_3_DEFAULT);
-  writePwmMicros(4, PWM_OUT_4_DEFAULT);
+  servoIdle();
 
   TRACE(5);
   // MPU6050: the main-branch serviceMpu() (top of this file) owns it: init, calibration, one sample per
@@ -3006,8 +3033,7 @@ void setup() {
   steeringPID.SetMode(AUTOMATIC);  // Turn on the control loop
 
   // PID low pass setup
-  low_pass_alpha = pow(2.71828183, (-1.0 / (100 * 1/(low_pass_cutoff * 6.2831))));
-  low_pass_beta = 1 - low_pass_alpha;
+  // PID low pass: alpha from the frame period, in loop() (0.5.69; was a fixed 100 Hz here)
 
   // Attach falling edge interrupt to STM_nDATA_READY pin
   TRACE(8);
@@ -3024,7 +3050,7 @@ void setup() {
   // Set up charge port
   espPacketFifo_addCmdFloat(6 | 0x80000000, CHARGE_VBATT_STOP);  // Set voltage stop
   espPacketFifo_addCmdFloat(7 | 0x80000000, CHARGE_MAX_CURRENT);  // Set overcurrent
-  espPacketFifo_addCmdInt32(8 | 0x80000000, (CHARGE_MAX_SECONDS * 2));  // Set charge time limit
+  espPacketFifo_addCmdInt32(8 | 0x80000000, CHARGE_MAX_SECONDS);  // Set charge time limit, s (0.5.69: as it is)
 
   //RX channel setup
   espPacketFifo_addCmdInt32(1 | 0x80000000, (rx_channel - 1));  // write Rx channel
@@ -3180,6 +3206,10 @@ void loop() {
         PWM_OUT_1_MIN - PWM_OUT_1_DEFAULT, PWM_OUT_1_MAX - PWM_OUT_1_DEFAULT, stmFramePeriodS());  // was steeringPID.Compute()
 
     // apply low pass to PID output (mostly to reduce jitter due to kd term)
+    if(low_pass_compute && low_pass_enable){  // 0.5.69: steer_lpf_hz at the real frame period
+      low_pass_alpha = expf(-6.2831853f * low_pass_cutoff * (float)stmFramePeriodS());
+      low_pass_beta = 1 - low_pass_alpha;
+    }
     if(low_pass_compute && low_pass_enable && (!low_pass_first_cycle)){
       pid_output = pid_output * low_pass_beta + low_pass_last_val_1 * low_pass_alpha;  // Compute first low-pass
       low_pass_last_val_1 = pid_output;  // save intermediate value
@@ -3334,16 +3364,14 @@ void loop() {
       || WFRX_STATUS_GET_BIT(stmPacket.items.status_bits, WFRX_STATUS_VDD_FAULT)  // STM32 VDD fault bit
       || (stmPacket.items.temperature > 100)  // STM32 internal temp in °C
       ){
-        odrive_setDriveOutput(PWM_OUT_2_DEFAULT, PWM_OUT_1_DEFAULT, false);
-        writePwmMicros(3, PWM_OUT_3_DEFAULT);  // write default value to output 3
-        writePwmMicros(4, PWM_OUT_4_DEFAULT);
+        driveOutput(PWM_OUT_2_DEFAULT, PWM_OUT_1_DEFAULT, false);
 
      }else if(((drive_mode_status == 1 || drive_mode_status == 2)
           && !rover_active && stuckDetector.GetStatus())  // Stop wire-follow modes when stuck (the rover is off the wire most of the time).
           || (charge_status > 0)  // vehicle charge in progress
           || (rover_active && roverAp.state == rover::HALTED)  // rover lost the wire too long
           ){
-        odrive_setDriveOutput(PWM_OUT_2_DEFAULT, PWM_OUT_1_DEFAULT, false);
+        driveOutput(PWM_OUT_2_DEFAULT, PWM_OUT_1_DEFAULT, false);
         sine_wave_force_disabled = true; sine_wave_blend = 0.0; target_x_pos = 0.0;
         vehicleStatus = 2; //set status to 'charging' for telemetry purposes
         if (charge_status == 0) { // If there is a fault other than charging
@@ -3351,7 +3379,7 @@ void loop() {
          }
 
      }else{
-       odrive_setDriveOutput(throttle, steering_output, true);
+       driveOutput(throttle, steering_output, true);
        sine_wave_force_disabled = false;
        vehicleStatus = 1; //set status to driving for telemetry purposes
      }
@@ -4299,6 +4327,16 @@ void applyDeviceConfig(const DeviceConfig& cfg)
   vehicleID           = cfg.vehicleID;
   rx_channel          = cfg.rx_channel;
 
+  // Drive output and the servo map (0.5.69)
+  drive_output        = cfg.drive_output;
+  steer_output        = cfg.steer_output;
+  throttle_output     = cfg.throttle_output;
+
+  // Steering PID low-pass (0.5.69 steer_lpf_hz; 0 = off)
+  if ((cfg.steer_lpf_hz > 0) != low_pass_enable) low_pass_first_cycle = true;
+  low_pass_enable     = cfg.steer_lpf_hz > 0;
+  low_pass_cutoff     = (float)cfg.steer_lpf_hz;
+
   // Drive parameters
   CRUISE_THROTTLE     = cfg.CRUISE_THROTTLE;
   CREEP_THROTTLE      = cfg.CREEP_THROTTLE;
@@ -4366,7 +4404,7 @@ void applyDeviceConfig(const DeviceConfig& cfg)
   if (stm_first || CHARGE_VBATT_STOP != last_vstop || CHARGE_MAX_CURRENT != last_imax || CHARGE_MAX_SECONDS != last_tmax) {
     espPacketFifo_addCmdFloat(6 | 0x80000000, (float)CHARGE_VBATT_STOP);
     espPacketFifo_addCmdFloat(7 | 0x80000000, (float)CHARGE_MAX_CURRENT);
-    espPacketFifo_addCmdInt32(8 | 0x80000000, CHARGE_MAX_SECONDS * 2);  // the STM32 limit is 2 x the setting, as on shipped units
+    espPacketFifo_addCmdInt32(8 | 0x80000000, CHARGE_MAX_SECONDS);  // s; up to 0.5.68 2 x the setting
   }
 
   // RX channel
@@ -4875,6 +4913,16 @@ void telemetryService(){
   if (millis() - telem_status_ms >= 1000) {
     telem_status_ms = millis();
     telemetryStatus();
+  }
+  // The vehicle name (body 0x31, 0.5.69): each 10 s, and at once after a change
+  static uint32_t name_ms = 0;
+  static char name_sent[17] = "";
+  if (millis() - name_ms >= 10000 || strcmp(name_sent, g_deviceConfig.vehicle_name)) {
+    name_ms = millis();
+    strcpy(name_sent, g_deviceConfig.vehicle_name);
+    uint8_t body[3 + rec::VEHICLE_NAME_MAX];
+    const int n = rec::packName(body, vehicleID, g_deviceConfig.vehicle_name);
+    telemlog_add(TELEMLOG_SLOW, name_ms, body, (size_t)n);
   }
   telemetryDumpStep();
 }

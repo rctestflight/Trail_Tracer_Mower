@@ -24,6 +24,8 @@ B3_SAMPLES, B3_SAMPLES_IMU, B3_SAMPLES_DEC, B3_SAMPLES_IMU_DEC = 0x2A, 0x2B, 0x2
 # Firmware 0.5.66: coil magnitudes of all 8 bins, stream 0, one record each window (about 200 ms)
 B_BINS = 0x2E
 NO_DATA24 = -8388608  # 0x800000: the sensor is on no STM32 lane, or the bin is off
+# Firmware 0.5.69: the vehicle name, stream 1, each 10 s and after a change
+B_NAME = 0x31
 NO_SEQ = 0xFFFFFFFF
 AP_STATES = ["roam", "seek", "acquire", "follow", "depart", "halted"]
 EVENTS = {1: "boot", 2: "mode", 3: "ap_state", 4: "stuck", 5: "charge_step", 6: "odrive_error",
@@ -124,6 +126,12 @@ def decode_bins(b):
     return {"filter_n": n, "period_ms": per, "hz": hz, "coils": [vals[4 * k:4 * k + 4] for k in range(8)]}
 
 
+def decode_name(b):
+    """Body 0x31: vehicle number and vehicle name."""
+    n = b[2]
+    return {"vehicle_id": b[1], "name": b[3:3 + n].decode("ascii", "replace")}
+
+
 def decode_body(body, ms):
     if not body:
         return {"body": None}
@@ -141,6 +149,8 @@ def decode_body(body, ms):
         return {"body": "status", **decode_status(body)}
     if t == B_EVENT:
         return {"body": "event", **decode_event(body)}
+    if t == B_NAME and len(body) >= 3:
+        return {"body": "name", **decode_name(body)}
     if t == B_BINS and len(body) >= 116:
         return {"body": "bins", **decode_bins(body)}
     return {"body": "unknown 0x%02x" % t}

@@ -248,6 +248,17 @@ Size: 14 + 116 = 130 bytes a frame; at 5 Hz about 5 kbit/s.
 | 72 | PC time at this record, milliseconds part | u16 | ms |
 | 74 | firmware version major, minor, patch (0.5.24 and later) | 3 x u8 | for example 0, 5, 24 |
 
+### Body 0x31: vehicle name (stream 1)
+
+From firmware 0.5.69: every 10 s, and at once after a change of the setting `vehicle_name`.
+
+| Offset | Field | Type | Unit |
+|---|---|---|---|
+| 0 | body type 0x31 | u8 | |
+| 1 | vehicle number (`vehicleID`) | u8 | |
+| 2 | name length n | u8 | 16 at most |
+| 3 | name | n bytes | ASCII: A-Z, a-z, 0-9, space, `_`, `-` |
+
 ### Body 0x30: event (stream 1)
 
 u8 body type 0x30, u16 code, i32 a, i32 b, then ASCII text to the end of the frame (no terminator).
