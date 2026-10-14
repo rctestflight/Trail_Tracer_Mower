@@ -17,6 +17,7 @@
 #include "rt_prof.h"       // real-time path timing: STM32 frame -> control -> CAN (lib/rt_prof; bench "rt")
 #include "frame_pid.h"     // the steering PIDs stepped once per STM32 frame (lib/frame_pid)
 #include <driver/twai.h>
+#include <driver/uart.h>  // raw stream test: UART loopback (uart_set_loop_back)
 
 MPU6050 mpu(Wire);
 bool mpu_ok = false;  // false on a board with no gyro; the gyro is logged only (the autopilot does not use it)
@@ -197,9 +198,9 @@ void usbLoadService(){
 
 static const char* TAG = "wfrx";
 #ifdef BENCH_FAKE_IMU
-#define ROVER_FW_VERSION "0.5.72+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.5.73b+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #else
-#define ROVER_FW_VERSION "0.5.72"  // 0.5.72: log sample coil values signed (were |v|); 0.5.71: radio_mode wifi: telemetry as UDP over a Wi-Fi network (lib/wifi_telem, the 2026-10-12 work, ported); 0.5.70: "set" takes text settings (vehicle_name, drive_output) as the rest of the line; 0.5.69: settings from the operator review: drive_output (servos as V1.0, or CAN; auto), servo map by function, vehicle_name, 4S limit, steer_lpf_hz, charge time as it is; 0.5.68: the 8-bin coil record (0x2E) goes through the log anti-alias filter at telemetry_bins_hz (default 5); 0.5.67: USB driver copy: TX FIFO register of the FIFO in use (DIEPTXF[TxFNum-1]; the CDC output FIFO pointed outside the FIFO RAM: output stops at Monitor Rx start and mid-run), IN endpoints disabled through the core at a bus reset and a close; a guard reconnect ejects the drive first; usbregs with FIFO registers and driver counters, the stop record printed 3 times; 0.5.66: telemetry body 0x2E, the coil magnitudes of all 8 bins of both sensors, 5 a second; 0.5.65: "stm restart" (Rx STM32 command 41, app 2.0.39+): Rx STM32 update with no power cycle; 0.5.64: USB output fix from the bench line (0.5.60-dev10 to dev13): project copy of the TinyUSB ESP32-S2 device driver (lib/tinyusb_dcd_fix) with no zero-length packet on data IN endpoints; USB register record at each output stop and over a restart (monitor). 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
+#define ROVER_FW_VERSION "0.5.73b"  // 0.5.73b: raw tests up to 5 Mbaud; 0.5.73: raw stream pass-through and rate tests (raw usb, raw pass, raw loop); 0.5.72: log sample coil values signed (were |v|); 0.5.71: radio_mode wifi: telemetry as UDP over a Wi-Fi network (lib/wifi_telem, the 2026-10-12 work, ported); 0.5.70: "set" takes text settings (vehicle_name, drive_output) as the rest of the line; 0.5.69: settings from the operator review: drive_output (servos as V1.0, or CAN; auto), servo map by function, vehicle_name, 4S limit, steer_lpf_hz, charge time as it is; 0.5.68: the 8-bin coil record (0x2E) goes through the log anti-alias filter at telemetry_bins_hz (default 5); 0.5.67: USB driver copy: TX FIFO register of the FIFO in use (DIEPTXF[TxFNum-1]; the CDC output FIFO pointed outside the FIFO RAM: output stops at Monitor Rx start and mid-run), IN endpoints disabled through the core at a bus reset and a close; a guard reconnect ejects the drive first; usbregs with FIFO registers and driver counters, the stop record printed 3 times; 0.5.66: telemetry body 0x2E, the coil magnitudes of all 8 bins of both sensors, 5 a second; 0.5.65: "stm restart" (Rx STM32 command 41, app 2.0.39+): Rx STM32 update with no power cycle; 0.5.64: USB output fix from the bench line (0.5.60-dev10 to dev13): project copy of the TinyUSB ESP32-S2 device driver (lib/tinyusb_dcd_fix) with no zero-length packet on data IN endpoints; USB register record at each output stop and over a restart (monitor). 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
 
@@ -1750,6 +1751,109 @@ void stmBridgeService(){
   serial1Drain();
   data_ready = 0;
 }
+// Raw stream (task STM-4, 0.5.73): the Rx STM32 UART passed through to USB, and the rate tests for it.
+//   raw usb <s>          USB output as fast as it goes: 512 B blocks "RAWU", u32 sequence, 504 pattern bytes
+//   raw pass <baud> <s>  the Rx STM32 UART at <baud> (up to 5000000, the ESP32-S2 UART maximum); every byte to USB unchanged
+//   raw loop <baud> <s>  the UART at <baud> in internal loopback: the ESP32 sends a counter pattern and checks it
+// Nothing else runs meanwhile (no Rx STM32 packets, no drive output, no radio, no log); stationary only. "RAW start"
+// before and "RAW end ..." after (bytes in and out, bytes dropped when USB could not take them, pattern errors, kB/s).
+// Then the UART goes back to 2 Mbaud and the Rx STM32 link starts again as after the USB bridge.
+uint8_t raw_mode = 0;  // 0 off, 1 usb, 2 pass, 3 loop
+uint32_t raw_baud = 0, raw_t0 = 0, raw_end_ms = 0, raw_seq = 0;
+uint64_t raw_in = 0, raw_out = 0, raw_drop = 0, raw_err = 0;
+uint8_t raw_expect = 0, raw_tx = 0;
+bool raw_first = true;
+void rawUartBegin(uint32_t baud, size_t rxbuf){
+  Serial1.end();
+  Serial1.setRxBufferSize(rxbuf);
+  Serial1.begin(baud);
+  Serial1.setRxFIFOFull(64);
+}
+void rawStop(){
+  const uint32_t ms = millis() - raw_t0;
+  const uint8_t mode = raw_mode;
+  raw_mode = 0;
+  if (mode == 3) uart_set_loop_back(UART_NUM_1, false);
+  if (mode >= 2) {
+    rawUartBegin(2000000, 2048);  // the Rx STM32 link as in setup()
+    stm_link_ver = 0;             // learn the link again, as after the USB bridge
+    stm_v2_cfg_sent = false;
+    stmDec.reset();
+    serial1Drain();
+    data_ready = 0;
+  }
+  const double s = ms / 1000.0;
+  usbOut.printf("\nRAW end mode=%s baud=%lu ms=%lu in=%llu out=%llu dropped=%llu errors=%llu kBps_in=%.1f kBps_out=%.1f heap=%lu\n",
+                mode == 1 ? "usb" : mode == 2 ? "pass" : "loop", (unsigned long)raw_baud, (unsigned long)ms,
+                (unsigned long long)raw_in, (unsigned long long)raw_out, (unsigned long long)raw_drop, (unsigned long long)raw_err,
+                s > 0 ? raw_in / 1000.0 / s : 0.0, s > 0 ? raw_out / 1000.0 / s : 0.0, (unsigned long)ESP.getFreeHeap());
+}
+void rawCommand(const char* arg){
+  char m[8] = {0};
+  unsigned long baud = 0, sec = 0;
+  const int n = sscanf(arg, "%7s %lu %lu", m, &baud, &sec);
+  const bool usb = !strcmp(m, "usb") && n >= 2, uart = (!strcmp(m, "pass") || !strcmp(m, "loop")) && n == 3;
+  if (usb) { sec = baud; baud = 0; }
+  if ((!usb && !uart) || sec < 1 || sec > 120 || (uart && (baud < 115200 || baud > 5000000))) {
+    usbOut.println("RAW usage: raw usb <s> | raw pass <baud> <s> | raw loop <baud> <s> (baud up to 5000000, s 1..120)");
+    return;
+  }
+  if (!vehicleStationary()) { usbOut.println("RAW refused: the vehicle moves"); return; }
+  raw_in = raw_out = raw_drop = raw_err = 0;
+  raw_seq = 0; raw_expect = 0; raw_tx = 0; raw_first = true;
+  raw_baud = baud;
+  usbOut.printf("RAW start mode=%s baud=%lu s=%lu\n", m, baud, sec);
+  usbOut.drain(300);  // the start line out before the binary data
+  if (uart) {
+    rawUartBegin(baud, 16384);  // 16 KB: 33 ms at 5 Mbaud
+    if (m[0] == 'l') uart_set_loop_back(UART_NUM_1, true);
+  }
+  raw_mode = usb ? 1 : m[0] == 'p' ? 2 : 3;
+  raw_t0 = millis();
+  raw_end_ms = raw_t0 + sec * 1000;
+}
+void rawService(){
+  if ((int32_t)(millis() - raw_end_ms) >= 0) { rawStop(); return; }
+  static uint8_t b[512];
+  if (raw_mode == 1) {
+    for (int i = 0; i < 64 && Serial.availableForWrite() >= (int)sizeof(b); i++) {
+      memcpy(b, "RAWU", 4);
+      memcpy(b + 4, &raw_seq, 4);
+      for (int k = 8; k < (int)sizeof(b); k++) b[k] = (uint8_t)(raw_seq + k);
+      const size_t w = Serial.write(b, sizeof(b));
+      raw_out += w;
+      if (w < sizeof(b)) { raw_drop += sizeof(b) - w; break; }
+      raw_seq++;
+    }
+    return;
+  }
+  if (raw_mode == 3) {  // loopback: keep the transmitter busy with the counter pattern
+    int room = Serial1.availableForWrite();
+    if (room > (int)sizeof(b)) room = sizeof(b);
+    for (int k = 0; k < room; k++) b[k] = raw_tx++;
+    if (room > 0) Serial1.write(b, room);
+  }
+  int avail = Serial1.available();
+  while (avail > 0) {
+    const size_t k = Serial1.read(b, avail < (int)sizeof(b) ? (size_t)avail : sizeof(b));
+    if (k == 0) break;
+    raw_in += k;
+    avail -= (int)k;
+    if (raw_mode == 3) {
+      for (size_t i = 0; i < k; i++) {
+        if (raw_first) { raw_expect = b[i]; raw_first = false; }
+        if (b[i] != raw_expect) { raw_err++; raw_expect = b[i]; }
+        raw_expect++;
+      }
+      continue;
+    }
+    const int room = Serial.availableForWrite();
+    const size_t w = room <= 0 ? 0 : Serial.write(b, (size_t)room < k ? (size_t)room : k);
+    raw_out += w;
+    raw_drop += k - w;
+  }
+}
+
 void stmRawService(){
   uint8_t b[64];
   int n = 0;
@@ -2052,6 +2156,8 @@ void benchSerial(){
       static char b[1100];
       rtprof::report(b, sizeof(b), SEC_NAMES, SEC_N, per);
       usbOut.printf("%s%c", b, 10);
+    } else if (!strncmp(line, "raw ", 4)) {
+      rawCommand(line + 4);
     } else if (!strncmp(line, "usbload ", 8)) {
       unsigned long bps = 0, sec = 0;
       if (sscanf(line + 8, "%lu %lu", &bps, &sec) == 2 && bps <= 200000 && sec <= 7200) {
@@ -3201,6 +3307,7 @@ void loop() {
   usb_guard::service(millis(), vehicleStationary());  // USB output stop: a USB reconnect, no restart (lib/usb_guard)
   usbLoadService();  // bench: paced USB output
   if (stm_rs_phase == RS_RESTART) { mark(SEC_BRIDGE); stmRestartEnter(); return; }  // command 41 passed: bridge to the boot checker
+  if (raw_mode) { mark(SEC_BRIDGE); rawService(); return; }  // raw stream pass-through or rate test: nothing else runs
   if (stm_bridge) { mark(SEC_BRIDGE); stmBridgeService(); return; }  // STM32 app update through the boot checker: nothing else runs
   if (update_mode) {
     stage(ST_UPDATE);
