@@ -4,6 +4,9 @@ The vehicle can send its telemetry over a Wi-Fi network instead of ESP-NOW. The 
 telemetry server, one frame per UDP datagram. The drive loop (sensor frame, control, motor commands) never
 waits for the network.
 
+Status: stable from ESP32 firmware 0.5.78 (bench test on 2026-10-13: 0 of 1600 datagrams lost, 0 decode errors in
+the telemetry app). A change to this interface gets a new header version.
+
 ## Settings and commands
 
 | Item | Value |

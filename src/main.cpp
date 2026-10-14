@@ -120,6 +120,7 @@ static void serviceMpu() {
 #include <stdarg.h>
 #include "cpu_prof.h"      // CPU share per FreeRTOS task and per loop part, by sampling (lib/cpu_prof; bench "cpu")
 #include "wifi_link.h"        // radio_mode "wifi": telemetry over a Wi-Fi network as UDP (lib/wifi_telem)
+#include "mbedtls/pkcs5.h"     // the WPA2 key from the passphrase (wifiKeyFromPassphrase)
 #include "wifi_telem_proto.h" // the "wifi set" arguments and the log text of a command (lib/wifi_telem)
 
 // USB text output that never blocks loop(). Serial.write() on the ESP32-S2 repeats until all
@@ -198,9 +199,9 @@ void usbLoadService(){
 
 static const char* TAG = "wfrx";
 #ifdef BENCH_FAKE_IMU
-#define ROVER_FW_VERSION "0.5.77+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.5.78+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #else
-#define ROVER_FW_VERSION "0.5.77"  // 0.5.77: USB "save" no longer overflows the loop() stack (panic restart, 4 of 8 saves); Wi-Fi mode sends log frames only while the server is known; full "wifi" status line; bench "stack"; 0.5.76: USB CDC class copy with a 4096 B transmit FIFO and 1024 B transfers (was 64 B: 132 kB/s); nothing to the Rx STM32 during a raw stream (TX held high at the baud switch, silence recovery held); 0.5.75: raw usb writes each block in pieces (the USB buffer is under 512 B); 0.5.74: stm raw: Rx STM32 raw stream (command 42) end to end to USB; 0.5.73b: raw tests up to 5 Mbaud; 0.5.73: raw stream pass-through and rate tests (raw usb, raw pass, raw loop); 0.5.72: log sample coil values signed (were |v|); 0.5.71: radio_mode wifi: telemetry as UDP over a Wi-Fi network (lib/wifi_telem, the 2026-10-12 work, ported); 0.5.70: "set" takes text settings (vehicle_name, drive_output) as the rest of the line; 0.5.69: settings from the operator review: drive_output (servos as V1.0, or CAN; auto), servo map by function, vehicle_name, 4S limit, steer_lpf_hz, charge time as it is; 0.5.68: the 8-bin coil record (0x2E) goes through the log anti-alias filter at telemetry_bins_hz (default 5); 0.5.67: USB driver copy: TX FIFO register of the FIFO in use (DIEPTXF[TxFNum-1]; the CDC output FIFO pointed outside the FIFO RAM: output stops at Monitor Rx start and mid-run), IN endpoints disabled through the core at a bus reset and a close; a guard reconnect ejects the drive first; usbregs with FIFO registers and driver counters, the stop record printed 3 times; 0.5.66: telemetry body 0x2E, the coil magnitudes of all 8 bins of both sensors, 5 a second; 0.5.65: "stm restart" (Rx STM32 command 41, app 2.0.39+): Rx STM32 update with no power cycle; 0.5.64: USB output fix from the bench line (0.5.60-dev10 to dev13): project copy of the TinyUSB ESP32-S2 device driver (lib/tinyusb_dcd_fix) with no zero-length packet on data IN endpoints; USB register record at each output stop and over a restart (monitor). 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
+#define ROVER_FW_VERSION "0.5.78"  // 0.5.78: the Wi-Fi key is calculated from the passphrase before the drive loop (the Wi-Fi driver stopped loop() 190-417 ms at each Wi-Fi start); 0.5.77: USB "save" no longer overflows the loop() stack (panic restart, 4 of 8 saves); Wi-Fi mode sends log frames only while the server is known; full "wifi" status line; bench "stack"; 0.5.76: USB CDC class copy with a 4096 B transmit FIFO and 1024 B transfers (was 64 B: 132 kB/s); nothing to the Rx STM32 during a raw stream (TX held high at the baud switch, silence recovery held); 0.5.75: raw usb writes each block in pieces (the USB buffer is under 512 B); 0.5.74: stm raw: Rx STM32 raw stream (command 42) end to end to USB; 0.5.73b: raw tests up to 5 Mbaud; 0.5.73: raw stream pass-through and rate tests (raw usb, raw pass, raw loop); 0.5.72: log sample coil values signed (were |v|); 0.5.71: radio_mode wifi: telemetry as UDP over a Wi-Fi network (lib/wifi_telem, the 2026-10-12 work, ported); 0.5.70: "set" takes text settings (vehicle_name, drive_output) as the rest of the line; 0.5.69: settings from the operator review: drive_output (servos as V1.0, or CAN; auto), servo map by function, vehicle_name, 4S limit, steer_lpf_hz, charge time as it is; 0.5.68: the 8-bin coil record (0x2E) goes through the log anti-alias filter at telemetry_bins_hz (default 5); 0.5.67: USB driver copy: TX FIFO register of the FIFO in use (DIEPTXF[TxFNum-1]; the CDC output FIFO pointed outside the FIFO RAM: output stops at Monitor Rx start and mid-run), IN endpoints disabled through the core at a bus reset and a close; a guard reconnect ejects the drive first; usbregs with FIFO registers and driver counters, the stop record printed 3 times; 0.5.66: telemetry body 0x2E, the coil magnitudes of all 8 bins of both sensors, 5 a second; 0.5.65: "stm restart" (Rx STM32 command 41, app 2.0.39+): Rx STM32 update with no power cycle; 0.5.64: USB output fix from the bench line (0.5.60-dev10 to dev13): project copy of the TinyUSB ESP32-S2 device driver (lib/tinyusb_dcd_fix) with no zero-length packet on data IN endpoints; USB register record at each output stop and over a restart (monitor). 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
 
@@ -1180,11 +1181,38 @@ bool wifiTelemetrySend(const uint8_t mac[6], const uint8_t* buf, size_t len){
   return wifilink::send(buf, len);  // false before the server is known: counted as unsent
 }
 // Radio start in wifi mode, once; stops loop() for about 220 ms, as espnowStart() does.
+// The WPA2 key (PBKDF2-SHA1, 4096 rounds, 32 bytes) as 64 hex digits. Given a passphrase, the Wi-Fi driver calculates
+// this key in its own task at the first association; that task stopped loop() for 190 to 417 ms. Given the key, the
+// driver calculates nothing. False for an open network or a password that is already 64 hex digits.
+bool wifiKeyFromPassphrase(const char* ssid, const char* pass, char out[65]){
+  const size_t n = strlen(pass);
+  if (n < 8 || n > 63) return false;
+  uint8_t pmk[32];
+  mbedtls_md_context_t ctx;
+  mbedtls_md_init(&ctx);
+  const bool ok = mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(MBEDTLS_MD_SHA1), 1) == 0 &&
+                  mbedtls_pkcs5_pbkdf2_hmac(&ctx, (const unsigned char*)pass, n, (const unsigned char*)ssid, strlen(ssid),
+                                            4096, sizeof(pmk), pmk) == 0;
+  mbedtls_md_free(&ctx);
+  if (ok) for (int i = 0; i < 32; i++) snprintf(out + 2 * i, 3, "%02x", pmk[i]);
+  memset(pmk, 0, sizeof(pmk));
+  return ok;
+}
+// wifilink::begin() or setCredentials() with the key in place of the passphrase.
+void wifiCredentials(const char* ssid, const char* pass){
+  char key[65];
+  const uint32_t t0 = millis();
+  const bool derived = wifiKeyFromPassphrase(ssid, pass, key);
+  if (derived) usbOut.printf("WIFI key calculated in %lu ms\n", (unsigned long)(millis() - t0));
+  if (wifilink::started()) wifilink::setCredentials(ssid, derived ? key : pass);
+  else wifilink::begin(ssid, derived ? key : pass);
+  memset(key, 0, sizeof(key));
+}
 void wifiStart(){
   if (wifilink::started()) return;
   char pass[WIFI_PASS_MAX + 1];
   msc_fat_wifi_password(pass, sizeof(pass));
-  wifilink::begin(msc_fat_wifi_ssid(), pass);
+  wifiCredentials(msc_fat_wifi_ssid(), pass);
   memset(pass, 0, sizeof(pass));
   applyTxPower();  // espnow_tx_power_dbm sets the Wi-Fi transmit power too
 }
@@ -1231,7 +1259,7 @@ void wifiUsbCommand(const char* line){
     else if (r == wifitelem::SET_PASS_LENGTH) usbOut.println("WIFI refused: the password must be 8 to 63 characters, 64 hex digits, or none");
     else if (!msc_fat_wifi_set(ssid, pass)) usbOut.println("WIFI NVS write failed");
     else {
-      if (wifilink::started()) wifilink::setCredentials(ssid, pass);
+      if (wifilink::started()) wifiCredentials(ssid, pass);
       usbOut.printf("WIFI stored ssid=\"%s\" password=%s%s\n", ssid, wifitelem::passwordState(pass[0] != 0),
                     radio_wifi ? "" : " (radio_mode is espnow: set radio_mode wifi, save, restart)");
       telemetryEvent(rec::EV_SETTING, 0, 0, "wifi set (value not logged)");
