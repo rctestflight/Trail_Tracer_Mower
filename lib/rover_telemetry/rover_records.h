@@ -32,6 +32,10 @@ const int SAMPLE3_BYTES = 50, SAMPLES3_PER_BLOCK = 4, IMU_SAMPLE3_BYTES = 60, IM
 const uint8_t BODY_BINS = 0x2E;
 const int BINS = 8, BINS_BYTES = 4 + BINS * 2 + BINS * 4 * 3;  // 116
 const int32_t BINS_NONE = -8388608;  // 0x800000
+// 0x31 (0.5.69, stream 1, each 10 s and after a change): the vehicle name. type, vehicleID (u8), name length n
+// (u8, 16 at most), n name bytes (A-Z a-z 0-9 space _ -).
+const uint8_t BODY_NAME = 0x31;
+const int VEHICLE_NAME_MAX = 16;
 const int STATUS_BYTES = 77;  // 67 up to 0.5.20; 68 in 0.5.21 (monitor age); 74 in 0.5.22 and 0.5.23 (PC time); 77 from 0.5.24 (firmware version)
 const int EVENT_MAX = 80;  // telemlog SLOW body limit
 const int16_t I16_NONE = -32768;
@@ -52,6 +56,8 @@ enum EventCode : uint16_t {
   EV_STM32 = 15,      // power-on STM32 handshake: a 1 HELLO answered (text: its payload in hex) 0 no answer, b payload bytes
   EV_TIME = 16,       // PC time from a monitor (MON 0x44): a unix seconds, b millis() at that time, text unix ms
   EV_MONITOR = 17,    // a monitor heard (a 1) or no MON frame for 5 s (a 0); text its MAC
+  EV_WIFI = 19,       // radio_mode "wifi" (lib/wifi_telem): a 1 associated (b RSSI dBm), 2 association lost, 3 server address
+                      // learned (b port), 4 no server in 30 s (b 30); text SSID, IP, server. Never the password
   EV_STM32_CMD = 18,  // STM32 command link (lib/stm_settings, 0.5.25): a kind (stmset::Kind), b command ID, gap ms or HELLO/BOOT result; text
 };
 
@@ -121,6 +127,8 @@ void packSample3Imu(uint8_t* out, const Sample& s, uint32_t block_ms); // IMU_SA
 int packStatus(uint8_t* out, const Status& s);                      // returns STATUS_BYTES
 // Event body: code, a, b, then text cut to fit EVENT_MAX. Returns its length.
 int packEvent(uint8_t* out, uint16_t code, int32_t a, int32_t b, const char* text);
+// Name body 0x31. Returns its length (3 + name length).
+int packName(uint8_t* out, uint8_t vehicle_id, const char* name);
 // Bin body 0x2E. v[bin][k]: k = sensor * 2 + coil; values outside int24 are clamped. Returns BINS_BYTES.
 int packBins(uint8_t* out, uint8_t frames, uint16_t window_ms, const float hz[BINS], const int32_t v[BINS][4]);
 

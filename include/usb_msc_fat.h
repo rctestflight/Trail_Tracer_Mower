@@ -13,6 +13,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 struct DeviceConfig {
     // Identification
+    char    vehicle_name[17];  // shown by the telemetry app: 16 at most; letters, digits, space, _ and -
     uint8_t vehicleID;
     uint8_t rx_channel;
 
@@ -20,17 +21,22 @@ struct DeviceConfig {
     int CRUISE_THROTTLE;
     int CREEP_THROTTLE;
 
-    // Output 1 – front steering
+    // Drive (0.5.69): 0 auto (motor controllers once one answers on CAN, else servos), 1 servos (V1.0), 2 CAN
+    uint8_t drive_output;
+    uint8_t steer_output;     // servo output channel of the steering, 1..4
+    uint8_t throttle_output;  // servo output channel of the throttle, 1..4
+
+    // Steering function: centre and end points (config.json steer_center_us, steer_min_us, steer_max_us)
     int PWM_OUT_1_DEFAULT;
     int PWM_OUT_1_MIN;
     int PWM_OUT_1_MAX;
 
-    // Output 2 – throttle
+    // Throttle function (config.json throttle_center_us, throttle_min_us, throttle_max_us)
     int PWM_OUT_2_DEFAULT;
     int PWM_OUT_2_MIN;
     int PWM_OUT_2_MAX;
 
-    // Output 3 – auxiliary
+    // Outputs 3 and 4: read from an older config.json only; an output with no function holds 1500 us
     int PWM_OUT_3_DEFAULT;
     int PWM_OUT_3_MIN;
     int PWM_OUT_3_MAX;
@@ -45,6 +51,7 @@ struct DeviceConfig {
     double ki;
     double kd;
     int    pid_direction;   // PID_v1: DIRECT=0, REVERSE=1
+    double steer_lpf_hz;    // 2nd-order low-pass on the steering PID output, Hz (0 = off; V1.0: 5)
     // Yaw-rate PID: input/setpoint in deg/s, output normalized to -1..1.
     double steering_rate_kp;
     double steering_rate_ki;
@@ -70,7 +77,7 @@ struct DeviceConfig {
     // Charging
     double CHARGE_VBATT_STOP;    // V
     double CHARGE_MAX_CURRENT;   // A
-    int    CHARGE_MAX_SECONDS;
+    int    CHARGE_MAX_SECONDS;  // the charge time limit, s (0.5.69; up to 0.5.68 half of it)
     uint8_t battery_cells;       // series cells (2 = 2S); the station scales its voltage graphs from it
 
     // Features
@@ -107,7 +114,12 @@ struct DeviceConfig {
     int     dsp_lanes;               // CID 13: lane map 0..3 (with dsp_sensors 1, bit 0 selects the sensor)
     bool    usb_drive;               // true (default): config.json as a USB drive; false: no drive, settings by command only
                                      // (from the next start). A PC that read the drive when the board left USB lost ports.
+    uint8_t radio_mode;              // RADIO_MODE_ESPNOW (default, "espnow" in config.json) or RADIO_MODE_WIFI ("wifi"):
+                                     // telemetry over ESP-NOW or over a Wi-Fi network, never both (from the next start)
 };
+
+#define RADIO_MODE_ESPNOW 0
+#define RADIO_MODE_WIFI   1
 
 // The shortest frame period setting: the fastest STM32 period (2336 us, set-up S2N) plus 50 %, rounded up.
 // The ESP32 then has margin to serve the radio, the log and USB between frames.
@@ -183,3 +195,16 @@ bool msc_fat_save_all(const DeviceConfig* cfg);
 bool msc_fat_get_key(const DeviceConfig* cfg, const char* key, String* value_json);
 int  msc_fat_set_key(DeviceConfig* cfg, const char* key, const char* value_json);
 bool msc_fat_key_at(const DeviceConfig* cfg, int index, String* line);
+
+/**
+ * Wi-Fi network for radio_mode "wifi" (USB "wifi set" / "wifi clear"). NVS only, in its own
+ * namespace: never in config.json, never in DeviceConfig. "list" and "get" show wifi_ssid and
+ * wifi_password = "set" or "not set"; this file never reads the password except in
+ * msc_fat_wifi_password(), for the Wi-Fi start.
+ * set: ssid 1..32 bytes; pass "" = an open network (no password key in NVS). false: NVS write failed.
+ */
+bool msc_fat_wifi_set(const char* ssid, const char* pass);
+void msc_fat_wifi_clear();
+const char* msc_fat_wifi_ssid();          // "" = none stored
+bool msc_fat_wifi_has_password();
+void msc_fat_wifi_password(char* out, size_t cap);  // "" = none

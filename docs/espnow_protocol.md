@@ -145,6 +145,7 @@ u8 body type 0x20, u8 n (1 to 7), then n samples of 32 bytes. One sample is take
 | 14 | wheel speed, node 0 (even side) | i16 | 0.001 rev/s, ODrive encoder estimate as received |
 | 16 | wheel speed, node 1 (odd side) | i16 | 0.001 rev/s |
 | 18 | gyro z | i16 | 0.02 deg/s; -32768 = no gyro. Logged only: the autopilot does not use the gyro |
+| 19 | Wi-Fi link (`radio_mode` `wifi`, `lib/wifi_telem`) | 1 associated, 2 association lost, 3 server address learned, 4 no server beacon and no mDNS (multicast DNS) answer 30 s after the association | 1: received signal strength, dBm; 3: server port; 4: 30 | 1: `ssid=<ssid> ip=<ip> ch=<channel>`; 2: `ssid=<ssid>`; 3: `server <ip>:<port> via beacon` or `via mdns`; 4: `no telemetry server on this network`. The text never holds the password. |
 | 20 | beacon 1 (`s1_btx_radius[0]`) | u8 | 4 mm, 255 = 1020 mm or more |
 | 21 | beacon 2 (`s1_btx_radius[1]`) | u8 | 4 mm |
 | 22 | sensor 1 coil 1, real | bf16 | `coil_data[0][0]`, bfloat16: the top 16 bits of the float32, rounded to nearest even (relative error 0.4 % at most; the float32 range, because the Goertzel output's scale is not fixed) |
@@ -154,6 +155,8 @@ u8 body type 0x20, u8 n (1 to 7), then n samples of 32 bytes. One sample is take
 | 30 | crossing point X, filtered (autopilot) | i16 | mm, left positive; -32768 = no reading |
 
 Size: 14 + 2 + 7 x 32 = 240 bytes a frame, about 14.3 frames a second, about 27 kbit/s.
+
+With the STM32 link version 2 (firmware 0.5.45 and later), bytes 22 to 29 hold sensor 1 coil 1, sensor 1 coil 2, sensor 2 coil 1 and sensor 2 coil 2 at the wire bin of each sensor, in STM32 magnitude units (2^-24 LSB). From 0.5.72 they are signed (the STM32 sign of each coil value); up to 0.5.71 they held the absolute value.
 
 ### Body 0x22: sample block with the six IMU axes (stream 0)
 
@@ -247,6 +250,17 @@ Size: 14 + 116 = 130 bytes a frame; at 5 Hz about 5 kbit/s.
 | 68 | PC time at this record, seconds (0.5.22 and later; from MON frames) | u32 | unix s; 0 = unknown |
 | 72 | PC time at this record, milliseconds part | u16 | ms |
 | 74 | firmware version major, minor, patch (0.5.24 and later) | 3 x u8 | for example 0, 5, 24 |
+
+### Body 0x31: vehicle name (stream 1)
+
+From firmware 0.5.69: every 10 s, and at once after a change of the setting `vehicle_name`.
+
+| Offset | Field | Type | Unit |
+|---|---|---|---|
+| 0 | body type 0x31 | u8 | |
+| 1 | vehicle number (`vehicleID`) | u8 | |
+| 2 | name length n | u8 | 16 at most |
+| 3 | name | n bytes | ASCII: A-Z, a-z, 0-9, space, `_`, `-` |
 
 ### Body 0x30: event (stream 1)
 

@@ -50,6 +50,7 @@ static const char* TAG = "msc_fat";
 #define CONFIG_PATH_SUFFIX        "-config.json"
 #define DEFAULT_CONFIG_PATH       "0:/config.json"
 #define NVS_NAMESPACE             "wfrx_cfg"       // ≤ 15 chars
+#define NVS_WIFI_NAMESPACE        "wfrx_wifi"      // Wi-Fi network: "ssid", "pass" (not in config.json)
 #define MSC_WRITE_STABLE_MS       3000u             // idle window before parse
 
 // PWM safety limits enforced during validation
@@ -73,6 +74,11 @@ static bool              s_cache_dirty  = false;
 
 // FatFS state
 static FATFS s_fatfs;
+// The one file object for config.json (read and write; loop() only, never two at once). With
+// CONFIG_FATFS_PER_FILE_CACHE a FIL holds a 4 KB sector buffer. On the stack it took config_write_json
+// to 4288 B; under "save" from the USB command path (loop, benchSerial, configCommand, msc_fat_save_all)
+// that overflowed the 8 KB loop() stack: a panic restart on 4 of 8 USB saves, 36 B free after a save that passed (bench, ESP-3, 2026-10-13).
+static FIL s_fil;
 static BYTE  s_pdrv = FF_DRV_NOT_USED;
 
 // USB MSC
@@ -210,8 +216,13 @@ static void populate_defaults(DeviceConfig& c,
         c = *seed;
         return;
     }
+    strcpy(c.vehicle_name, "Vehicle");
     c.vehicleID             = 1;
     c.rx_channel            = 1;
+    c.drive_output          = 0;   // auto
+    c.steer_output          = 1;
+    c.throttle_output       = 2;
+    c.steer_lpf_hz          = 5.0;
     c.CRUISE_THROTTLE       = 1650;
     c.CREEP_THROTTLE        = 1620;
     c.PWM_OUT_1_DEFAULT     = 1500;
@@ -276,6 +287,7 @@ static void populate_defaults(DeviceConfig& c,
     c.dsp_pga                  = -1;
     c.dsp_lanes                = 2;
     c.usb_drive                = true;
+    c.radio_mode               = RADIO_MODE_ESPNOW;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -293,7 +305,25 @@ static void validate_config(DeviceConfig& c)
     if (c.rx_channel < 1 || c.rx_channel > 5) c.rx_channel = 1;
     c.telemetry_rate_hz = rec::rateNearest(c.telemetry_rate_hz);  // 100/N Hz only
     c.telemetry_bins_hz = c.telemetry_bins_hz <= 0 ? 0 : rec::rateNearest(c.telemetry_bins_hz);  // 0 = off
-    if (c.battery_cells < 1 || c.battery_cells > 12) c.battery_cells = 2;
+    if (c.battery_cells < 1) c.battery_cells = 2;
+    if (c.battery_cells > 4) c.battery_cells = 4;  // 4S at most (operator, 2026-10-13)
+    // Vehicle name: 16 characters at most from A-Z a-z 0-9 space _ -; others removed; empty: "Vehicle"
+    {
+        char clean[17]; int n = 0;
+        for (int i = 0; c.vehicle_name[i] && i < 16; i++) {
+            const char ch = c.vehicle_name[i];
+            if (isalnum((unsigned char)ch) || ch == ' ' || ch == '_' || ch == '-') clean[n++] = ch;
+        }
+        clean[n] = 0;
+        strcpy(c.vehicle_name, n ? clean : "Vehicle");
+    }
+    if (c.drive_output > 2) c.drive_output = 0;
+    if (c.steer_output < 1 || c.steer_output > 4) c.steer_output = 1;
+    if (c.throttle_output < 1 || c.throttle_output > 4) c.throttle_output = 2;
+    if (c.throttle_output == c.steer_output) c.throttle_output = c.steer_output == 2 ? 1 : 2;
+    if (!isfinite(c.steer_lpf_hz) || c.steer_lpf_hz < 0.0) c.steer_lpf_hz = 0.0;
+    if (c.steer_lpf_hz > 0.0 && c.steer_lpf_hz < 0.5) c.steer_lpf_hz = 0.5;
+    if (c.steer_lpf_hz > 50.0) c.steer_lpf_hz = 50.0;
 
     // Throttle range sanity
     c.CRUISE_THROTTLE   = constrain(c.CRUISE_THROTTLE, 1000, 2000);
@@ -341,14 +371,14 @@ static void validate_config(DeviceConfig& c)
     if (c.SineSwerveFrequency < 1) c.SineSwerveFrequency = 1;
 
     // Charging: the STM32 application limits (TrailTracer-Rx-STM32 rctf_wfrx_dsp.h): stop voltage
-    // 16.0 V, current 6.0 A, charge time 3600 s. The ESP32 sends 2 x CHARGE_MAX_SECONDS (as shipped
-    // units do), so 1800 is the highest setting with an effect. Above a limit the STM32 used the limit.
+    // 16.0 V, current 6.0 A, charge time 3600 s (command 8 is in seconds in app 0.1.0 and 2.x). From
+    // 0.5.69 CHARGE_MAX_SECONDS is the charge time and goes as it is; up to 0.5.68 the ESP32 sent 2 x it.
     if (c.CHARGE_VBATT_STOP  < 6.0)  c.CHARGE_VBATT_STOP  = 6.0;
     if (c.CHARGE_VBATT_STOP  > 16.0) c.CHARGE_VBATT_STOP  = 16.0;
     if (c.CHARGE_MAX_CURRENT < 0.1)  c.CHARGE_MAX_CURRENT = 0.1;
     if (c.CHARGE_MAX_CURRENT > 6.0) c.CHARGE_MAX_CURRENT = 6.0;
-    if (c.CHARGE_MAX_SECONDS < 5)   c.CHARGE_MAX_SECONDS = 5;
-    if (c.CHARGE_MAX_SECONDS > 1800) c.CHARGE_MAX_SECONDS = 1800;
+    if (c.CHARGE_MAX_SECONDS < 10)   c.CHARGE_MAX_SECONDS = 10;
+    if (c.CHARGE_MAX_SECONDS > 3600) c.CHARGE_MAX_SECONDS = 3600;
 
     // Rover autopilot
     c.rover_sensor_height_mm  = constrain(c.rover_sensor_height_mm, 30.0, 500.0);
@@ -372,6 +402,7 @@ static void validate_config(DeviceConfig& c)
     c.dsp_slow_adc        = constrain(c.dsp_slow_adc, 0, 1);
     c.dsp_pga             = constrain(c.dsp_pga, -1, 2);
     c.dsp_lanes           = constrain(c.dsp_lanes, 0, 3);
+    if (c.radio_mode > RADIO_MODE_WIFI) c.radio_mode = RADIO_MODE_ESPNOW;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -382,6 +413,12 @@ static void prefs_save(const DeviceConfig& c)
     Preferences p;
     p.begin(NVS_NAMESPACE, false);
     p.putUChar("vID",      c.vehicleID);
+    p.putString("vName",   c.vehicle_name);
+    p.putUChar("drvOut",   c.drive_output);
+    p.putUChar("strOut",   c.steer_output);
+    p.putUChar("thrOut",   c.throttle_output);
+    p.putDouble("lpfHz",   c.steer_lpf_hz);
+    p.putBool("chgReal",   true);  // CHARGE_MAX_SECONDS holds the real time (0.5.69)
     p.putUChar("rxCh",     c.rx_channel);
     p.putInt("crsThr",     c.CRUISE_THROTTLE);
     p.putInt("crpThr",     c.CREEP_THROTTLE);
@@ -445,6 +482,7 @@ static void prefs_save(const DeviceConfig& c)
     p.putInt("dspPga",     c.dsp_pga);
     p.putInt("dspLanes",   c.dsp_lanes);
     p.putBool("usbDrive",  c.usb_drive);
+    p.putUChar("radioMode", c.radio_mode);
     p.end();
 }
 
@@ -455,6 +493,15 @@ static bool prefs_load(DeviceConfig& c)
     if (!p.isKey("vID")) { p.end(); return false; } // namespace is empty
 
     c.vehicleID             = p.getUChar("vID",      c.vehicleID);
+    {
+        const String name = p.getString("vName", c.vehicle_name);
+        strncpy(c.vehicle_name, name.c_str(), 16); c.vehicle_name[16] = 0;
+    }
+    // A board updated from 0.5.68 or older drove its motor controllers over CAN: keep that, not auto.
+    c.drive_output          = p.isKey("drvOut") ? p.getUChar("drvOut", c.drive_output) : 2;
+    c.steer_output          = p.getUChar("strOut",   c.steer_output);
+    c.throttle_output       = p.getUChar("thrOut",   c.throttle_output);
+    c.steer_lpf_hz          = p.getDouble("lpfHz",   c.steer_lpf_hz);
     c.rx_channel            = p.getUChar("rxCh",     c.rx_channel);
     c.CRUISE_THROTTLE       = p.getInt("crsThr",     c.CRUISE_THROTTLE);
     c.CREEP_THROTTLE        = p.getInt("crpThr",     c.CREEP_THROTTLE);
@@ -491,6 +538,7 @@ static bool prefs_load(DeviceConfig& c)
     c.CHARGE_VBATT_STOP     = p.getDouble("chgVStp", c.CHARGE_VBATT_STOP);
     c.CHARGE_MAX_CURRENT    = p.getDouble("chgIMax", c.CHARGE_MAX_CURRENT);
     c.CHARGE_MAX_SECONDS    = p.getInt("chgTSec",    c.CHARGE_MAX_SECONDS);
+    if (!p.getBool("chgReal", false)) c.CHARGE_MAX_SECONDS *= 2;  // up to 0.5.68 the value was half the charge time
     c.battery_cells         = p.getUChar("batCells", c.battery_cells);
     c.espnow_enabled        = p.getBool("espNow",    c.espnow_enabled);
     c.telemetry_enabled     = p.getBool("telEn",     c.telemetry_enabled);
@@ -518,6 +566,7 @@ static bool prefs_load(DeviceConfig& c)
     c.dsp_pga                  = p.getInt("dspPga",     c.dsp_pga);
     c.dsp_lanes                = p.getInt("dspLanes",   c.dsp_lanes);
     c.usb_drive                = p.getBool("usbDrive",  c.usb_drive);
+    c.radio_mode               = p.getUChar("radioMode", c.radio_mode);
     p.end();
     return true;
 }
@@ -698,8 +747,13 @@ static bool fatfs_mount()
 
     ESP_LOGW(TAG, "f_mount failed (%d); formatting...", res);
     // Format the volume (FM_FAT = FAT12/16, au=0 = default cluster size)
-    BYTE work[FF_MAX_SS];
-    res = f_mkfs(FAT_DRIVE, FM_FAT, 0, work, sizeof(work));
+    BYTE* work = (BYTE*)malloc(FF_MAX_SS);  // 4 KB: not on the loop() stack
+    if (!work) {
+        ESP_LOGE(TAG, "f_mkfs work buffer: no memory");
+        return false;
+    }
+    res = f_mkfs(FAT_DRIVE, FM_FAT, 0, work, FF_MAX_SS);
+    free(work);
     if (res != FR_OK) {
         ESP_LOGE(TAG, "f_mkfs failed (%d)", res);
         return false;
@@ -739,22 +793,21 @@ static const char* dsp_bin_key(int b)
 // with_eff: also the read-only DSP values in effect (<key>_eff; null = no STM32 answer yet), for get and list.
 static void config_to_doc(const DeviceConfig& c, JsonDocument& doc, bool with_eff = false)
 {
+    doc["vehicle_name"]          = c.vehicle_name;
     doc["vehicleID"]             = c.vehicleID;
     doc["rx_channel"]            = c.rx_channel;
+    doc["drive_output"]          = c.drive_output == 1 ? "servo" : c.drive_output == 2 ? "can" : "auto";
+    doc["steer_output"]          = c.steer_output;
+    doc["throttle_output"]       = c.throttle_output;
     doc["CRUISE_THROTTLE"]       = c.CRUISE_THROTTLE;
     doc["CREEP_THROTTLE"]        = c.CREEP_THROTTLE;
-    doc["PWM_OUT_1_DEFAULT"]     = c.PWM_OUT_1_DEFAULT;
-    doc["PWM_OUT_1_MIN"]         = c.PWM_OUT_1_MIN;
-    doc["PWM_OUT_1_MAX"]         = c.PWM_OUT_1_MAX;
-    doc["PWM_OUT_2_DEFAULT"]     = c.PWM_OUT_2_DEFAULT;
-    doc["PWM_OUT_2_MIN"]         = c.PWM_OUT_2_MIN;
-    doc["PWM_OUT_2_MAX"]         = c.PWM_OUT_2_MAX;
-    doc["PWM_OUT_3_DEFAULT"]     = c.PWM_OUT_3_DEFAULT;
-    doc["PWM_OUT_3_MIN"]         = c.PWM_OUT_3_MIN;
-    doc["PWM_OUT_3_MAX"]         = c.PWM_OUT_3_MAX;
-    doc["PWM_OUT_4_DEFAULT"]     = c.PWM_OUT_4_DEFAULT;
-    doc["PWM_OUT_4_MIN"]         = c.PWM_OUT_4_MIN;
-    doc["PWM_OUT_4_MAX"]         = c.PWM_OUT_4_MAX;
+    doc["steer_center_us"]       = c.PWM_OUT_1_DEFAULT;
+    doc["steer_min_us"]          = c.PWM_OUT_1_MIN;
+    doc["steer_max_us"]          = c.PWM_OUT_1_MAX;
+    doc["throttle_center_us"]    = c.PWM_OUT_2_DEFAULT;
+    doc["throttle_min_us"]       = c.PWM_OUT_2_MIN;
+    doc["throttle_max_us"]       = c.PWM_OUT_2_MAX;
+    doc["steer_lpf_hz"]          = c.steer_lpf_hz;
     doc["kp"]                    = c.kp;
     doc["ki"]                    = c.ki;
     doc["kd"]                    = c.kd;
@@ -803,6 +856,7 @@ static void config_to_doc(const DeviceConfig& c, JsonDocument& doc, bool with_ef
     doc["dsp_pga"]                  = c.dsp_pga;
     doc["dsp_lanes"]                = c.dsp_lanes;
     doc["usb_drive"]                = c.usb_drive;
+    doc["radio_mode"]               = c.radio_mode == RADIO_MODE_WIFI ? "wifi" : "espnow";
     if (!with_eff) return;
     auto eff = [&](const String& key, int i, bool is_int) {
         if (isnan(g_dsp_eff[i])) doc[key] = nullptr;
@@ -816,6 +870,9 @@ static void config_to_doc(const DeviceConfig& c, JsonDocument& doc, bool with_ef
     eff("dsp_slow_adc_eff", DSP_EFF_SLOW, true);
     eff("dsp_pga_eff", DSP_EFF_PGA, true);
     eff("dsp_lanes_eff", DSP_EFF_LANES, true);
+    // Wi-Fi network (NVS only, not in config.json): the SSID, and whether a password is stored. Never the password.
+    doc["wifi_ssid"]                = msc_fat_wifi_ssid();
+    doc["wifi_password"]            = msc_fat_wifi_has_password() ? "set" : "not set";
 }
 
 static bool config_write_json(const DeviceConfig& c)
@@ -849,7 +906,7 @@ static bool config_write_json(const DeviceConfig& c)
     out_str += json_str;
     out_str += "\n";
 
-    FIL fil;
+    FIL& fil = s_fil;  // not on the stack: a FIL holds a 4 KB sector buffer (see s_fil)
     FRESULT res = f_open(&fil, s_config_path, FA_CREATE_ALWAYS | FA_WRITE);
     if (res != FR_OK) {
         ESP_LOGE(TAG, "f_open write failed (%d)", res);
@@ -876,7 +933,7 @@ static bool s_rate_config_missing = false;
 
 static bool config_read_json(DeviceConfig& c)
 {
-    FIL fil;
+    FIL& fil = s_fil;  // not on the stack (see s_fil)
     FRESULT res = f_open(&fil, s_config_path, FA_READ);
     if (res != FR_OK) {
         ESP_LOGW(TAG, "config.json not found (%d)", res);
@@ -982,6 +1039,16 @@ static bool config_from_json_text(DeviceConfig& c, const String& json_no_comment
 #define JSON_GET_FLT(key, field)    if (doc[key].is<double>()) c.field = (float)doc[key].as<double>()
 #define JSON_GET_BOOL(key, field)   if (doc[key].is<bool>())   c.field = doc[key].as<bool>()
 
+    if (doc["vehicle_name"].is<const char*>()) {
+        strncpy(c.vehicle_name, doc["vehicle_name"].as<const char*>(), 16); c.vehicle_name[16] = 0;
+    }
+    if (doc["drive_output"].is<const char*>()) {
+        const char* d = doc["drive_output"].as<const char*>();
+        c.drive_output = !strcmp(d, "servo") ? 1 : !strcmp(d, "can") ? 2 : 0;
+    }
+    JSON_GET_UINT8("steer_output",          steer_output);
+    JSON_GET_UINT8("throttle_output",       throttle_output);
+    JSON_GET_DBL("steer_lpf_hz",            steer_lpf_hz);
     JSON_GET_UINT8("vehicleID",             vehicleID);
     JSON_GET_UINT8("rx_channel",            rx_channel);
     JSON_GET_INT("CRUISE_THROTTLE",         CRUISE_THROTTLE);
@@ -998,7 +1065,17 @@ static bool config_from_json_text(DeviceConfig& c, const String& json_no_comment
     JSON_GET_INT("PWM_OUT_4_DEFAULT",       PWM_OUT_4_DEFAULT);
     JSON_GET_INT("PWM_OUT_4_MIN",           PWM_OUT_4_MIN);
     JSON_GET_INT("PWM_OUT_4_MAX",           PWM_OUT_4_MAX);
-    s_rate_config_missing = doc["steering_rate_kp"].isNull() || doc["steering_rate_ki"].isNull() || doc["steering_rate_kd"].isNull() || doc["steering_rate_pid_direction"].isNull() || doc["steering_rate_max_dps"].isNull();
+    // 0.5.69 names by function; an older config.json gives PWM_OUT_1_* (steering) and PWM_OUT_2_* (throttle) above
+    JSON_GET_INT("steer_center_us",         PWM_OUT_1_DEFAULT);
+    JSON_GET_INT("steer_min_us",            PWM_OUT_1_MIN);
+    JSON_GET_INT("steer_max_us",            PWM_OUT_1_MAX);
+    JSON_GET_INT("throttle_center_us",      PWM_OUT_2_DEFAULT);
+    JSON_GET_INT("throttle_min_us",         PWM_OUT_2_MIN);
+    JSON_GET_INT("throttle_max_us",         PWM_OUT_2_MAX);
+    // A config.json from 0.5.68 or older (PWM_OUT_1_DEFAULT, no steer_center_us): CHARGE_MAX_SECONDS was half the charge
+    // time; the file is written again in the 0.5.69 form after the read (s_rate_config_missing).
+    const bool legacy_file = doc["PWM_OUT_1_DEFAULT"].is<int>() && doc["steer_center_us"].isNull();
+    s_rate_config_missing = doc["steering_rate_kp"].isNull() || doc["steering_rate_ki"].isNull() || doc["steering_rate_kd"].isNull() || doc["steering_rate_pid_direction"].isNull() || doc["steering_rate_max_dps"].isNull() || legacy_file;
 
     JSON_GET_DBL("kp",                      kp);
     JSON_GET_DBL("ki",                      ki);
@@ -1049,6 +1126,12 @@ static bool config_from_json_text(DeviceConfig& c, const String& json_no_comment
     JSON_GET_INT("dsp_pga",                 dsp_pga);
     JSON_GET_INT("dsp_lanes",               dsp_lanes);
     JSON_GET_BOOL("usb_drive",              usb_drive);
+    if (doc["radio_mode"].is<const char*>()) {  // "espnow" or "wifi"; any other text keeps the value
+        const char* m = doc["radio_mode"].as<const char*>();
+        if (!strcmp(m, "espnow")) c.radio_mode = RADIO_MODE_ESPNOW;
+        else if (!strcmp(m, "wifi")) c.radio_mode = RADIO_MODE_WIFI;
+    }
+    if (legacy_file && doc["CHARGE_MAX_SECONDS"].is<int>()) c.CHARGE_MAX_SECONDS = doc["CHARGE_MAX_SECONDS"].as<int>() * 2;  // see legacy_file
 
 #undef JSON_GET_INT
 #undef JSON_GET_UINT8
@@ -1360,16 +1443,26 @@ int msc_fat_set_key(DeviceConfig* cfg, const char* key, const char* value_json)
 {
     const size_t n = strlen(key);
     if (n > 4 && !strcmp(key + n - 4, "_eff")) return 4;  // read-only: the value in effect, from the STM32
+    if (!strncmp(key, "wifi_", 5)) return 4;              // read-only: the USB command "wifi set" writes them
     JsonDocument cur;
     config_to_doc(*cfg, cur);
     JsonVariant old = cur[key];
     if (old.isNull()) return 1;                       // unknown key
+    // A text key takes a JSON string, or a bare word (letters, digits, '_'), as "set radio_mode wifi".
+    String quoted;
+    if (old.is<const char*>() && value_json[0] != '"') {
+        for (const char* q = value_json; *q; q++)
+            if (!isalnum((unsigned char)*q) && *q != '_') return 2;
+        quoted = String("\"") + value_json + "\"";
+        value_json = quoted.c_str();
+    }
     JsonDocument val;
     if (deserializeJson(val, value_json)) return 2;   // not a JSON literal
     JsonVariant nv = val.as<JsonVariant>();
     // The value must have the key's type, or the parse below would ignore it silently.
     bool type_ok;
     if (old.is<bool>())      type_ok = nv.is<bool>();
+    else if (old.is<const char*>()) type_ok = nv.is<const char*>();
     else if (old.is<long>()) type_ok = nv.is<long>();
     else                     type_ok = nv.is<double>() && !nv.is<bool>();
     if (!type_ok) return 2;
@@ -1381,6 +1474,11 @@ int msc_fat_set_key(DeviceConfig* cfg, const char* key, const char* value_json)
     DeviceConfig tmp = *cfg;
     if (!config_from_json_text(tmp, text)) return 2;
     validate_config(tmp);                             // the same clamps as a config.json edit
+    if (old.is<const char*>()) {                      // a text key: the value must survive the clamps unchanged
+        JsonDocument chk;
+        config_to_doc(tmp, chk);
+        if (strcmp(chk[key].as<const char*>(), nv.as<const char*>())) return 2;
+    }
     *cfg = tmp;
     return 0;
 }
@@ -1400,4 +1498,71 @@ bool msc_fat_key_at(const DeviceConfig* cfg, int index, String* line)
         return true;
     }
     return false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Wi-Fi network (radio_mode "wifi"): NVS only. The SSID is cached for "list" and "get"; the
+// password is read only by msc_fat_wifi_password(), for the Wi-Fi start.
+// ─────────────────────────────────────────────────────────────────────────────
+static char s_wifi_ssid[33] = "";
+static bool s_wifi_pass = false;
+static bool s_wifi_loaded = false;
+
+static void wifi_load()
+{
+    if (s_wifi_loaded) return;
+    s_wifi_loaded = true;
+    Preferences p;
+    if (!p.begin(NVS_WIFI_NAMESPACE, true)) return;  // namespace not made yet: nothing stored
+    String ssid = p.getString("ssid", "");
+    snprintf(s_wifi_ssid, sizeof(s_wifi_ssid), "%s", ssid.c_str());
+    s_wifi_pass = p.isKey("pass");
+    p.end();
+}
+
+bool msc_fat_wifi_set(const char* ssid, const char* pass)
+{
+    Preferences p;
+    if (!p.begin(NVS_WIFI_NAMESPACE, false)) return false;
+    bool ok = p.putString("ssid", ssid) == strlen(ssid);
+    if (pass && pass[0]) ok = ok && p.putString("pass", pass) == strlen(pass);
+    else if (p.isKey("pass")) p.remove("pass");  // an open network: no password stored
+    p.end();
+    s_wifi_loaded = false;
+    wifi_load();
+    return ok;
+}
+
+void msc_fat_wifi_clear()
+{
+    Preferences p;
+    if (p.begin(NVS_WIFI_NAMESPACE, false)) {
+        p.clear();
+        p.end();
+    }
+    s_wifi_ssid[0] = 0;
+    s_wifi_pass = false;
+    s_wifi_loaded = true;
+}
+
+const char* msc_fat_wifi_ssid()
+{
+    wifi_load();
+    return s_wifi_ssid;
+}
+
+bool msc_fat_wifi_has_password()
+{
+    wifi_load();
+    return s_wifi_pass;
+}
+
+void msc_fat_wifi_password(char* out, size_t cap)
+{
+    if (!cap) return;
+    out[0] = 0;
+    Preferences p;
+    if (!p.begin(NVS_WIFI_NAMESPACE, true)) return;
+    if (p.isKey("pass")) p.getString("pass", out, cap);
+    p.end();
 }

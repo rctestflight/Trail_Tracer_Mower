@@ -190,6 +190,16 @@ int packEvent(uint8_t* o, uint16_t code, int32_t a, int32_t b, const char* text)
   return n;
 }
 
+int packName(uint8_t* o, uint8_t vehicle_id, const char* name) {
+  size_t n = name ? strlen(name) : 0;
+  if (n > (size_t)VEHICLE_NAME_MAX) n = VEHICLE_NAME_MAX;
+  o[0] = BODY_NAME;
+  o[1] = vehicle_id;
+  o[2] = (uint8_t)n;
+  memcpy(o + 3, name, n);
+  return 3 + (int)n;
+}
+
 int packBins(uint8_t* o, uint8_t frames, uint16_t window_ms, const float hz[BINS], const int32_t v[BINS][4]) {
   o[0] = BODY_BINS;
   o[1] = frames;
