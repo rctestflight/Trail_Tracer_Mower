@@ -156,6 +156,8 @@ u8 body type 0x20, u8 n (1 to 7), then n samples of 32 bytes. One sample is take
 
 Size: 14 + 2 + 7 x 32 = 240 bytes a frame, about 14.3 frames a second, about 27 kbit/s.
 
+With the STM32 link version 2 (firmware 0.5.45 and later), bytes 22 to 29 hold sensor 1 coil 1, sensor 1 coil 2, sensor 2 coil 1 and sensor 2 coil 2 at the wire bin of each sensor, in STM32 magnitude units (2^-24 LSB). From 0.5.72 they are signed (the STM32 sign of each coil value); up to 0.5.71 they held the absolute value.
+
 ### Body 0x22: sample block with the six IMU axes (stream 0)
 
 The mower sends 0x22 in place of 0x20 when it has an MPU6050 (or in a bench build with `BENCH_FAKE_IMU`). u8 body type 0x22, u8 n (1 to 5), then n samples of 42 bytes. Bytes 0 to 31 of a sample are the 0x20 sample above (gyro z at byte 18). Then:

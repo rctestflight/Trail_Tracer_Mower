@@ -197,9 +197,9 @@ void usbLoadService(){
 
 static const char* TAG = "wfrx";
 #ifdef BENCH_FAKE_IMU
-#define ROVER_FW_VERSION "0.5.71+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.5.72+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #else
-#define ROVER_FW_VERSION "0.5.71"  // 0.5.71: radio_mode wifi: telemetry as UDP over a Wi-Fi network (lib/wifi_telem, the 2026-10-12 work, ported); 0.5.70: "set" takes text settings (vehicle_name, drive_output) as the rest of the line; 0.5.69: settings from the operator review: drive_output (servos as V1.0, or CAN; auto), servo map by function, vehicle_name, 4S limit, steer_lpf_hz, charge time as it is; 0.5.68: the 8-bin coil record (0x2E) goes through the log anti-alias filter at telemetry_bins_hz (default 5); 0.5.67: USB driver copy: TX FIFO register of the FIFO in use (DIEPTXF[TxFNum-1]; the CDC output FIFO pointed outside the FIFO RAM: output stops at Monitor Rx start and mid-run), IN endpoints disabled through the core at a bus reset and a close; a guard reconnect ejects the drive first; usbregs with FIFO registers and driver counters, the stop record printed 3 times; 0.5.66: telemetry body 0x2E, the coil magnitudes of all 8 bins of both sensors, 5 a second; 0.5.65: "stm restart" (Rx STM32 command 41, app 2.0.39+): Rx STM32 update with no power cycle; 0.5.64: USB output fix from the bench line (0.5.60-dev10 to dev13): project copy of the TinyUSB ESP32-S2 device driver (lib/tinyusb_dcd_fix) with no zero-length packet on data IN endpoints; USB register record at each output stop and over a restart (monitor). 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
+#define ROVER_FW_VERSION "0.5.72"  // 0.5.72: log sample coil values signed (were |v|); 0.5.71: radio_mode wifi: telemetry as UDP over a Wi-Fi network (lib/wifi_telem, the 2026-10-12 work, ported); 0.5.70: "set" takes text settings (vehicle_name, drive_output) as the rest of the line; 0.5.69: settings from the operator review: drive_output (servos as V1.0, or CAN; auto), servo map by function, vehicle_name, 4S limit, steer_lpf_hz, charge time as it is; 0.5.68: the 8-bin coil record (0x2E) goes through the log anti-alias filter at telemetry_bins_hz (default 5); 0.5.67: USB driver copy: TX FIFO register of the FIFO in use (DIEPTXF[TxFNum-1]; the CDC output FIFO pointed outside the FIFO RAM: output stops at Monitor Rx start and mid-run), IN endpoints disabled through the core at a bus reset and a close; a guard reconnect ejects the drive first; usbregs with FIFO registers and driver counters, the stop record printed 3 times; 0.5.66: telemetry body 0x2E, the coil magnitudes of all 8 bins of both sensors, 5 a second; 0.5.65: "stm restart" (Rx STM32 command 41, app 2.0.39+): Rx STM32 update with no power cycle; 0.5.64: USB output fix from the bench line (0.5.60-dev10 to dev13): project copy of the TinyUSB ESP32-S2 device driver (lib/tinyusb_dcd_fix) with no zero-length packet on data IN endpoints; USB register record at each output stop and over a restart (monitor). 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
 
@@ -4813,15 +4813,16 @@ void telemetrySample(){
   s.btx1_mm = stmPacket.items.s1_btx_radius[0];
   s.btx2_mm = stmPacket.items.s1_btx_radius[1];
   if (stm_link_ver == 2) {
-    // Layout 2 (0.5.45+): the coil fields carry magnitudes, sensor 1 coil 1, sensor 1 coil 2, sensor 2 coil 1,
-    // sensor 2 coil 2, at the wire bin of each sensor (bin 0 if the sensor has none), magnitude = |v| x 2^-24.
-    // rover_log.py gives them as "coil_mag" when the status record shows firmware 0.5.45+ and status bit 24.
+    // Layout 2 (0.5.45+): the coil fields carry the coil values, sensor 1 coil 1, sensor 1 coil 2, sensor 2 coil 1,
+    // sensor 2 coil 2, at the wire bin of each sensor (bin 0 if the sensor has none), value = v x 2^-24. From 0.5.72
+    // signed (the Rx STM32 sign, the field side of the coil axis); up to 0.5.71 |v|. Below 100 Hz the log filter
+    // averages the signed value. rover_log.py gives them as "coil_mag" (firmware 0.5.45+ and status bit 24).
     for (int sn = 0; sn < 2; sn++) {
       const int lane = ((stmDec.lanes >> 1) & 1) == sn ? 1 : 0;  // lane 2 if it reads this sensor, else lane 1
       const int bn = stmDec.wireBin(sn) < 0 ? 0 : stmDec.wireBin(sn);
       const int32_t v1 = wfrx_int24_get(stmDec.coil[lane][bn].v1), v2 = wfrx_int24_get(stmDec.coil[lane][bn].v2);
-      s.coil[2 * sn] = (float)(v1 < 0 ? -v1 : v1) * (1.0f / 16777216.0f);
-      s.coil[2 * sn + 1] = (float)(v2 < 0 ? -v2 : v2) * (1.0f / 16777216.0f);
+      s.coil[2 * sn] = (float)v1 * (1.0f / 16777216.0f);
+      s.coil[2 * sn + 1] = (float)v2 * (1.0f / 16777216.0f);
     }
   } else {
     for (int i = 0; i < 4; i++) s.coil[i] = stmPacket.items.coil_data[0][i];
