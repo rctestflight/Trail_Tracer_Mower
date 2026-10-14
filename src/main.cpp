@@ -198,9 +198,9 @@ void usbLoadService(){
 
 static const char* TAG = "wfrx";
 #ifdef BENCH_FAKE_IMU
-#define ROVER_FW_VERSION "0.5.74+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.5.75+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #else
-#define ROVER_FW_VERSION "0.5.74"  // 0.5.74: stm raw: Rx STM32 raw stream (command 42) end to end to USB; 0.5.73b: raw tests up to 5 Mbaud; 0.5.73: raw stream pass-through and rate tests (raw usb, raw pass, raw loop); 0.5.72: log sample coil values signed (were |v|); 0.5.71: radio_mode wifi: telemetry as UDP over a Wi-Fi network (lib/wifi_telem, the 2026-10-12 work, ported); 0.5.70: "set" takes text settings (vehicle_name, drive_output) as the rest of the line; 0.5.69: settings from the operator review: drive_output (servos as V1.0, or CAN; auto), servo map by function, vehicle_name, 4S limit, steer_lpf_hz, charge time as it is; 0.5.68: the 8-bin coil record (0x2E) goes through the log anti-alias filter at telemetry_bins_hz (default 5); 0.5.67: USB driver copy: TX FIFO register of the FIFO in use (DIEPTXF[TxFNum-1]; the CDC output FIFO pointed outside the FIFO RAM: output stops at Monitor Rx start and mid-run), IN endpoints disabled through the core at a bus reset and a close; a guard reconnect ejects the drive first; usbregs with FIFO registers and driver counters, the stop record printed 3 times; 0.5.66: telemetry body 0x2E, the coil magnitudes of all 8 bins of both sensors, 5 a second; 0.5.65: "stm restart" (Rx STM32 command 41, app 2.0.39+): Rx STM32 update with no power cycle; 0.5.64: USB output fix from the bench line (0.5.60-dev10 to dev13): project copy of the TinyUSB ESP32-S2 device driver (lib/tinyusb_dcd_fix) with no zero-length packet on data IN endpoints; USB register record at each output stop and over a restart (monitor). 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
+#define ROVER_FW_VERSION "0.5.75"  // 0.5.75: raw usb writes each block in pieces (the USB buffer is under 512 B); 0.5.74: stm raw: Rx STM32 raw stream (command 42) end to end to USB; 0.5.73b: raw tests up to 5 Mbaud; 0.5.73: raw stream pass-through and rate tests (raw usb, raw pass, raw loop); 0.5.72: log sample coil values signed (were |v|); 0.5.71: radio_mode wifi: telemetry as UDP over a Wi-Fi network (lib/wifi_telem, the 2026-10-12 work, ported); 0.5.70: "set" takes text settings (vehicle_name, drive_output) as the rest of the line; 0.5.69: settings from the operator review: drive_output (servos as V1.0, or CAN; auto), servo map by function, vehicle_name, 4S limit, steer_lpf_hz, charge time as it is; 0.5.68: the 8-bin coil record (0x2E) goes through the log anti-alias filter at telemetry_bins_hz (default 5); 0.5.67: USB driver copy: TX FIFO register of the FIFO in use (DIEPTXF[TxFNum-1]; the CDC output FIFO pointed outside the FIFO RAM: output stops at Monitor Rx start and mid-run), IN endpoints disabled through the core at a bus reset and a close; a guard reconnect ejects the drive first; usbregs with FIFO registers and driver counters, the stop record printed 3 times; 0.5.66: telemetry body 0x2E, the coil magnitudes of all 8 bins of both sensors, 5 a second; 0.5.65: "stm restart" (Rx STM32 command 41, app 2.0.39+): Rx STM32 update with no power cycle; 0.5.64: USB output fix from the bench line (0.5.60-dev10 to dev13): project copy of the TinyUSB ESP32-S2 device driver (lib/tinyusb_dcd_fix) with no zero-length packet on data IN endpoints; USB register record at each output stop and over a restart (monitor). 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
 
@@ -1877,15 +1877,22 @@ void rawCommand(const char* arg){
 void rawService(){
   if ((int32_t)(millis() - raw_end_ms) >= 0) { rawStop(); return; }
   static uint8_t b[512];
-  if (raw_mode == 1) {
-    for (int i = 0; i < 64 && Serial.availableForWrite() >= (int)sizeof(b); i++) {
-      memcpy(b, "RAWU", 4);
-      memcpy(b + 4, &raw_seq, 4);
-      for (int k = 8; k < (int)sizeof(b); k++) b[k] = (uint8_t)(raw_seq + k);
-      const size_t w = Serial.write(b, sizeof(b));
+  if (raw_mode == 1) {  // the USB transmit buffer holds less than a block: each block goes out in pieces
+    static size_t off = 0;
+    for (int i = 0; i < 256; i++) {
+      if (off == 0) {
+        memcpy(b, "RAWU", 4);
+        memcpy(b + 4, &raw_seq, 4);
+        for (int k = 8; k < (int)sizeof(b); k++) b[k] = (uint8_t)(raw_seq + k);
+      }
+      const int room = Serial.availableForWrite();
+      if (room <= 0) break;
+      const size_t n = (size_t)room < sizeof(b) - off ? (size_t)room : sizeof(b) - off;
+      const size_t w = Serial.write(b + off, n);
       raw_out += w;
-      if (w < sizeof(b)) { raw_drop += sizeof(b) - w; break; }
-      raw_seq++;
+      off += w;
+      if (off >= sizeof(b)) { off = 0; raw_seq++; }
+      if (w < n) break;
     }
     return;
   }
