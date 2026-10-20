@@ -48,6 +48,8 @@ void begin(const Hooks& hooks);  // early in setup(): reads the confirm flag of 
 void command(const char* arg);   // the text after "ota "
 void service();                  // each loop(): marks the image valid, or rolls back; "ota url" lines and restart
 bool busy();                     // a download runs ("ota url" or fetch_start), or it ended well and is not yet taken
+                                 // (also an upload from the update page: push_begin)
+bool fetching();                 // busy() for a download that the board fetches ("ota url", fetch_start), not an upload
 Print* set_out(Print* out);      // another answer output (e.g. one that also keeps the line for a radio answer); returns the old
 
 // A download into a data partition (the firmware's "stm url"): the same HTTP fetch, task and refusals as "ota url"

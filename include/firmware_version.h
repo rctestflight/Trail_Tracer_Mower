@@ -3,6 +3,9 @@
 #pragma once
 
 // Change history
+//   0.6.19: the update page works again in update mode: the web server stops only for a download the board fetches
+//     ("ota url"), not during a page upload (it waited for the upload handler: an RTC watchdog reset or "no answer
+//     from the main loop")
 //   0.6.18: src/main.cpp holds the vehicle code only; the board code is in src/platform/ behind include/rx_platform.h
 //     (no change of behaviour)
 //   0.6.17: during an app update download the web server and mDNS stop until the restart (more free memory for Wi-Fi)
@@ -199,12 +202,12 @@
 #if defined(OTA_TEST_VERSION)
 #define ROVER_FW_VERSION OTA_TEST_VERSION  // OTA test images (envs ota_a, ota_b, ota_test_crash)
 #elif defined(BENCH_FAKE_IMU)
-#define ROVER_FW_VERSION "0.6.18+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.6.19+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #elif defined(SETTINGS_NEWKEY)
-#define ROVER_FW_VERSION "0.6.18-newkey"  // bench build: one more table line (test_new_setting)
+#define ROVER_FW_VERSION "0.6.19-newkey"  // bench build: one more table line (test_new_setting)
 #elif defined(TELEMETRY_NEWVALUE)
-#define ROVER_FW_VERSION "0.6.18-newvalue"  // bench build: the example lines of include/user_telemetry.h
+#define ROVER_FW_VERSION "0.6.19-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.6.18"
+#define ROVER_FW_VERSION "0.6.19"
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A

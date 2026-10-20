@@ -175,10 +175,11 @@ bool platformLoopStart(){
       // 0.6.17: during an "ota url" download (the app update) the web server and mDNS stop until the restart: their
       // memory goes to the Wi-Fi receive path. The largest free block fell to 2.3 KB and a download stalled at 517 of
       // 1100 KB. Not during a page upload: the web server carries that one.
-      if (usb_ota::busy()) {
-        if (web::running()) { web::stop(); usbOut.println("UPDATE web server stopped for the download"); }
-        wifilink::mdnsStop();
-      }
+      // 0.6.19: fetching(), not busy(): busy() is true during a page upload too, and the web server stop then waited for
+      // the upload handler, more than 8 s (an RTC watchdog reset, or "no answer from the main loop"). mDNS stops for a page
+      // upload too: the ESP32 image start needs a 4 KB block, and the largest free block was 2.3 KB.
+      if (usb_ota::fetching() && web::running()) { web::stop(); usbOut.println("UPDATE web server stopped for the download"); }
+      if (usb_ota::busy()) wifilink::mdnsStop();
       usb_ota::service();
       benchSerial();
       static uint32_t update_hb_ms = 0, drained = 0;

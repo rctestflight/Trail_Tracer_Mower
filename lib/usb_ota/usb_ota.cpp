@@ -458,6 +458,7 @@ void begin(const Hooks& hooks) {
 }
 
 bool busy() { return dl_state == DL_RUN || dl_state == DL_OK; }
+bool fetching() { return busy() && !dl_push; }
 
 Print* set_out(Print* out) {
   Print* old = h.out;
