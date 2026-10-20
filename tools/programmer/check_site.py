@@ -50,10 +50,24 @@ def texty(s):
     return len(re.findall(r"[A-Za-z0-9 .,:;_/()'-]", s)) >= 0.8 * len(s)
 
 
+def word_case(w):
+    """A word as text writes it: any case except a lower-case first letter with a capital after it. Machine code
+    gives that mixed case as often as not; such a match in a binary is not a word."""
+    letters = [c for c in w if c.isalpha()]
+    return not (letters and letters[0].islower() and any(c.isupper() for c in letters[1:]))
+
+
+def banned_in(line, binary):
+    """A banned word in a text line; in a binary, only in a run that reads as text, in a case that text uses."""
+    if not binary:
+        return re.search(BANNED_WORDS, line, re.I) is not None
+    return texty(line) and any(word_case(m.group(0)) for m in re.finditer(BANNED_WORDS, line, re.I))
+
+
 def check_text(rel, text, findings, binary=False):
     """Findings name the file and the list only, never the matched text: the deploy log of a public repo is
     public, and a match would show an entry of the word lists."""
-    if any(re.search(BANNED_WORDS, line, re.I) for line in (text.split("\n") if binary else [text]) if not binary or texty(line)):
+    if any(banned_in(line, binary) for line in (text.split("\n") if binary else [text])):
         findings.append(f"{rel}: banned word list")
     if any(re.search(p, text) for p in SECRET_PATTERNS):
         findings.append(f"{rel}: possible secret")

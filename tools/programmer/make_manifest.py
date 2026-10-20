@@ -6,7 +6,7 @@ size and SHA-256, and the load data of the chip). The page reads index.json, the
 
 ESP32 firmware from a PlatformIO build:
   python tools/make_manifest.py esp32 --repo-dir <firmware repo> --out builds
-  (files from .pio/build/<env>; version from ROVER_FW_VERSION in src/main.cpp; git data from the repo)
+  (files from .pio/build/<env>; version from ROVER_FW_VERSION in include/firmware_version.h or src/main.cpp; git data from the repo)
 ESP32 files from a folder, with the source named by hand:
   python tools/make_manifest.py esp32 --files <folder with firmware.bin ...> --repo <owner/repo>
       --branch <branch> --commit <sha> --version <version> --out builds
@@ -133,8 +133,11 @@ def esp32(a):
         raise SystemExit("stop: firmware.bin is not rover firmware (no 'rover-firmware' text)")
     version = a.version
     if not version and repo_dir:
-        m = re.search(r'#define ROVER_FW_VERSION "([^"]+)"', (repo_dir / "src/main.cpp").read_text(encoding="utf-8"))
-        version = m and m.group(1)
+        # ROVER_FW_VERSION: include/firmware_version.h (0.6.18 on), src/main.cpp before
+        text = "".join((repo_dir / f).read_text(encoding="utf-8")
+                       for f in ("include/firmware_version.h", "src/main.cpp") if (repo_dir / f).exists())
+        versions = [v for v in re.findall(r'#define ROVER_FW_VERSION "([^"]+)"', text) if v.encode() in fw]
+        version = versions[0] if versions else None
     if rover and (not version or version.encode() not in fw):
         raise SystemExit(f"stop: version {version!r} is not in firmware.bin")
     manifest = {

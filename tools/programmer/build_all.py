@@ -151,10 +151,12 @@ def build(repo, ref, sha, cfg, out, work):
         cmd = [sys.executable, str(HERE / "make_manifest.py"), "esp32", "--files", str(bdir), "--repo", repo, "--branch", ref,
                "--commit", sha, "--subject", "", "--out", str(out)] + (["--label", esp["label"]] if esp else [])
         if b"rover-firmware" in fw:
-            main_cpp = (src / "src" / "main.cpp").read_text(encoding="utf-8", errors="replace")
-            versions = [v for v in re.findall(r'#define ROVER_FW_VERSION "([^"]+)"', main_cpp) if v.encode() in fw]
+            # ROVER_FW_VERSION: include/firmware_version.h (0.6.18 on), src/main.cpp before
+            text = "".join((src / f).read_text(encoding="utf-8", errors="replace")
+                           for f in ("include/firmware_version.h", "src/main.cpp") if (src / f).exists())
+            versions = [v for v in re.findall(r'#define ROVER_FW_VERSION "([^"]+)"', text) if v.encode() in fw]
             if not versions:
-                raise RuntimeError("no ROVER_FW_VERSION of src/main.cpp is in firmware.bin")
+                raise RuntimeError("no ROVER_FW_VERSION of include/firmware_version.h or src/main.cpp is in firmware.bin")
             cmd += ["--version", versions[0]]
         else:
             cmd += ["--family", "main", "--table", "main", "--version", f"{ref} {sha[:7]}"]
