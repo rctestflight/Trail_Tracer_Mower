@@ -101,6 +101,11 @@ footer { max-width:760px; margin:0 auto; padding:0 16px 24px; }
 .slot { flex:none; width:16px; height:16px; display:inline-flex; }
 .btns .spin { align-self:center; width:24px; height:24px; margin-top:10px; }
 #rxDetail .spin { margin-left:8px; }
+#s1say.nousb { height:auto; }
+/* phone: one column, the buttons full width under the text (the firmware list is read on a phone; no USB there) */
+@media (max-width: 600px) { .cols { grid-template-columns:minmax(0, 1fr); gap:10px; }
+  .cols.rx { grid-template-columns:120px minmax(0, 1fr); } .cols.rx .btns { grid-column:1 / -1; }
+  .btns button, .btns .step { width:100%; } .say { font-size:14px; line-height:20px; height:40px; } }
 </style>
 </head>
 <body>
@@ -113,7 +118,7 @@ footer { max-width:760px; margin:0 auto; padding:0 16px 24px; }
       <g stroke="#e5322d" stroke-width="6" stroke-linecap="round" marker-end="url(#ah)"><path d="M268 48L176 99"/><path d="M48 236L58 160"/></g>
       <g font-family="Roboto Mono, monospace" font-weight="700" font-size="30" stroke="#fff" stroke-width="6" paint-order="stroke" fill="#e5322d">
         <text x="196" y="36">1 Hold</text><text x="14" y="270">2 USB</text></g></svg></div>
-    <div class="mid"><div class="say">Hold the button while you plug in USB</div><div id="rxDetail"></div></div>
+    <div class="mid"><div id="s1say" class="say">Hold the button while you plug in USB</div><div id="rxDetail"></div></div>
     <div class="btns"><button id="doneBtn" class="primary">Done</button>
       <div id="s2" class="step"><button id="findBtn" class="primary">Find Rx Boards</button><button id="rxBtn" class="primary" hidden>Disconnect</button></div></div></div>
   <div id="fwCard" class="card cols step"><div class="mid"><div id="fwL1" class="line big"></div><div id="fwL2" class="line dim"></div><div id="fwL3" class="line gitref"></div></div>

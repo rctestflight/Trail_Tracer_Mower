@@ -775,9 +775,11 @@ function render() {
   const detail = (running && !!b) || !!(b && (b.connected || b.detecting)) || ended;
   const o0 = offerFor(b), connected = !!(b && b.connected && !b.detecting);
   $('s2').classList.toggle('off', !(ready1 || running || connected));
-  $('fwCard').classList.toggle('off', !connected || running);
+  $('fwCard').classList.toggle('off', running);          // the firmware list reads with no Rx and no USB access in the browser
+  setText($('s1say'), serialOk || !isSecureContext ? 'Hold the button while you plug in USB' : serialMsg);
+  $('s1say').classList.toggle('nousb', !serialOk && isSecureContext);
   $('s4').classList.toggle('off', !(running || (job && job.result) || (connected && o0.offer && currentRef())));
-  $('doneBtn').hidden = ready1;
+  $('doneBtn').hidden = ready1; $('doneBtn').disabled = !serialOk;
   $('findBtn').hidden = detail; $('rxBtn').hidden = !detail;
   $('findBtn').disabled = !serialOk || !(ready1 || running);
   setHtml($('rxDetail'), detail ? L.map((t, i) => `<div class="line${i ? '' : ' big'}" title="${esc(t)}">${esc(t)}${i === 1 && b && b.detecting ? '<span class="spin"></span>' : ''}</div>`).join('') : '');
@@ -786,7 +788,7 @@ function render() {
   $('refBtn').disabled = running;
   const o = offerFor(b);
   let I = '', tone = '', arrows = false;
-  if (!serialOk) { I = serialMsg; tone = 'bad'; }
+  if (!serialOk) { I = isSecureContext ? '' : serialMsg; tone = I ? 'bad' : ''; }   // no Web Serial: the one line is in the Rx card
   else if (running) { I = stepText || 'Keep the Rx plugged in.'; tone = stepText ? 'warn' : ''; arrows = stepText.startsWith(BUTTON_STEP); }
   else if (job && job.result) {
     if (job.result.ok) { I = job.kind === 'erase' ? 'ESP32 erased. Press Disconnect.' : '✓ Update done. Press Disconnect.'; tone = 'good'; }
@@ -1160,7 +1162,7 @@ async function start() {
     serialOk = false;
     serialMsg = !isSecureContext
       ? `This page needs a secure address for USB. Open http://localhost${location.port ? ':' + location.port : ''}${location.pathname} on the computer with the Rx.`
-      : 'This page needs Chrome or Edge on a computer. Phones and other browsers cannot reach USB devices.';
+      : 'No USB in this browser. To install, use Chrome or Edge on a computer.';
   }
   render();
   if (serialOk) {
