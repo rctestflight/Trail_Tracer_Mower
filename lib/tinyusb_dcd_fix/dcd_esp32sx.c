@@ -110,6 +110,7 @@ static uint8_t get_free_fifo(void)
 // reconnected. The waits are bounded: a core that does not answer leaves the endpoint as it was.
 // Bench counters (0.5.67): bus resets, endpoint closes, IN endpoints found enabled and disabled, disable time-outs.
 volatile uint32_t dcd_fix_cnt[4];
+volatile uint32_t dcd_unknown_cnt = 0;  // IN endpoint interrupts with DIEPINT bit 15 set (see handle_epin_ints)
 volatile uint32_t dcd_fix_old_txf[4];  // bench: each FIFO register as found before the endpoint open wrote it
 static void in_ep_disable(uint8_t n)
 {
@@ -848,9 +849,11 @@ static void handle_epin_ints(void)
       ESP_EARLY_LOGV(TAG, "TUSB IRQ - EP IN %u", n);
 
       if (USB0.in_ep_reg[n].diepint & BIT(15)) {
+        // FIX (0.5.112): clear and count; no bus reset. The upstream bus reset here cleared the device address, but no
+        // end of reset (ENUMDONE) followed: the stack stayed mounted at address 0 and the host got no answer until a
+        // power cycle (Monitor Rx USB failure, about 1 in 70 starts; bench 2026-10-16).
         USB0.in_ep_reg[n].diepint = BIT(15);
-        ESP_EARLY_LOGE(TAG, "Unknown Condition");//todo:
-        bus_reset();
+        dcd_unknown_cnt++;
       }
 
       // IN XFER complete (entire xfer).

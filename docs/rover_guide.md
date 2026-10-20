@@ -101,7 +101,7 @@ Checked in the source (0.5.0), every ESP-NOW path:
 
 So the rover drives the same with or without a Monitor Rx, and when a Monitor Rx appears or goes.
 
-**The vehicle log without a Monitor Rx.** The rover keeps the last 70 samples (3.5 s at 20 Hz) and the last 24 status records in RAM, and the status and event records in a 448 KB flash ring (about 1.5 h, survives a power cycle). After a run, connect USB and use a serial terminal (115200 baud):
+**The vehicle log without a Monitor Rx.** The rover keeps the last 70 samples (3.5 s at 20 Hz) and the last 24 status records in RAM only (from firmware 0.5.82 nothing goes to flash; the records of the previous boot stay after a restart, not after a power cycle). The PC telemetry app records the full log. After a run, connect USB and use a serial terminal (115200 baud):
 
 - `log info`: which records the rover holds, for this boot and the previous one;
 - `log dump 1 0 1000000`: all status and event records; `log dump 0 0 1000000`: all held samples (one `LOG <hex>` line each, then `LOG end`);
@@ -190,6 +190,7 @@ The loop watchdog is a timer that restarts the board when `loop()` stops for 5 s
 |---|---|
 | `get <key>`, `set <key> <value>`, `save`, `list` | Settings |
 | `run start`, `run stop` | As in section 5 |
+| `sweep <index> <value>`, `bin <index> <hz>` | Bin sweep and one bin on a frequency, to the Rx STM32, not saved (`docs/espnow_protocol.md`, CMD and ACK) |
 | `log info`, `log dump ...`, `log dumpprev ...` | Vehicle log, section 4 |
 | `boot` | Version, reset reason, start-up times |
 | `stat` | CRC errors, UART overruns, ESP-NOW counters |

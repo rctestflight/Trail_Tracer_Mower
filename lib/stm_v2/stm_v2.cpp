@@ -4,12 +4,15 @@
 
 #include <math.h>
 #include <string.h>
+#include <esp_attr.h>  // IRAM_ATTR
 
 namespace stmv2 {
 
 // CRC-16, polynomial 0x8005, init 0xFFFF, no reflection: one table lookup a byte (the bitwise loop took 55 us for a
 // 126-byte frame on the ESP32-S2, rt bench 2026-10-12). The table is built once, on the first call.
-uint16_t crc16(const uint8_t* p, size_t n) {
+// 0.5.102: crc16, mag and decode run from IRAM. From flash they took 375 us a frame in the loop (8 KB instruction
+// cache, evicted by the rest of the pass) against 104 us in a tight loop (rt bench 2026-10-13).
+IRAM_ATTR uint16_t crc16(const uint8_t* p, size_t n) {
   static uint16_t t[256];
   static bool built = false;
   if (!built) {
@@ -37,6 +40,8 @@ Cal::Cal() {
 void Decoder::reset() {
   have_seq_ = false;
   cal = Cal();
+  sweep_on = false;  // a new Rx STM32 starts with the sweep off
+  sweep = PageSweep{};
   lost[0] = lost[1] = true;
   regain_frames_[0] = regain_frames_[1] = 0;
 }
@@ -60,7 +65,7 @@ void Decoder::learn(const Answer& ans) {  // values in effect, from reads and wr
   }
 }
 
-static float mag(const WfrxCoilPair& p, float* s1, float* s2) {
+IRAM_ATTR static float mag(const WfrxCoilPair& p, float* s1, float* s2) {
   *s1 = (float)wfrx_int24_get(p.v1) / (float)(1L << WFRX_MAG_LSB_SHIFT);
   *s2 = (float)wfrx_int24_get(p.v2) / (float)(1L << WFRX_MAG_LSB_SHIFT);
   return sqrtf(*s1 * *s1 + *s2 * *s2);
@@ -72,16 +77,40 @@ bool Decoder::centreAngle(int s, float* phi_new) const {
   return true;
 }
 
-bool Decoder::decode(const uint8_t* f, __StmTxPacketStruct& out, Answer& ans) {
+IRAM_ATTR bool Decoder::decode(const uint8_t* f, __StmTxPacketStruct& out, Answer& ans, int len, uint32_t now_ms) {
   StmFrameV2 fr;
-  memcpy(&fr, f, sizeof(fr));
-  if (crc16(f, STM_FRAME_LEN - 2) != fr.crc) { st.crc_err++; return false; }
-  if (fr.proto_ver != WFRX_PROTO_VER) { st.ver_err++; return false; }
+  memcpy(&fr, f, sizeof(fr));  // the first 126 B are the same in versions 2 and 3; fr.crc is not used
+  const uint16_t crc_rx = (uint16_t)(f[len - 2] | (f[len - 1] << 8));
+  if (crc16(f, (size_t)len - 2) != crc_rx) { st.crc_err++; return false; }
+  const bool v3 = len == (int)STM_FRAME_LEN_V3;
+  if (fr.proto_ver != (v3 ? WFRX_PROTO_VER3 : WFRX_PROTO_VER)) { st.ver_err++; return false; }
+  proto = fr.proto_ver;
+  if (v3) {  // the extension slot: 4 items
+    const uint16_t t10 = (uint16_t)((now_ms / 10u) | 1u);  // never 0 (0 = never came)
+    for (unsigned k = 0; k < WFRX_EXT_ITEMS; k++) {
+      const uint8_t* it = f + WFRX_EXT_OFFSET + 4 * k;
+      const uint8_t id = it[0], ix = it[1];
+      if (id == 0) continue;
+      if (id > WFRX_EXT_IDS || (ix & 0xE8u)) { ext_bad++; continue; }  // index: bits 0-2 (bin or Tx channel 0-4) and bit 4 only
+      const unsigned slot = (ix & 7u) | ((ix >> 1) & 8u);
+      int16_t v;
+      memcpy(&v, it + 2, 2);
+      ext_val[id - 1][slot] = v;
+      ext_t10[id - 1][slot] = t10;
+      ext_items++;
+    }
+  }
   st.frames++;
   if (have_seq_) st.seq_lost += (uint8_t)(fr.seq - last_seq_ - 1);
   have_seq_ = true;
   last_seq_ = fr.seq;
   status_bits = fr.status_bits;
+  polar_on = (fr.status_bits & WFRX_STATUS_POLAR_STREAM) != 0;
+  if (polar_on) {
+    static_assert(sizeof(fr.coil[1]) == POLAR_BLOCK, "result 2 is the 48 B detector block");
+    memcpy(polar, fr.coil[1], POLAR_BLOCK);
+    memset(fr.coil[1], 0, sizeof(fr.coil[1]));
+  }
   memcpy(coil, fr.coil, sizeof(coil));
 
   ans.present = fr.resp_cid != 0;
@@ -105,6 +134,10 @@ bool Decoder::decode(const uint8_t* f, __StmTxPacketStruct& out, Answer& ans) {
     // beacons: bins 5 and 6
     for (int j = 0; j < 2; j++) {
       const int bin = 5 + j;
+      if (sweep_on && ((sweep.mask >> bin) & 1u)) {  // a sweep bin: no beacon
+        if (s == 0) out.s1_btx_radius[j] = 32767.0f; else out.s2_btx_radius[j] = 32767.0f;
+        continue;
+      }
       const float m = mag(fr.coil[k][bin], &s1, &s2) * (cal.have_gain[s][bin] ? cal.gain[s][bin] : 0.0f);
       const float r = m > 0 ? 12.22f * fastpow::pow_(m, -0.330478f) : 32767.0f;  // powf to 1e-6 (fast_pow.h)
       if (s == 0) out.s1_btx_radius[j] = r; else out.s2_btx_radius[j] = r;
@@ -158,7 +191,11 @@ bool Decoder::decode(const uint8_t* f, __StmTxPacketStruct& out, Answer& ans) {
   }
   out.status_bits = sb;
 
-  if ((fr.seq & 1u) == 0) {
+  page_sweep = false;
+  if (sweep_on && (fr.seq & 3u) == 1) {
+    sweep = fr.page.sweep;
+    page_sweep = true;
+  } else if ((fr.seq & 1u) == 0) {
     meas = fr.page.meas;
     have_meas = true;
     out.vbatt = meas.vbatt_mv * 0.001f;
@@ -186,6 +223,20 @@ void encodeCmd(uint8_t seq, uint8_t cid8, uint8_t index, uint32_t value, uint8_t
   const uint16_t c = crc16(out, 8);
   out[8] = (uint8_t)(c & 0xFF);
   out[9] = (uint8_t)(c >> 8);
+}
+
+void encodeUartFrame(uint8_t version, int16_t angle, uint32_t flags, uint8_t seq, uint8_t cid8, uint8_t index, uint32_t value,
+                     uint8_t out[ESP_UART_FRAME_LEN], uint16_t crc_xor) {
+  out[0] = version;
+  memcpy(out + 1, &angle, 2);
+  memcpy(out + 3, &flags, 4);
+  out[7] = seq;
+  out[8] = cid8;
+  out[9] = index;
+  memcpy(out + 10, &value, 4);
+  const uint16_t c = crc16(out, 14) ^ crc_xor;
+  out[14] = (uint8_t)(c & 0xFF);
+  out[15] = (uint8_t)(c >> 8);
 }
 
 }  // namespace stmv2

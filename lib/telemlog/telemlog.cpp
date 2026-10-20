@@ -139,275 +139,6 @@ void send_counted(telemlog_send_fn send, const uint8_t *mac, const uint8_t *buf,
 
 }  // namespace
 
-// ---- SLOW flash ring ---------------------------------------------------------------------------
-// Each boot starts writing in a fresh sector (the attach scan never appends to a sector it found),
-// so one sector holds records of one boot only. Sectors are used in circular order.
-namespace {
-
-#define FL_PAGES (TELEMLOG_FLASH_SECTOR / TELEMLOG_FLASH_PAGE)
-#define FL_PAGE_HDR 8
-
-enum FState : uint8_t { FS_UNKNOWN, FS_ERASED, FS_USED, FS_DIRTY };
-
-struct FSec {
-  uint32_t page_seq0;  // page_seq of the sector's first page
-  uint32_t boot_id, first_seq, last_seq;
-  uint8_t state, pages;
-};
-
-struct Stage {
-  uint8_t buf[TELEMLOG_FLASH_PAGE];
-  uint16_t len;
-  uint32_t first_seq, last_seq;
-  bool full;
-};
-
-const telemlog_flash_t *g_fl = nullptr;
-FSec *g_fs = nullptr;
-uint32_t g_fs_n = 0;
-uint32_t g_scan_next = 0;
-bool g_scan_done = false;
-uint32_t g_page_seq_next = 1;
-uint32_t g_wsec = 0, g_wpage = FL_PAGES;  // FL_PAGES: no open sector yet
-Stage g_stage[2];
-int g_stage_cur = 0;
-uint32_t g_next_flashinfo_ms = 0;
-telemlog_flash_counters_t g_fc;
-uint8_t g_page[TELEMLOG_FLASH_PAGE];
-
-void stage_reset(Stage &s) {
-  memset(s.buf, 0xFF, sizeof(s.buf));
-  s.len = FL_PAGE_HDR;
-  s.full = false;
-}
-
-// Parses one page. Calls fn(frame, n) for each good entry; stops at the first bad one.
-template <typename F>
-void page_entries(const uint8_t *p, F fn) {
-  uint32_t off = FL_PAGE_HDR;
-  while (off + 3 <= TELEMLOG_FLASH_PAGE) {
-    uint32_t n = p[off];
-    if (n == 0xFF || n < TELEMLOG_LOG_HDR || off + 1 + n + 2 > TELEMLOG_FLASH_PAGE) return;
-    uint16_t crc = p[off + 1 + n] | p[off + 2 + n] << 8;
-    if (crc16(p + off + 1, n) != crc) return;
-    fn(p + off + 1, n);
-    off += 1 + n + 2;
-  }
-}
-
-bool page_hdr_ok(const uint8_t *p, uint32_t *seq) {
-  uint32_t a = get32(p), b = get32(p + 4);
-  if (a != ~b || a == 0xFFFFFFFFu) return false;
-  *seq = a;
-  return true;
-}
-
-// Scans one sector: state, boot, seq range, pages used. One call per sector, bounded cost.
-void scan_sector(uint32_t sec) {
-  FSec &f = g_fs[sec];
-  f = {0, 0, 0, 0, FS_ERASED, 0};
-  bool all_ff = true;
-  for (uint32_t pg = 0; pg < FL_PAGES; pg++) {
-    if (!g_fl->read(sec * TELEMLOG_FLASH_SECTOR + pg * TELEMLOG_FLASH_PAGE, g_page, sizeof(g_page))) {
-      f.state = FS_DIRTY;
-      return;
-    }
-    uint32_t ps;
-    if (page_hdr_ok(g_page, &ps) && (pg == 0 || f.state == FS_USED)) {
-      if (pg == 0) f.page_seq0 = ps;
-      if (ps + 1 > g_page_seq_next) g_page_seq_next = ps + 1;
-      f.state = FS_USED;
-      f.pages = (uint8_t)(pg + 1);
-      page_entries(g_page, [&](const uint8_t *fr, uint32_t) {
-        uint32_t boot = get32(fr + 2), seq = get32(fr + 6);
-        if (f.boot_id == 0) { f.boot_id = boot; f.first_seq = seq; }
-        if (boot == f.boot_id) f.last_seq = seq;
-      });
-      continue;
-    }
-    for (uint32_t i = 0; i < sizeof(g_page) && all_ff; i++) all_ff = g_page[i] == 0xFF;
-  }
-  if (f.state == FS_USED && f.boot_id == 0) f.state = FS_DIRTY;  // pages without a good entry
-  else if (f.state != FS_USED && !all_ff) f.state = FS_DIRTY;
-}
-
-void scan_finish() {
-  g_scan_done = true;
-  // Write next after the newest used sector, in a fresh sector.
-  uint32_t newest = 0;
-  bool any = false;
-  for (uint32_t s = 0; s < g_fs_n; s++) {
-    if (g_fs[s].state == FS_USED && (!any || g_fs[s].page_seq0 > g_fs[newest].page_seq0)) {
-      newest = s;
-      any = true;
-    }
-  }
-  g_wsec = any ? (newest + 1) % g_fs_n : 0;
-  g_wpage = 0;
-}
-
-void flash_stage(const uint8_t *frame, uint32_t n, uint32_t seq) {
-  if (!g_fl) return;
-  Stage *s = &g_stage[g_stage_cur];
-  if (s->full || s->len + 1 + n + 2 > TELEMLOG_FLASH_PAGE) {
-    if (s->len > FL_PAGE_HDR) s->full = true;
-    Stage *o = &g_stage[1 - g_stage_cur];
-    if (o->full) { g_fc.entries_skipped++; return; }  // both pages wait for a program
-    g_stage_cur = 1 - g_stage_cur;
-    s = o;
-    stage_reset(*s);
-  }
-  if (s->len == FL_PAGE_HDR) s->first_seq = seq;
-  s->last_seq = seq;
-  s->buf[s->len] = (uint8_t)n;
-  memcpy(s->buf + s->len + 1, frame, n);
-  uint16_t crc = crc16(frame, n);
-  s->buf[s->len + 1 + n] = (uint8_t)crc;
-  s->buf[s->len + 2 + n] = (uint8_t)(crc >> 8);
-  s->len = (uint16_t)(s->len + 1 + n + 2);
-  if (s->len + 1 + TELEMLOG_LOG_HDR + 1 + 2 > TELEMLOG_FLASH_PAGE) s->full = true;
-}
-
-// Programs one full staged page if a page is ready. Returns true if it used the flash.
-bool flash_program() {
-  Stage *s = g_stage[1 - g_stage_cur].full ? &g_stage[1 - g_stage_cur]
-           : g_stage[g_stage_cur].full     ? &g_stage[g_stage_cur] : nullptr;
-  if (!s) return false;
-  if (g_wpage >= FL_PAGES) {  // open the next sector
-    uint32_t next = (g_wpage == FL_PAGES && g_fs[g_wsec].state == FS_USED) ? (g_wsec + 1) % g_fs_n : g_wsec;
-    if (g_fs[next].state != FS_ERASED) return false;  // wait for an erase; staging fills, then skips
-    g_wsec = next;
-    g_wpage = 0;
-  }
-  if (g_wpage == 0 && g_fs[g_wsec].state != FS_ERASED) return false;
-  uint32_t ps = g_page_seq_next++;
-  put32(s->buf, ps);
-  put32(s->buf + 4, ~ps);
-  if (!g_fl->write(g_wsec * TELEMLOG_FLASH_SECTOR + g_wpage * TELEMLOG_FLASH_PAGE, s->buf, TELEMLOG_FLASH_PAGE)) {
-    g_fc.write_fail++;
-    g_fs[g_wsec].state = FS_DIRTY;  // never write this sector again before an erase
-    g_wpage = FL_PAGES;
-    return true;
-  }
-  FSec &f = g_fs[g_wsec];
-  if (g_wpage == 0) f = {ps, g_ring[1].seg[1].boot_id, s->first_seq, s->last_seq, FS_USED, 0};
-  f.last_seq = s->last_seq;
-  f.pages = (uint8_t)(g_wpage + 1);
-  g_wpage++;
-  g_fc.pages_written++;
-  stage_reset(*s);
-  return true;
-}
-
-// Erases the first sector, in write order, among the next TELEMLOG_FLASH_ERASED_AHEAD that is not erased.
-bool flash_erase_ahead() {
-  uint32_t start = (g_wpage == 0 && g_fs[g_wsec].state != FS_ERASED) ? 0 : 1;
-  if (g_wpage >= FL_PAGES && g_fs[g_wsec].state != FS_USED) start = 0;
-  for (uint32_t k = start; k <= TELEMLOG_FLASH_ERASED_AHEAD && k < g_fs_n; k++) {
-    uint32_t sec = (g_wsec + k) % g_fs_n;
-    if (sec == g_wsec && g_wpage > 0 && g_wpage < FL_PAGES) continue;  // the open sector
-    if (g_fs[sec].state == FS_ERASED) continue;
-    if (g_fl->erase_sector(sec)) {
-      g_fs[sec] = {0, 0, 0, 0, FS_ERASED, 0};
-      g_fc.sectors_erased++;
-    } else {
-      g_fc.erase_fail++;
-      g_fs[sec].state = FS_DIRTY;
-    }
-    return true;
-  }
-  return false;
-}
-
-// Finds a SLOW record in flash and copies its LOG frame. Returns the frame length or 0.
-size_t flash_fetch(uint32_t boot_id, uint32_t seq, uint8_t *frame, size_t cap) {
-  if (!g_fl || !g_scan_done) return 0;
-  for (uint32_t s = 0; s < g_fs_n; s++) {
-    const FSec &f = g_fs[s];
-    if (f.state != FS_USED || f.boot_id != boot_id || seq < f.first_seq || seq > f.last_seq) continue;
-    for (uint32_t pg = 0; pg < f.pages; pg++) {
-      if (!g_fl->read(s * TELEMLOG_FLASH_SECTOR + pg * TELEMLOG_FLASH_PAGE, g_page, sizeof(g_page))) return 0;
-      size_t got = 0;
-      page_entries(g_page, [&](const uint8_t *fr, uint32_t n) {
-        if (!got && get32(fr + 2) == boot_id && get32(fr + 6) == seq && n <= cap) {
-          memcpy(frame, fr, n);
-          got = n;
-        }
-      });
-      if (got) return got;
-    }
-  }
-  return 0;
-}
-
-}  // namespace
-
-bool telemlog_flash_attach(const telemlog_flash_t *flash) {
-  if (!flash || flash->sectors < TELEMLOG_FLASH_ERASED_AHEAD + 2) return false;
-  FSec *fs = (FSec *)realloc(g_fs, flash->sectors * sizeof(FSec));
-  if (!fs) return false;
-  g_fs = fs;
-  g_fs_n = flash->sectors;
-  for (uint32_t s = 0; s < g_fs_n; s++) g_fs[s] = {0, 0, 0, 0, FS_UNKNOWN, 0};
-  g_fl = flash;
-  g_scan_next = 0;
-  g_scan_done = false;
-  g_page_seq_next = 1;
-  g_wsec = 0;
-  g_wpage = FL_PAGES;
-  stage_reset(g_stage[0]);
-  stage_reset(g_stage[1]);
-  g_stage_cur = 0;
-  memset(&g_fc, 0, sizeof(g_fc));
-  return true;
-}
-
-void telemlog_flash_service(uint32_t now_ms, bool allow_erase) {
-  (void)now_ms;
-  if (!g_fl) return;
-  if (!g_scan_done) {  // one sector per call: no boot delay
-    scan_sector(g_scan_next++);
-    if (g_scan_next >= g_fs_n) scan_finish();
-    return;
-  }
-  if (flash_program()) return;
-  if (allow_erase) flash_erase_ahead();
-}
-
-void telemlog_flash_counters(telemlog_flash_counters_t *out) {
-  *out = g_fc;
-  out->used_sectors = out->erased_sectors = 0;
-  for (uint32_t s = 0; s < g_fs_n; s++) {
-    if (g_fs[s].state == FS_USED) out->used_sectors++;
-    if (g_fs[s].state == FS_ERASED) out->erased_sectors++;
-  }
-}
-
-size_t telemlog_flashinfo_frame(uint8_t *buf, size_t cap) {
-  if (cap < 2 || !g_fl || !g_scan_done) return 0;
-  // Boots in flash, newest first: for each boot the lowest first_seq and highest last_seq.
-  uint32_t n = 0, done_below = 0xFFFFFFFFu;
-  buf[0] = TELEMLOG_T_FLASHINFO;
-  while (n < TELEMLOG_FLASHINFO_MAX && 2 + 12 * (n + 1) <= cap) {
-    uint32_t boot = 0, lo = 0xFFFFFFFFu, hi = 0;
-    for (uint32_t s = 0; s < g_fs_n; s++)
-      if (g_fs[s].state == FS_USED && g_fs[s].boot_id < done_below && g_fs[s].boot_id > boot) boot = g_fs[s].boot_id;
-    if (boot == 0) break;
-    for (uint32_t s = 0; s < g_fs_n; s++) {
-      if (g_fs[s].state != FS_USED || g_fs[s].boot_id != boot) continue;
-      if (g_fs[s].first_seq < lo) lo = g_fs[s].first_seq;
-      if (g_fs[s].last_seq > hi) hi = g_fs[s].last_seq;
-    }
-    put32(buf + 2 + 12 * n, boot);
-    put32(buf + 6 + 12 * n, lo);
-    put32(buf + 10 + 12 * n, hi);
-    n++;
-    done_below = boot;
-  }
-  buf[1] = (uint8_t)n;
-  return 2 + 12 * n;
-}
-
 void telemlog_init(uint32_t boot_id, bool keep_previous) {
   g_st[0] = {&g_ring[0], &g_fast[0][0], TELEMLOG_FAST_SLOTS, TELEMLOG_FAST_SLOT_BYTES, TELEMLOG_FAST_BODY_MAX, 0};
   g_st[1] = {&g_ring[1], &g_slow[0][0], TELEMLOG_SLOW_SLOTS, TELEMLOG_SLOW_SLOT_BYTES, TELEMLOG_SLOW_BODY_MAX, 0};
@@ -439,11 +170,6 @@ void telemlog_init(uint32_t boot_id, bool keep_previous) {
   g_q_head = g_q_tail = 0;
   g_job_active = false;
   g_started = false;
-  if (g_fl) {  // a new boot never shares a sector with an older one
-    stage_reset(g_stage[0]);
-    stage_reset(g_stage[1]);
-    if (g_wpage > 0) g_wpage = FL_PAGES;
-  }
 }
 
 uint32_t telemlog_add(int stream, uint32_t ms, const uint8_t *body, size_t len) {
@@ -467,11 +193,6 @@ uint32_t telemlog_add(int stream, uint32_t ms, const uint8_t *body, size_t len) 
   // The record is complete before the header counts it, so a reset in between loses only it.
   r.gidx_next++;
   r.crc = ring_crc(r);
-  if (stream == TELEMLOG_SLOW && g_fl) {
-    uint8_t frame[TELEMLOG_LOG_HDR + TELEMLOG_SLOW_BODY_MAX];
-    size_t n = read_frame(stream, r.gidx_next - 1, r.seg[1].boot_id, seq, frame, sizeof(frame));
-    if (n) flash_stage(frame, (uint32_t)n, seq);
-  }
   return seq;
 }
 
@@ -481,7 +202,6 @@ size_t telemlog_get(int stream, uint32_t boot_id, uint32_t seq, uint8_t *buf, si
   if (stream < 0 || stream > 1) return 0;
   size_t n = 0;
   if (locate(stream, boot_id, seq, &gidx)) n = read_frame(stream, gidx, boot_id, seq, frame, sizeof(frame));
-  if (!n && stream == TELEMLOG_SLOW) n = flash_fetch(boot_id, seq, frame, sizeof(frame));
   if (n == 0 || n - TELEMLOG_LOG_HDR > cap) return 0;
   if (ms) *ms = get32(frame + 10);
   memcpy(buf, frame + TELEMLOG_LOG_HDR, n - TELEMLOG_LOG_HDR);
@@ -552,7 +272,7 @@ void telemlog_poll(uint32_t now_ms, telemlog_send_fn send) {
   bool ok;
   if (!g_started) {
     g_started = true;
-    g_next_backfill_ms = g_next_info_ms = g_second_start_ms = g_next_flashinfo_ms = now_ms;
+    g_next_backfill_ms = g_next_info_ms = g_second_start_ms = now_ms;
   }
   if ((int32_t)(now_ms - g_second_start_ms) >= 1000) {
     g_c.backfill_sent_last_s = g_backfill_this_s;
@@ -585,11 +305,6 @@ void telemlog_poll(uint32_t now_ms, telemlog_send_fn send) {
     size_t n = telemlog_info_frame(frame, sizeof(frame));
     send_counted(send, BROADCAST, frame, n, &ok);
   }
-  if (g_fl && g_scan_done && (int32_t)(now_ms - g_next_flashinfo_ms) >= 0) {
-    g_next_flashinfo_ms = now_ms + TELEMLOG_FLASHINFO_PERIOD_MS;
-    size_t n = telemlog_flashinfo_frame(frame, sizeof(frame));
-    if (n > 2) send_counted(send, BROADCAST, frame, n, &ok);
-  }
 
   // Backfill: one held record per call, at most one per TELEMLOG_BACKFILL_PERIOD_MS.
   if ((int32_t)(now_ms - g_next_backfill_ms) < 0) return;
@@ -608,7 +323,6 @@ void telemlog_poll(uint32_t now_ms, telemlog_send_fn send) {
     size_t n = 0;
     if (locate(g_job.stream, g_job.boot_id, seq, &gidx))
       n = read_frame(g_job.stream, gidx, g_job.boot_id, seq, frame, sizeof(frame));
-    if (!n && g_job.stream == TELEMLOG_SLOW) n = flash_fetch(g_job.boot_id, seq, frame, sizeof(frame));
     if (!n) continue;  // not held: skip, no rate cost
     send_counted(send, g_job.mac, frame, n, &ok);
     if (ok) { g_c.backfill_sent++; g_backfill_this_s++; }

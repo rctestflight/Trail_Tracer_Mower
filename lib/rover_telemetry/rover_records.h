@@ -32,7 +32,31 @@ const int SAMPLE3_BYTES = 50, SAMPLES3_PER_BLOCK = 4, IMU_SAMPLE3_BYTES = 60, IM
 const uint8_t BODY_BINS = 0x2E;
 const int BINS = 8, BINS_BYTES = 4 + BINS * 2 + BINS * 4 * 3;  // 116
 const int32_t BINS_NONE = -8388608;  // 0x800000
-const int STATUS_BYTES = 77;  // 67 up to 0.5.20; 68 in 0.5.21 (monitor age); 74 in 0.5.22 and 0.5.23 (PC time); 77 from 0.5.24 (firmware version)
+// 0x31 (0.5.69, stream 1, each 10 s and after a change): the vehicle name. type, vehicleID (u8), name length n
+// (u8, 16 at most), n name bytes (A-Z a-z 0-9 space _ -).
+const uint8_t BODY_NAME = 0x31;
+// 0x32 (0.5.87, stream 0): bin sweep readings with their grid points (Rx STM32 2.0.51+). type, table id (u8; a change
+// starts a new trace), f0 (u24, 0.1 Hz), step (u16, 0.1 Hz), grid points P (u16), sweep bins n (u8), updates u (u8),
+// then u x n x {grid point g (u16), sensor 1 coil 1, coil 2, sensor 2 coil 1, coil 2 (int24, as 0x2E)}. Frequency of g:
+// (f0 + g x step) / 10 Hz. BINS_NONE: the sensor is on no lane.
+const uint8_t BODY_SWEEP = 0x32;
+const int SWEEP_HDR = 11;
+// 0x33 (0.5.103, stream 0; replaces 0x32): bin sweep readings as the Rx STM32 gives them; the PC places them on the grid.
+// type, table id (u8), f0 (u24, 0.1 Hz), step (u16, 0.1 Hz), grid points P (u16), sweep bins n (u8), bin mask (u8),
+// frames u (u8), then u x {frame seq (u8), flags (u8: bit 0 the frame holds the sweep page, bit 1 frame overrun), tag
+// (u16), previous-frame tag (u16; both 0xFFFF on a frame without the page), n x 4 int24 (sensor 1 coil 1, coil 2,
+// sensor 2 coil 1, coil 2, as 0x2E)}. BINS_NONE: the sensor is on no lane.
+const uint8_t BODY_SWEEP_RAW = 0x33;
+const int SWEEP_RAW_HDR = 12;
+const int SWEEP_ENTRY_HDR = 6;
+// 0x37 (0.5.120, stream 0): polarity detector blocks as the Rx STM32 gives them (2.0.67+, status bit 26, CID 52 on).
+// type, frames u (u8), then u x {frame seq (u8), n samples (u8, 0-10), detector (bits 0-2) and samples lost (bit 7)
+// (u8), gap count (u16), output index of the first sample (u16), input index after the last housekeeping gap (u16),
+// n x (re, im) int16}. 978 samples a second.
+const uint8_t BODY_POLAR = 0x37;
+const int POLAR_HDR = 2;
+const int VEHICLE_NAME_MAX = 16;
+const int STATUS_BYTES = 84;  // 67 up to 0.5.20; 68 in 0.5.21 (monitor age); 74 in 0.5.22 and 0.5.23 (PC time); 77 from 0.5.24 (firmware version); 80 from 0.5.97 (CPU load); 84 from 0.5.104 (update period in effect)
 const int EVENT_MAX = 80;  // telemlog SLOW body limit
 const int16_t I16_NONE = -32768;
 
@@ -45,6 +69,8 @@ const uint8_t AP_OFF = 0xFF;
 enum EventCode : uint16_t {
   EV_BOOT = 1, EV_MODE = 2, EV_AP_STATE = 3, EV_STUCK = 4, EV_CHARGE_STEP = 5, EV_ODRIVE_ERROR = 6,
   EV_HALTED = 7, EV_SETTING = 8, EV_STALL = 9, EV_BAD_KEY = 10,
+  // EV_SETTING: a result (0 ok, 1 unknown key, 2 bad value, 4 refused), b source (0 USB, 1 ESP-NOW, 2 config.json or NVS:
+  // a value that took its default, 0.5.112-settings), text the command and its answer
   EV_RUN = 11,  // run start / run stop / STOP frame: a 1 start 0 stop, b result, text reason
   EV_IMU = 12,  // boot: a accelerometer range in g (0 = no IMU), b gyro range in deg/s, text offsets
   EV_RESTART_REFUSED = 13,  // restart or ROM-mode request while the vehicle moves: a 1 restart 2 ROM, b source (0 USB 1 ESP-NOW)
@@ -52,7 +78,12 @@ enum EventCode : uint16_t {
   EV_STM32 = 15,      // power-on STM32 handshake: a 1 HELLO answered (text: its payload in hex) 0 no answer, b payload bytes
   EV_TIME = 16,       // PC time from a monitor (MON 0x44): a unix seconds, b millis() at that time, text unix ms
   EV_MONITOR = 17,    // a monitor heard (a 1) or no MON frame for 5 s (a 0); text its MAC
+  EV_WIFI = 19,       // radio_mode "wifi" (lib/wifi_telem): a 1 associated (b RSSI dBm), 2 association lost, 3 server address
+                      // learned (b port), 4 no server in 30 s (b 30); text SSID, IP, server. Never the password
   EV_STM32_CMD = 18,  // STM32 command link (lib/stm_settings, 0.5.25): a kind (stmset::Kind), b command ID, gap ms or HELLO/BOOT result; text
+  EV_USB = 20,        // 0.5.104: USB link state change: a 1 output stop seen, 2 guard reconnect, 3 host port opened, 4 host port
+                      // closed, 5 no USB input for 60 s with the port open, 6 port closed 60 s with the bus up (text: stack counters);
+                      // b the count of that kind; text the counters
 };
 
 // One sample, in engineering units; packSample() quantises it.
@@ -100,6 +131,8 @@ struct Status {
   uint8_t monitor_age_s = 255;  // seconds since the last MON frame from a monitor; 255 = none or 255 s and more
   uint64_t pc_unix_ms = 0;      // PC time at this record (from MON frames); 0 = unknown
   uint8_t fw_ver[3] = {0, 0, 0}; // firmware version major, minor, patch
+  uint32_t dsp_period_us = 0;  // 0.5.104: the update period in effect (the Rx STM32 answer to CID 18), us; 0 = no answer yet
+  uint8_t cpu_busy = 0, cpu_loop = 0, cpu_drive = 0;  // 0.5.97: CPU load of the last second, % (all tasks but idle; loop(); its drive parts)
 };
 
 // Status flags (byte 15)
@@ -121,6 +154,8 @@ void packSample3Imu(uint8_t* out, const Sample& s, uint32_t block_ms); // IMU_SA
 int packStatus(uint8_t* out, const Status& s);                      // returns STATUS_BYTES
 // Event body: code, a, b, then text cut to fit EVENT_MAX. Returns its length.
 int packEvent(uint8_t* out, uint16_t code, int32_t a, int32_t b, const char* text);
+// Name body 0x31. Returns its length (3 + name length).
+int packName(uint8_t* out, uint8_t vehicle_id, const char* name);
 // Bin body 0x2E. v[bin][k]: k = sensor * 2 + coil; values outside int24 are clamped. Returns BINS_BYTES.
 int packBins(uint8_t* out, uint8_t frames, uint16_t window_ms, const float hz[BINS], const int32_t v[BINS][4]);
 

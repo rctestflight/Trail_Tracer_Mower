@@ -141,7 +141,7 @@ void Link::resync() {
 }
 
 void Link::gapCheck(uint32_t now_ms) {
-  if (have_packet_ && now_ms - last_packet_ms_ >= GAP_MS) {
+  if (have_packet_ && !v2_ && now_ms - last_packet_ms_ >= GAP_MS) {  // v2: no resend after a gap (0.5.91)
     c_.gaps++;
     event(K_GAP, now_ms - last_packet_ms_, 0, 0, 0);
     resync();
@@ -242,7 +242,8 @@ bool Link::next(uint32_t now_ms, uint32_t* cid, uint32_t* raw) {
     tail_ = (tail_ + 1) % QUEUE_LEN;
     is_check_ = false;
   } else {
-    // Idle: read back one of the five settings each check period.
+    // Idle: read back one of the five settings each check period (v1 only; 0.5.91: v2 sends nothing unasked).
+    if (v2_) return false;
     if (!check_started_) { check_started_ = true; last_check_ms_ = now_ms; }
     if (now_ms - last_check_ms_ < check_period_ms_) return false;
     int s = -1;
@@ -261,6 +262,7 @@ bool Link::next(uint32_t now_ms, uint32_t* cid, uint32_t* raw) {
   tries_ = 1;
   cur_seq_ = ++seq_;  // a new command, a new seq; a retry keeps it
   c_.sent++;
+  if (cur_.cid & WRITE) c_.writes++;
   sent_ms_ = now_ms;
   *cid = cur_.cid;
   *raw = cur_.raw;

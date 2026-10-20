@@ -1,10 +1,13 @@
 #include "pwm_read_rmt.h"
 #include "esp_timer.h"
 #include "soc/soc_caps.h"
+#include <string.h>
 
 int32_t *pwm_read_dur = NULL;
 uint8_t pwm_in_num_channels = 0;
 static volatile uint32_t pwm_last_valid_us[SOC_RMT_CHANNELS_PER_GROUP] = {};
+static volatile pwm_stats_t pwm_st[SOC_RMT_CHANNELS_PER_GROUP];  // 0.5.104: bench "pwm"
+static volatile uint32_t pwm_st_last_us[SOC_RMT_CHANNELS_PER_GROUP];
 
 static void rmt_isr_handler(void* arg)
 {
@@ -26,7 +29,20 @@ static void rmt_isr_handler(void* arg)
                              item->level1 ? item->duration1 : 0;
             pwm_read_dur[i] = ticks;
             if (ticks >= 9000 && ticks <= 21000) {
-                pwm_last_valid_us[i] = (uint32_t)esp_timer_get_time();
+                const uint32_t now = (uint32_t)esp_timer_get_time();
+                pwm_last_valid_us[i] = now;
+                volatile pwm_stats_t* st = &pwm_st[i];  // 0.5.104: pulse statistics
+                if (st->n) {
+                    const uint32_t p = now - pwm_st_last_us[i];
+                    if (st->n == 1 || p < st->p_min) st->p_min = p;
+                    if (p > st->p_max) st->p_max = p;
+                    st->p_sum += p;
+                }
+                if (!st->n || ticks < st->w_min) st->w_min = ticks;
+                if (ticks > st->w_max) st->w_max = ticks;
+                st->w_sum += ticks;
+                st->n++;
+                pwm_st_last_us[i] = now;
             }
         }
 
@@ -76,6 +92,14 @@ bool pwm_read_rmt_valid(uint8_t channel, uint32_t max_age_ms) {
     int32_t pulse = pwm_read_rmt_dur(channel);
     return timestamp != 0 && pulse >= 900 && pulse <= 2100 &&
            (uint32_t)((uint32_t)esp_timer_get_time() - timestamp) < max_age_ms * 1000;
+}
+
+void pwm_read_rmt_stats(uint8_t channel, pwm_stats_t* out, bool reset) {
+    if (channel >= SOC_RMT_CHANNELS_PER_GROUP) return;
+    rmt_set_rx_intr_en(channel, false);
+    *out = *(pwm_stats_t*)&pwm_st[channel];
+    if (reset) memset((void*)&pwm_st[channel], 0, sizeof(pwm_stats_t));
+    rmt_set_rx_intr_en(channel, true);
 }
 
 void pwm_reset_readings(){

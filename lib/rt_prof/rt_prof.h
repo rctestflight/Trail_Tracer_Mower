@@ -10,6 +10,8 @@
 //   gyro age at the CAN burst: time since the last MPU sample (serviceMpu)
 // Loop passes: wall time of each loop() pass and of each loop part (cpu_prof marks), with the part that held the
 // longest pass. 'rt' prints the window since the last 'rt' and starts a new one.
+// Passes longer than the frame period, by the part that took the most time in them: count, that part's longest
+// time, the longest such pass.
 #pragma once
 #include <stddef.h>
 #include <stdint.h>

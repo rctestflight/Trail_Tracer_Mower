@@ -30,6 +30,10 @@
 // Values in v2: 1, 2 = loop words (the v1 channel value becomes a loop of length 1); 8 = seconds in
 // both forms; 11, 12 = detail formats and 13 = lane inputs, tracked as settings like 1, 2, 6, 7, 8.
 // Status bit 21 (STM32 reset) sends all tracked settings again.
+// 0.5.91, v2 only (rule: a setting goes to the Rx STM32 only on a change or a user command): no periodic
+// read-back, and no resend after a packet gap or a read-back difference. A write of 13 or 18 with an unchanged value
+// restarted the Rx STM32 DSP (2.0.54), and frame gaps at 2.35 ms made the link resend them. The resend at status
+// bit 21 (an Rx STM32 start: its settings are gone) stays. A v1 STM32 keeps the old behaviour.
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
@@ -83,6 +87,7 @@ struct Counters {
   uint32_t checks = 0;      // read-backs answered
   uint32_t mismatches = 0;  // read-backs that differed
   uint32_t resyncs = 0;     // times all five were queued again
+  uint32_t writes = 0;      // write sends, retries included (0.5.91: the proof of no repeat writes)
   uint32_t gaps = 0;
   uint32_t queue_full = 0;
   uint32_t refused = 0;     // v2: answers with a status other than OK or OK_CLAMPED

@@ -1,1 +1,1 @@
-{"title": "Rover + monitor firmware", "description": "Rover mode, monitor role and telemetry, with the matching STM32 app", "esp32": {"env": "lolin_s2_mini", "label": "ESP32 Rx firmware (rover and monitor)"}, "stm32": "latest"}
+{"title": "Rx test build 0.6.17", "description": "Rx firmware 0.6.17 with the matching Rx STM32 app", "esp32": {"env": "lolin_s2_mini", "label": "ESP32 Rx firmware 0.6.17"}, "stm32": "latest"}

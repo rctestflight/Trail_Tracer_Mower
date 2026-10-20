@@ -12,8 +12,8 @@ No Arduino dependency: the same code builds on a PC for the tests.
 |---|---|---|
 | `telemetryBegin()` | `setup()`, after the settings load | boot_id from NVS, `telemlog_init()`, flash ring attach, boot event |
 | `telemetrySample()` | each STM32 packet that passes its CRC check | one sample; every 7th sample stores a block |
-| `telemetryService()` | each `loop()` | status record each second, events on changes, flash ring service, USB dump |
-| `telemlog_poll()` | each `loop()` while ESP-NOW runs | live frames, INFO, FLASHINFO, backfill |
+| `telemetryService()` | each `loop()` | status record each second, events on changes, USB dump |
+| `telemlog_poll()` | each `loop()` while ESP-NOW runs | live frames, INFO, backfill (RAM only) |
 
 ## Tests
 

@@ -106,12 +106,29 @@ struct UsbDiag {
   uint32_t afw_max_ms;     // longest Serial.availableForWrite() call (the TX lock waits up to 250 ms)
   uint16_t fifo;           // tud_cdc_n_write_available(0) at the last pass
   uint8_t mounted, suspended, connected, line_state;
+  uint8_t step;            // 0.6.6: the loop() step running now (a stop names its step at the next start)
+  uint8_t in_write;        // 0.6.6: 1 while usb_write runs, 2 while it waits for FIFO space
+  uint32_t step_ms;        // 0.6.6: when that step began
 };
-constexpr uint32_t USB_DIAG_MAGIC = 0x55534244;  // "USBD"
+constexpr uint32_t USB_DIAG_MAGIC = 0x55534245;  // "USBE" (0.6.6: step fields)
 RTC_NOINIT_ATTR UsbDiag usb_diag;
 char* prev_diag = nullptr;  // text of the boot before, from the heap at monitor start
 
 bool host_open() { return tud_cdc_connected(); }
+
+// 0.5.113: a Linux PC opens the port with echo on and switches it off a moment later; board output in that moment came
+// back as input in front of the first command ("unknown command"; bench: 3 in 900 Monitor Rx starts, 0 in 900 with the
+// echo off). The Monitor Rx holds its output for OPEN_QUIET_MS after the PC opens the port: with nothing sent there is
+// nothing to echo. Input is kept (a command sent at once is answered after the hold).
+constexpr uint32_t OPEN_QUIET_MS = 100;
+bool host_ready() {
+  static bool open_prev = false;
+  static uint32_t open_edge_ms = 0;
+  const bool o = tud_cdc_connected();
+  if (o && !open_prev) open_edge_ms = millis();
+  open_prev = o;
+  return o && millis() - open_edge_ms >= OPEN_QUIET_MS;
+}
 
 void usb_diag_pass(uint32_t now) {
   usb_diag.loop_ms = now;
@@ -172,9 +189,16 @@ DiagSec diag_sec[5];
 uint32_t diag_sec_t = 0;
 int diag_i = 0;
 
+void usb_write_inner(const char* p, int n);
 void usb_write(const char* p, int n) {
+  usb_diag.in_write = 1;
+  usb_write_inner(p, n);
+  usb_diag.in_write = 0;
+}
+void usb_write_inner(const char* p, int n) {
   diag_sec[diag_i].out_bytes += n > 0 ? n : 0;
   if (!host_open()) { usb_diag.gate_skip++; return; }
+  while (!host_ready() && host_open()) delay(1);  // once per open, at most OPEN_QUIET_MS
   if (usb_cut) {
     if (timed_afw() < 1) { usb_drop_count++; usb_diag.usb_drop = usb_drop_count; return; }
     Serial.write('\n');
@@ -198,6 +222,7 @@ void usb_write(const char* p, int n) {
       return;
     }
     diag_sec[diag_i].waits++;
+    usb_diag.in_write = 2;
     delay(1);
   }
 }
@@ -492,42 +517,14 @@ void led_service(uint32_t now, uint32_t frame_flash_until) {
 
 namespace monitor_role {
 
-void setup(const char* version) {
-  fw_version = version;
-  // The STM32 UART as the vehicle role starts it, so the ESP32 TX line idles high. Left floating,
-  // the STM32 read noise for the whole monitor run, and after the return to the vehicle role it
-  // sent no packets until a power cycle (bench test 2026-10-10). Its packets are discarded.
-  Serial1.setRxBufferSize(2048);
-  Serial1.begin(2000000);
-  pinMode(GPIO_NUM_8, INPUT_PULLUP);  // STM_nDATA_READY
-  rx_line = (char*)malloc(RX_LINE_MAX);
-  ota_out.buf = (char*)malloc(OTA_LINE_MAX);
-  prev_diag = (char*)malloc(200);
-  if (!rx_line || !ota_out.buf || !prev_diag) ESP.restart();
-  prev_diag[0] = 0;
-  if (usb_diag.magic == USB_DIAG_MAGIC) {  // values of the last monitor boot, until its restart
-    const UsbDiag& d = usb_diag;
-    snprintf(prev_diag, 200,
-             "loop_ms=%lu out_ok_ms=%lu host_rx_ms=%lu s_ms=%lu evrx=%lu evtx=%lu gskip=%lu usbdrop=%lu "
-             "afwmax=%lu fifo=%u mnt=%u susp=%u conn=%u ls=%u",
-             (unsigned long)d.loop_ms, (unsigned long)d.out_ok_ms, (unsigned long)d.host_rx_ms, (unsigned long)d.s_ms,
-             (unsigned long)d.evt_rx, (unsigned long)d.evt_tx, (unsigned long)d.gate_skip, (unsigned long)d.usb_drop,
-             (unsigned long)d.afw_max_ms, (unsigned)d.fifo, (unsigned)d.mounted, (unsigned)d.suspended,
-             (unsigned)d.connected, (unsigned)d.line_state);
-  }
-  memset(&usb_diag, 0, sizeof(usb_diag));
-  usb_diag.magic = USB_DIAG_MAGIC;
-  Serial.setRxBufferSize(16384);
-  usb_guard::begin();
-  usb_guard::set_before_detach(msc_fat_eject);  // a guard reconnect ejects the drive first
-  Serial.onEvent(ARDUINO_USB_CDC_RX_OVERFLOW_EVENT, on_usb_event);
-  Serial.onEvent(ARDUINO_USB_CDC_RX_EVENT, on_usb_rx_tx);
-  Serial.onEvent(ARDUINO_USB_CDC_TX_EVENT, on_usb_rx_tx);
-  Serial.begin(115200);
-  usb_ota::begin(usb_ota::Hooks{&ota_out, ota_may_start, restart_with_detach});
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, HIGH);
-  evt_queue = xQueueCreate(EVT_QUEUE_LEN, sizeof(Evt));
+// 0.5.109: the radio starts from loop(), once the PC has configured the USB device (plus 300 ms), or 3 s after the
+// start with no PC. The Monitor Rx boot started Wi-Fi within about 100 ms of the USB start (the core starts USB before
+// setup()), while the PC enumerated it; about 1 in 100 of these boots left USB dead with protocol errors (-71) until
+// a power cycle (bench 2026-10-15: 3 in about 290). The vehicle role starts its radio after setup(), 2.8 s in, and
+// showed 0 in about 190 boots. (0.5.108 waited for this in setup(); every boot then ended in a task watchdog reset.)
+bool radio_on = false;
+uint32_t uart_clears = 0;  // 0.6.8: Rx STM32 input cleared (a read returned nothing while bytes waited)
+void radio_start() {
   WiFi.mode(WIFI_STA);
   esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);  // shipped units send on channel 1 only
   if (esp_now_init() != ESP_OK) {
@@ -552,20 +549,68 @@ void setup(const char* version) {
     esp_wifi_set_promiscuous_rx_cb(on_promisc);
     esp_wifi_set_promiscuous(true);
   }
+  radio_on = true;
+}
+
+void setup(const char* version) {
+  fw_version = version;
+  // The STM32 UART as the vehicle role starts it, so the ESP32 TX line idles high. Left floating,
+  // the STM32 read noise for the whole monitor run, and after the return to the vehicle role it
+  // sent no packets until a power cycle (bench test 2026-10-10). Its packets are discarded.
+  Serial1.setRxBufferSize(2048);
+  Serial1.begin(2000000);
+  pinMode(GPIO_NUM_8, INPUT_PULLUP);  // STM_nDATA_READY
+  rx_line = (char*)malloc(RX_LINE_MAX);
+  ota_out.buf = (char*)malloc(OTA_LINE_MAX);
+  prev_diag = (char*)malloc(300);
+  if (!rx_line || !ota_out.buf || !prev_diag) ESP.restart();
+  prev_diag[0] = 0;
+  if (usb_diag.magic == USB_DIAG_MAGIC) {  // values of the last monitor boot, until its restart
+    const UsbDiag& d = usb_diag;
+    snprintf(prev_diag, 300,
+             "loop_ms=%lu out_ok_ms=%lu host_rx_ms=%lu s_ms=%lu evrx=%lu evtx=%lu gskip=%lu usbdrop=%lu "
+             "afwmax=%lu fifo=%u mnt=%u susp=%u conn=%u ls=%u step=%u step_ms=%lu in_write=%u",
+             (unsigned long)d.loop_ms, (unsigned long)d.out_ok_ms, (unsigned long)d.host_rx_ms, (unsigned long)d.s_ms,
+             (unsigned long)d.evt_rx, (unsigned long)d.evt_tx, (unsigned long)d.gate_skip, (unsigned long)d.usb_drop,
+             (unsigned long)d.afw_max_ms, (unsigned)d.fifo, (unsigned)d.mounted, (unsigned)d.suspended,
+             (unsigned)d.connected, (unsigned)d.line_state, (unsigned)d.step, (unsigned long)d.step_ms, (unsigned)d.in_write);
+  }
+  memset(&usb_diag, 0, sizeof(usb_diag));
+  usb_diag.magic = USB_DIAG_MAGIC;
+  Serial.setRxBufferSize(16384);
+  usb_guard::begin();
+  usb_guard::set_before_detach(msc_fat_eject);  // a guard reconnect ejects the drive first
+  Serial.onEvent(ARDUINO_USB_CDC_RX_OVERFLOW_EVENT, on_usb_event);
+  Serial.onEvent(ARDUINO_USB_CDC_RX_EVENT, on_usb_rx_tx);
+  Serial.onEvent(ARDUINO_USB_CDC_TX_EVENT, on_usb_rx_tx);
+  Serial.begin(115200);
+  usb_ota::begin(usb_ota::Hooks{&ota_out, ota_may_start, restart_with_detach});
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, HIGH);
+  evt_queue = xQueueCreate(EVT_QUEUE_LEN, sizeof(Evt));
   enableLoopWDT();
   print_banner();
 }
 
+#define STEP(n) do { usb_diag.step = (n); usb_diag.step_ms = millis(); } while (0)  // 0.6.6
 void loop() {
   static uint32_t last_beat = 0;
   static uint32_t flash_until = 0;
   static bool host_was_open = false;
+  STEP(1);
+  if (!radio_on) {
+    static uint32_t mounted_ms = 0;
+    if (tud_mounted() && !mounted_ms) mounted_ms = millis();
+    if ((mounted_ms && millis() - mounted_ms >= 300) || millis() >= 3000) radio_start();
+  }
+  STEP(2);
   const bool open_now = host_open();
   if (open_now && !host_was_open) {
     print_banner();
     static char saved[900];
     if (usb_guard::take_saved(saved, sizeof(saved))) out("I %lld %s (input stop, before the last restart)\n", esp_timer_get_time(), saved);
   }
+  STEP(3);
   if (!open_now) host_pinged = false;
   if (open_now && host_pinged && millis() - host_rx_ms >= HOST_SILENT_MS) {
     out("I %lld restart: no PC input for %lu s after pings (USB input stopped?)\n", esp_timer_get_time(),
@@ -581,6 +626,7 @@ void loop() {
     delay(100);
     restart_with_detach();
   }
+  STEP(4);
   host_was_open = open_now;
   // Back to the vehicle role when the PC goes: USB not mounted or suspended for 10 s (also 10 s if
   // it never came up after the monitor start). The restart clears the role. 10 s, not 2 s: a
@@ -606,7 +652,23 @@ void loop() {
     const uint32_t ms = millis();
     if (ms - diag_sec_t >= 1000) { diag_sec_t = ms; diag_i = (diag_i + 1) % 5; diag_sec[diag_i] = DiagSec{}; }
   }
-  while (Serial1.available()) { Serial1.read(); diag_sec[diag_i].uart_bytes++; }  // STM32 packets: not used in the monitor role
+  STEP(5);
+  {  // Rx STM32 frames: not used in the monitor role, read and dropped
+    // 0.6.8: in blocks, at most 4 KB a pass; a read that returns nothing while bytes wait clears the input. The byte loop
+    // of 0.5.60-0.6.7 never ended on the first Monitor Rx start after a USB load (5 of 5 such starts on one board): loop() stopped
+    // in it with USB alive, and the PC saw no line after the banner.
+    uint8_t tmp[256];
+    size_t got = 0;
+    int n = Serial1.available();
+    while (n > 0 && got < 4096) {
+      const size_t k = Serial1.read(tmp, n < (int)sizeof(tmp) ? (size_t)n : sizeof(tmp));
+      if (k == 0) { Serial1.flush(false); uart_clears++; break; }  // false: the receive side too
+      got += k;
+      n = Serial1.available();
+    }
+    diag_sec[diag_i].uart_bytes += got;
+  }
+  STEP(6);
   usb_guard::service(millis(), true);
   {
     static uint32_t seen_stalls = 0;
@@ -642,11 +704,13 @@ void loop() {
       out("I %lld %s (output stop)\n", esp_timer_get_time(), regs);
     }
   }
+  STEP(7);
   if (update_mode && millis() - update_last_ms >= UPDATE_IDLE_MS) {
     update_mode = false;
     enableLoopWDT();
     out("I %lld UPDATE mode off: 120 s without an ota line; loop watchdog on\n", esp_timer_get_time());
   }
+  STEP(8);
   Evt e;
   while (xQueueReceive(evt_queue, &e, 0) == pdTRUE) {
     if (update_mode) upd_skip_count++;
@@ -654,26 +718,33 @@ void loop() {
     poll_serial();
     if (e.kind == EVT_RX) flash_until = millis() + 20;
   }
+  STEP(9);
   led_service(millis(), flash_until);
+  STEP(10);
   if (restart_requested) {
     out("I %lld restart requested\n", esp_timer_get_time());
     delay(100);
     restart_with_detach();
   }
+  STEP(11);
   poll_serial();
+  STEP(12);
   usb_ota::service();
+  STEP(13);
   usb_diag_pass(millis());
+  STEP(14);
   msc_fat_media_service();
+  STEP(15);
   if (millis() - last_beat >= 1000) {
     last_beat = millis();
     out("I %lld beat rx=%lu drop=%lu tx=%lu txfail=%lu usbdrop=%lu usbrxdrop=%lu scrcbad=%lu "
-        "grdrst=%lu grdfull=%lu grdstall=%lu update=%d updskip=%lu evrx=%lu evtx=%lu gskip=%lu afwmax=%lu fifo=%u ls=%u\n",
+        "grdrst=%lu grdfull=%lu grdstall=%lu update=%d updskip=%lu evrx=%lu evtx=%lu gskip=%lu afwmax=%lu fifo=%u ls=%u uclr=%lu\n",
         esp_timer_get_time(), (unsigned long)rx_count, (unsigned long)drop_count, (unsigned long)tx_count,
         (unsigned long)tx_fail_count, (unsigned long)usb_drop_count, (unsigned long)usb_rx_overflow,
         (unsigned long)s_crc_bad, (unsigned long)usb_guard::restarts(), (unsigned long)usb_guard::full_resets(),
         (unsigned long)usb_guard::stalls(), (int)update_mode, (unsigned long)upd_skip_count,
         (unsigned long)usb_diag.evt_rx, (unsigned long)usb_diag.evt_tx, (unsigned long)usb_diag.gate_skip,
-        (unsigned long)usb_diag.afw_max_ms, (unsigned)usb_diag.fifo, (unsigned)usb_diag.line_state);
+        (unsigned long)usb_diag.afw_max_ms, (unsigned)usb_diag.fifo, (unsigned)usb_diag.line_state, (unsigned long)uart_clears);
     if (!update_mode) {
       print_rssi();
       uint8_t f[15];
@@ -685,8 +756,10 @@ void loop() {
       memcpy(f + 6, &unix_ms, 8);
       f[14] = 0;  // n: no per-rover receipts yet
       static const uint8_t bc[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-      mon_inflight++;
-      if (esp_now_send(bc, f, sizeof(f)) != ESP_OK) mon_inflight--;
+      if (radio_on) {
+        mon_inflight++;
+        if (esp_now_send(bc, f, sizeof(f)) != ESP_OK) mon_inflight--;
+      }
     }
   }
   delay(1);

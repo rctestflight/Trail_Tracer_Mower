@@ -56,6 +56,8 @@ bool take_saved(char* buf, int n);         // the saved line, once; false if non
 // vehicle role the guard never flushes, detaches or reconnects USB; output that no host drains is dropped, and a
 // host that connects later gets live output. The monitor role turns it on once the PC program has connected in
 // this boot (first "P" ping or a "monitor" command): from then on an undrained FIFO gets the USB reconnect.
+// 0.5.88: the vehicle role turns it on at the first USB command line of a boot (a program that talks to the board
+// wants its output; a board that went silent on such a host stayed silent until a power cycle).
 void set_reconnect(bool on);
 bool reconnect_allowed();
 // 0.5.67: called once before a guard reconnect, EJECT_MS before the detach: the USB drive eject. A drive that

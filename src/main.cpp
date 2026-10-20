@@ -17,14 +17,18 @@
 #include "rt_prof.h"       // real-time path timing: STM32 frame -> control -> CAN (lib/rt_prof; bench "rt")
 #include "frame_pid.h"     // the steering PIDs stepped once per STM32 frame (lib/frame_pid)
 #include <driver/twai.h>
+#include <driver/uart.h>  // raw stream test: UART loopback (uart_set_loop_back)
+#include "hal/uart_ll.h"   // 0.5.126: the Rx UART frame from the frame edge interrupt (uart_ll_write_txfifo)
 
 MPU6050 mpu(Wire);
 bool mpu_ok = false;  // false on a board with no gyro; the gyro is logged only (the autopilot does not use it)
+int16_t imu_roll16 = 0;  // the accelerometer roll, 65 536 = one turn (Rx UART frame angle); 0 with no IMU
 double gyro_heading_deg = 0.0;  // log layout 3: the integral of gyro z over every MPU sample, deg; zero at boot
 void gyroHeadingUpdate() {
   static uint32_t last_us = 0;
   const uint32_t now_us = micros();
   if (last_us && mpu_ok) gyro_heading_deg += mpu.getGyroZ() * (double)(now_us - last_us) * 1e-6;
+  if (mpu_ok) imu_roll16 = (int16_t)lroundf(atan2f(mpu.getAccY(), mpu.getAccZ()) * (32768.0f / (float)M_PI));  // Rx UART frame angle
   last_us = now_us;
 }
 bool imu_halt = false;  // retired at the merge of f10cd31: the main-branch gyro lock keeps the motors off with no MPU; always false
@@ -114,10 +118,21 @@ static void serviceMpu() {
 #include "telemlog.h"       // numbered telemetry log: rings, live broadcast, backfill (monitor role)
 #include "rover_records.h"  // record bodies: 100 Hz samples, status, events
 #include "decimator.h"     // anti-alias filter and decimation of the samples
+#include "tlm.h"           // table values: one line in include/telemetry_table.h defines a logged value (lib/tlm)
 #include "stm_settings.h"  // STM32 commands: answer check, retry, read-back of the settings (lib/stm_settings)
 #include "stm_v2.h"        // STM32 link version 2: 98 B frames, 8 B command frames with seq and CRC (lib/stm_v2)
 #include <stdarg.h>
 #include "cpu_prof.h"      // CPU share per FreeRTOS task and per loop part, by sampling (lib/cpu_prof; bench "cpu")
+#include "nvs.h"            // bench "nvs": nvs_get_stats
+#include "soc/rtc_wdt.h"     // 0.5.94: RTC watchdog (a stop with interrupts off resets the system)
+#include "wifi_link.h"        // radio_mode "wifi": telemetry over a Wi-Fi network as UDP (lib/wifi_telem)
+#include "mbedtls/pkcs5.h"     // the WPA2 key from the passphrase (wifiKeyFromPassphrase)
+#include "wifi_telem_proto.h" // the "wifi set" arguments and the log text of a command (lib/wifi_telem)
+#include "web_server.h"         // 0.5.116: pages on the ESP32 in Wi-Fi mode (src/web_server.cpp)
+#include "web_settings.h"       // 0.5.116-webcfg: settings page /settings (src/web_settings.cpp)
+#include "web_update.h"         // 0.5.116: the update page /update (src/web_update.cpp)
+#include "web_telemetry.h"      // 0.5.117: the telemetry page /telemetry (src/web_telemetry.cpp)
+#include "tlm_page.h"           // 0.5.117: the telemetry page fields and values from the telemetry table
 
 // USB text output that never blocks loop(). Serial.write() on the ESP32-S2 repeats until all
 // bytes are in the 64-byte CDC transmit buffer while a host holds the port (DTR set), even with
@@ -160,6 +175,7 @@ class UsbOut : public Print {
     while (len_ > 0 && millis() - t0 < ms) { service(); delay(1); }
   }
   uint32_t dropped = 0;
+  size_t queued() const { return len_; }  // 0.5.104: bytes waiting (USB event text)
  private:
   uint8_t q_[1792];  // 0.3.8: 256 B less (dram0_0_seg); update mode keeps the output small
   size_t head_ = 0, len_ = 0;
@@ -194,12 +210,19 @@ void usbLoadService(){
 }
 
 static const char* TAG = "wfrx";
-#ifdef BENCH_FAKE_IMU
-#define ROVER_FW_VERSION "0.5.68+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#if defined(OTA_TEST_VERSION)
+#define ROVER_FW_VERSION OTA_TEST_VERSION  // OTA test images (envs ota_a, ota_b, ota_test_crash)
+#elif defined(BENCH_FAKE_IMU)
+#define ROVER_FW_VERSION "0.6.17+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#elif defined(SETTINGS_NEWKEY)
+#define ROVER_FW_VERSION "0.6.17-newkey"  // bench build: one more table line (test_new_setting)
+#elif defined(TELEMETRY_NEWVALUE)
+#define ROVER_FW_VERSION "0.6.17-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.5.68"  // 0.5.68: the 8-bin coil record (0x2E) goes through the log anti-alias filter at telemetry_bins_hz (default 5); 0.5.67: USB driver copy: TX FIFO register of the FIFO in use (DIEPTXF[TxFNum-1]; the CDC output FIFO pointed outside the FIFO RAM: output stops at Monitor Rx start and mid-run), IN endpoints disabled through the core at a bus reset and a close; a guard reconnect ejects the drive first; usbregs with FIFO registers and driver counters, the stop record printed 3 times; 0.5.66: telemetry body 0x2E, the coil magnitudes of all 8 bins of both sensors, 5 a second; 0.5.65: "stm restart" (Rx STM32 command 41, app 2.0.39+): Rx STM32 update with no power cycle; 0.5.64: USB output fix from the bench line (0.5.60-dev10 to dev13): project copy of the TinyUSB ESP32-S2 device driver (lib/tinyusb_dcd_fix) with no zero-length packet on data IN endpoints; USB register record at each output stop and over a restart (monitor). 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
+#define ROVER_FW_VERSION "0.6.17"  // 0.6.17: during an app update download the web server and mDNS stop until the restart (more free memory for Wi-Fi); 0.6.16: Wi-Fi sweep record: every frame's sweep values get in at 10 ms with up to 7 sweep bins; "log info" prints the sweep record counters; 0.6.15: "list saved": each setting with the value of the next start beside the active value; "dld" turns the RTC watchdog off first; update mode waits 1 ms each pass (the update page upload needs CPU time); no telemetry datagrams during an update page upload (more free memory for Wi-Fi); 0.6.14: no USB reconnect in the vehicle role: a host that held the port open and read nothing could lose the board (both chips reset); undrained output is dropped and counted; 0.6.13: settings dt_side_a_ch1..5 (Side A of each Tx channel inside or outside the perimeter); table value follow_dir (1 Hz): the direction round the perimeter in follow mode, from the followed channel's sign and its Side A setting; 0.6.12: table value dt_decoded (1 Hz): the Tx channels the Rx STM32 decodes now, read each 1 s (CID 50 index 0); 0.6.11: setting dt_channels (255 auto, else a CH1..CH5 bit mask, 0 off; live): the Tx channels the Rx STM32 decodes for polarity, sent as CID 50 at each DSP set; dual tone polarity detection items of Rx STM32 2.1.134+ (extension items 9 sign and 10 sign angle spread, per sensor and Tx channel) in "stm ext" and the telemetry table (10 Hz, group Polarity detection); 0.6.10: the USB serial number comes from the chip MAC (the board files gave every board "0": Windows saw one disk serial on every drive, disk event 158 at each restart); 0.6.9: the USB drive gets one disk signature and volume serial per board, from the chip MAC (every board formatted after an erase showed the PC the same disk: Windows disk event 158, then USB losses at a detach); written once per board; 0.6.8: the Monitor Rx reads the Rx STM32 input in bounded blocks (its byte loop never ended on the first Monitor Rx start after a USB load: no line after the banner, port lost 5 s later); 0.6.7: the Monitor Rx starts the RTC watchdog too (8 s; a stopped Monitor Rx stayed off USB until a power cycle); 0.6.6: the Monitor Rx radio starts 300 ms after enumeration again (the 0.6.4 change did not stop the USB loss); the Monitor Rx keeps the loop() step running and its start time over a restart and prints them in the next "prev" line (step=, step_ms=, in_write=); 0.6.5: GET /update/status counts failed heap allocations since boot, with the size, caps and task of the last (alloc_fail*); 0.6.4: the Monitor Rx radio starts 1.5 s after the PC opens the port (or 6 s after the start with no PC), not 300 ms after enumeration, which fell on the PC's port open (USB stopped in about 1 start in 10); 0.6.3: the upload heap trace adds the least free heap since boot at the request, at the end and after the answer (up_bootmin_*); 0.6.2: GET /update/status gives the free heap over the last upload (up_heap_start, up_heap_min, up_maxblk_min, up_heap_end); 0.6.1: "set dsp_frame_period_us" sends the period again when the setting is unchanged but the period in effect differs by more than 1 % (after a direct CID 18 write the 10 ms set did not take); the first "rt" after boot shows the period in effect (it showed 10000); 0.6.0 (Rx STM32 2.1.0 pair; a comms change starts a minor version): the 144 B Rx STM32 frame (version 3) beside 128 B, the Rx UART frame; an unknown Rx STM32 link learns layout 2 from 128 B or 144 B frames (0.5.128 took 128 B only: after a restart into 2.0.81 no frame was read); "stm restart force" and "stm url" send command 41 with no answer awaited when frames come but are not read, so a wrong-frame app never blocks its own replacement; 0.5.128: Rx STM32 frame version 3 (144 B, 2.0.81+) beside version 2 (128 B), told apart by the version byte; the 4 extension slot items are kept per item id and index with their age ("stm ext"); no Rx UART task: loop() builds the frames after each good Rx STM32 frame and the edge interrupt sends them (the task stack cost the page update 3.6 KB of heap); 0.5.127: bench "uart jitter <max_us>": each Rx UART frame goes a random 0..max_us after its edge (proof that the Rx STM32 takes frames at any timing); "uart" shows edges, timing counts and the Rx STM32 frame errors; 0.5.126: the Rx UART frame goes from the frame edge interrupt into the transmit FIFO (the task now only builds the next frame): a task woken by the edge started more than 1 ms late about 1 edge in 300; "uart" shows edge none/fifo counts; 0.5.125: the Rx UART frame goes from its own task (priority 22) at each Rx STM32 frame edge, not from loop(): a late loop() pass sent it late (CRC fails) or skipped a frame (block in 86.6 % of frames at 2.96 ms); loop() leaves the next command in a pending slot; "uart" shows task late/wait counts; 0.5.124: "uart" counts the good frames that get no control block, by reason (catch-up, backlog); 0.5.123: the frame to the Rx STM32 goes right after the frame read, before the control step (sent after it, a 16 B frame crossed the Rx STM32 frame tick: bad CRC and length counts); 0.5.122: Rx UART frame (Rx STM32 with status bit 27): every frame carries the control block (version 1, angle = vehicle roll from the accelerometer, flags: bit 0 charge enable) and one optional command, one CRC (16 B); the charge enable goes as flag bit 0 (no CID 9); older Rx STM32 apps get the 10 B command frame as before; bench "uart" (roll imu|sweep|<deg>, bad crc|ver, pause, off|on); 0.5.121: raw stream: the UART receive buffer fits the largest free heap block (16 KB down to 4 KB; in Wi-Fi mode 16 KB failed with no message and the stream gave 0 bytes), the page server stops during the stream, a failed start says so; "RAW start" gives rxbuf; 0.5.120: Rx STM32 2.0.67 polarity detector stream (status bit 26, CID 52 on): frame result 2 is the detector block, not coil data (lane 2 reads zero); the block goes to the log as it comes (body 0x37: frame seq, block header, samples; Wi-Fi every sample); "stm polar" counters; tools/rover_log.py polar writes the samples as CSV; 0.5.119: after a page upload stops part way, a USB "ota begin" works with no restart (the Update writer is closed first); 0.5.117: settings and telemetry pages answer a short busy during an update; telemetry page /telemetry on the web server (src/web_telemetry.cpp, lib/tlm_page): the status record, the newest log sample and every table value, by name, with label, unit, decimals and group from the telemetry table at run time; GET /api/telemetry (short set or ?all=1) is a copy that loop() takes on request, formatted by the server task; ?def=1 gives the field list; the page polls at 1 Hz (2 Hz as an option) while its tab is visible; 0.5.116: telemetry table: the telemetry table describes every log record (TLR record lines, TLF field lines: name, type, offset, scale, unit, decimals, kind, "no value" code, group, label; the fixed record bytes do not change); telemetry_def.json format 2 lists every record, "version" = the table hash (compile time, over every table line); "get telemetry_def" answers it; tools/rover_log.py decodes every record from the file; one telemetry table (include/telemetry_table.h, user lines in include/user_telemetry.h): one line defines a logged value (name, wire type, scale, unit, decimals, rate 1 Hz, 10 Hz or the log rate, group, label); tlm_set(TLM_<name>, value) sets it; one record per rate (bodies 0x34 1 Hz on stream 1, 0x35 10 Hz and 0x36 log rate on stream 0) with the table hash, the sample count and the rate; the build writes telemetry_def.json (tools/gen_telemetry_def.py); "tlm" answers the table hash; tools/rover_log.py csv decodes the records; the fixed records do not change; web server in Wi-Fi mode (src/web_server.cpp): GET / lists the pages; update page /update (src/web_update.cpp): a browser form post with the Rx STM32 file and the ESP32 image, the same writers, checks and refusals as "stm url" and "ota url"; "stm url" also checks the Rx STM32 file header (magic, product, header CRC-32); bench USB "moving on|off"; settings page /settings on the web server: every setting from the settings table, built from the table at run time; set, save, restart and "config erase" through the radio command rules (src/web_settings.cpp); 0.5.115: one settings table (include/settings_table.h) drives defaults, range check, NVS, config.json, set, get and list; a bad value takes its default with a "SETTING bad value" line; "config erase [wifi]"; erase gesture: the 0 button pressed in the first 3 s after power-on and held 5 s erases every setting and the Wi-Fi details; USB "btn0 down|up" and "btn0 window" fire the button handler on the bench; 0.5.114: update commands over the radio (Wi-Fi or ESP-NOW CMD frame) and USB, ACK text = the USB line: "ota url", "ota status" (state=idle|download|done|failed got size, error=), "ota abort", "stm url" (Rx STM32 update from an HTTP server: download into the tlog partition, SHA-256, command 41, the ESP32 feeds the boot checker from flash, 3 tries), "stm status", "get rx_stm32_version" (CID 30); radio commands also in update mode; "ota url": ESP32 update over Wi-Fi from an HTTP server (lib/usb_ota); 0.5.113: the Monitor Rx holds its output for 100 ms after the PC opens the port (a Linux PC echoed board output back in front of the first command); 0.5.112: USB driver: no bus reset on IN endpoint status bit 15 (it cleared the USB device address; the Monitor Rx, and rarely the vehicle role, then gave no USB answer until a power cycle); 0.5.111: charge lease renewal every 250 ms or every second frame, whichever is longer; 0.5.110: charge enable as a 250 ms lease (CID 9 again while charging is wanted); Rx STM32 BOOT retried every 30 s after the first 3; 0.5.109: the Monitor Rx radio start moves from setup() to loop() (0.5.108 waited in setup(): task watchdog reset at each Monitor Rx start); 0.5.108: the Monitor Rx role starts its radio after the PC has configured USB (a radio start during the USB start left USB dead about 1 in 100 boots); 0.5.106: the USB class driver copy is back to 0.5.103 (no stack counters, no USB event 6; Monitor Rx USB stop 2026-10-15); 0.5.105: shortest update period 2938 us in every link mode ("Update period too short: 2.94 ms or longer"); 0.5.104: USB events (output stop, guard reconnect, host port open and closed, no input for 60 s); update period floor = the shortest the Rx STM32 runs (2354 us, 2336 us with the slow ADC off); "set dsp_frame_period_us" answers the period in effect; status record 84 B with the period in effect; "bin" keeps the frequency in effect (Rx STM32 2.0.58 reads); bench "pwm" pulse check; 0.5.103: "bin <index> <hz>" (CID 20 pass-through, no save) on USB and radio, "sweep" on USB; sweep record body 0x33: the frame seq, page tag and bin values as they come, the PC places them on the grid (was 0x32 with grid points); shortest update period per link mode (2000 us in each mode: no link, ESP-NOW, Wi-Fi): a shorter "set" is refused; 0.5.102: bin record input at 100 Hz (it took every frame); frame decode in IRAM; 0.5.101: services at set rates (USB 250 Hz; link watch, USB drive, telemetry service, bench input 100 Hz); 0.5.100: the radio part runs at most at 250 Hz (it ran on every pass); 0.5.99: end-of-pass wait up to 5 ms (was 1 ms); 0.5.98: loop() waits for the next frame edge (at most 1 ms) when nothing waits, so the CPU load is the real work; 0.5.97: CPU load (busy, loop, drive %) in the HB line and the status record (bytes 77-79); HB packets = good frames per second (control = control passes); every decoded frame has its Rx STM32 answer read (catch-up and decode-only frames lost their answers since 0.5.85); 0.5.96: control at most 100 Hz (frames between decoded only); sweep records capped (Wi-Fi 40/s, ESP-NOW 4/s); refusals read "Stop the vehicle first"; 0.5.95: save, wifi set and wifi clear refused while driving (run model: saves only while stopped); USB output emptied before a save; 0.5.94: RTC watchdog: a board that stops for 8 s resets itself and keeps its PREV and PANIC records; 0.5.93: bench "tasks": FreeRTOS tasks by name, priority, least free stack; 0.5.92: a panic leaves its reason, PC and backtrace in RTC memory, printed at the next boot and on "boot" (no flash write); the resync search of 0.5.88-0.5.90 is out (it found no frame on real data); 0.5.91: v2 Rx STM32: no periodic read-back, no resend after a frame gap or a read-back difference (a setting goes only on a change, a user command or an Rx STM32 start); bench "rt": commands, writes, retries per window; 0.5.90: resync search back with its window in static RAM; 0.5.89: the 0.5.88 resync search is off (it panicked at 2.35 ms with cut frames); 0.5.88: layout 2 resync: after a bad CRC the next good frame is searched in the bytes in hand (a cut frame no longer costs the frames after it); USB output stop in the vehicle role: counted, and a USB reconnect once a host sent a command this boot; 0.5.87: bin sweep record (body 0x32: each sweep reading with its grid point; Wi-Fi every update, ESP-NOW every 10th), setting dsp_sweep_bins (default auto), USB and radio "sweep <index> <value>" (CID 43 pass-through), frame header of Rx STM32 2.0.54, a USB line per full DSP set; 0.5.86: commands over Wi-Fi: CMD, STOP, RESTART, REQ from the server as datagrams, ACK back to it (same frames as ESP-NOW); 0.5.85: layout 2: older waiting frames are decoded without the control step (no frame lost at 2.35 ms frames; control on the newest); 0.5.84: bench "rt": mean time per pass of each loop part; 0.5.83: CID 3 read goes to the Rx STM32 (2.0.52+: flash state; it was held), bench "stm cmd 3" save goes out; 0.5.82: no repeating flash writes: the log is RAM only (flash ring removed), boot_id random (no NVS boot counter), settings to NVS at boot only after a config.json change, no Rx STM32 CID 3 save at each boot or Rx STM32 start, Wi-Fi driver settings in RAM; bench "nvs": NVS entry counts; 0.5.81: bench "rt": passes over the frame period, with a log write apart, the others by their biggest part; 0.5.80: "wifi scan" while associated no longer fails at 2.4 s (the library timeout; the scan takes longer on a connected station); USB input stops a raw stream early (RAW end stop=usb); 0.5.79: USB "wifi blast": Wi-Fi throughput test (datagrams of a set size and rate to the server address); 0.5.78: the Wi-Fi key is calculated from the passphrase before the drive loop (the Wi-Fi driver stopped loop() 190-417 ms at each Wi-Fi start); 0.5.77: USB "save" no longer overflows the loop() stack (panic restart, 4 of 8 saves); Wi-Fi mode sends log frames only while the server is known; full "wifi" status line; bench "stack"; 0.5.76: USB CDC class copy with a 4096 B transmit FIFO and 1024 B transfers (was 64 B: 132 kB/s); nothing to the Rx STM32 during a raw stream (TX held high at the baud switch, silence recovery held); 0.5.75: raw usb writes each block in pieces (the USB buffer is under 512 B); 0.5.74: stm raw: Rx STM32 raw stream (command 42) end to end to USB; 0.5.73b: raw tests up to 5 Mbaud; 0.5.73: raw stream pass-through and rate tests (raw usb, raw pass, raw loop); 0.5.72: log sample coil values signed (were |v|); 0.5.71: radio_mode wifi: telemetry as UDP over a Wi-Fi network (lib/wifi_telem, the 2026-10-12 work, ported); 0.5.70: "set" takes text settings (vehicle_name, drive_output) as the rest of the line; 0.5.69: settings from a review: drive_output (servos as V1.0, or CAN; auto), servo map by function, vehicle_name, 4S limit, steer_lpf_hz, charge time as it is; 0.5.68: the 8-bin coil record (0x2E) goes through the log anti-alias filter at telemetry_bins_hz (default 5); 0.5.67: USB driver copy: TX FIFO register of the FIFO in use (DIEPTXF[TxFNum-1]; the CDC output FIFO pointed outside the FIFO RAM: output stops at Monitor Rx start and mid-run), IN endpoints disabled through the core at a bus reset and a close; a guard reconnect ejects the drive first; usbregs with FIFO registers and driver counters, the stop record printed 3 times; 0.5.66: telemetry body 0x2E, the coil magnitudes of all 8 bins of both sensors, 5 a second; 0.5.65: "stm restart" (Rx STM32 command 41, app 2.0.39+): Rx STM32 update with no power cycle; 0.5.64: USB output fix from the bench line (0.5.60-dev10 to dev13): project copy of the TinyUSB ESP32-S2 device driver (lib/tinyusb_dcd_fix) with no zero-length packet on data IN endpoints; USB register record at each output stop and over a restart (monitor). 0.5.63: after a reset that is not a power-on, only STM32 UART bytes count as a running app (the boot checker also makes nDATA_READY edges), so an STM32 waiting in its boot checker gets HELLO/BOOT; 0.5.62: USB optional in the vehicle role (the USB guard never reconnects; undrained output dropped), monitor reconnect only after the PC program connected; 0.5.61: the autopilot full yaw rate is steering_rate_max_dps (pivot angles as planned through the gyro rate loop); 0.5.60: 0.5.59 + bench tools (radio slot, usbload, rt bench, stm stream, monitor promisc/quiet, usbstall diag); table CRC, fast beacon pow; monitor PC-gone 10 s; USB flush kick at 250 ms
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
+extern "C" const char* rover_fw_version() { return ROVER_FW_VERSION; }  // for src/web_server.cpp
 
 // Rover autopilot (lib/rover_autopilot): bounce inside the perimeter, go home on low battery,
 // follow the wire to the dock in rover_goal_cw direction, depart. Runs in drive mode 2 when
@@ -254,6 +277,10 @@ int PWM_OUT_3_MAX; // Maximum PWM value for output 3 (typically 2000)
 int PWM_OUT_4_DEFAULT;
 int PWM_OUT_4_MIN;
 int PWM_OUT_4_MAX;
+// Drive output (0.5.69, config.json drive_output): 0 auto, 1 servos, 2 motor controllers over CAN; the servo
+// output channel of each function (steer_output, throttle_output). Outputs with no function hold 1500 us.
+uint8_t drive_output = 0, steer_output = 1, throttle_output = 2;
+void servoIdle();  // every servo output to its function's centre (1500 us with no function)
 double kp; // Steering controller proportional gain (higher number = more aggressive steering)
 double ki; // Steering controller integral gain (usually set to 0 or a small value, helps eliminate steady-state error but can cause instability if too high)
 double kd; // Steering controller derivative gain (usually never needed)
@@ -505,6 +532,19 @@ float low_pass_last_val_1 = 0.0;
 float low_pass_last_val_2 = 0.0;
 
 volatile uint32_t data_ready = 0;  // incremented by ISR each time STM32 asserts nDATA_READY
+TaskHandle_t loop_task_handle = nullptr;  // 0.5.98: the frame edge wakes loop() from its end-of-pass wait
+#define RADIO_PERIOD_US 4000  // 0.5.100: the radio part runs at most at 250 Hz
+#define USB_PERIOD_US 4000    // 0.5.101: USB output service at most at 250 Hz (4096 B CDC buffer: 1 MB/s at most)
+#define SERVICE_PERIOD_US 10000  // 0.5.101: Rx STM32 link watch, USB drive, telemetry service, bench input: 100 Hz
+// true once every period_us; last holds the time of the last true (0.5.101: services at set rates)
+static inline bool due(uint32_t& last, uint32_t period_us) {
+  const uint32_t t = micros();
+  if ((uint32_t)(t - last) < period_us) return false;
+  last = t;
+  return true;
+}
+#define LOOP_WAIT_MS 5  // 0.5.99: longest end-of-pass wait; a frame edge wakes loop() at once
+uint32_t loop_waits = 0;  // 0.5.98: end-of-pass waits (bench "rt" prints them)
 // Bench "radio slot": the radio part of loop() (all sends) runs only from radio_slot_us to radio_slot_us +
 // RADIO_SLOT_LEN_US after the last nDATA_READY edge; -1 = no slot. radio_tx_hist: send-done times after the
 // edge, in tenths of the frame period (10 = later than one period).
@@ -519,6 +559,16 @@ uint32_t uart_overrun_count = 0;   // diagnostic counter, incremented on each ov
 // out while frames wait (stm_v2_backlog): one command per STM32 command window.
 bool stm_v2_resync = true;
 bool stm_v2_backlog = false;
+volatile uint32_t uart_last_good_ms = 0;  // millis() of the last good Rx STM32 frame
+uint32_t uart_skip_catchup = 0;   // Rx UART frame: good frames read in the catch-up loop (older frames: no block)
+uint32_t uart_skip_backlog = 0;   // good frames with a newer frame already waiting (the block goes with the newest)
+bool panicRecordTake(char* out, size_t n);  // src/panic_record.cpp
+char panic_line[200] = "";
+bool rtc_wdt_test = false;
+uint8_t cpu_busy_pct = 0, cpu_loop_pct = 0, cpu_drive_pct = 0;  // 0.5.97: CPU load of the last second (HB line, status record)  // bench "rtcwdt test": the RTC watchdog is not fed  // the PANIC line of the boot before, if it panicked
+uint32_t stm_catchup_frames = 0;
+#define CONTROL_PERIOD_US 10000  // 0.5.96: control at most at 100 Hz (the drive part costs the same at every reading time)
+uint32_t control_last_us = 0;  // layout 2: older frames decoded without the control step (bench "rt" prints it)
 uint32_t stm_backlog_frames = 0;   // frames read from the backlog (a late pass), counted
 uint32_t crc_error_count = 0;      // diagnostic counter, incremented on each CRC mismatch
 uint16_t last_computed_crc = 0;    // last CRC computed by the ESP32, for diagnostics
@@ -528,24 +578,67 @@ int32_t bttn_counter = 0;  // button counter for debounce logic
 int32_t bttn_state = 0;  // debounced state of the user button
 int32_t bttn_click_counter = 0;  // button counter for "click" logic
 int32_t bttn_long_counter = 0;  // button counter for "long" press logic
+// Erase gesture: press the 0 button within the first 3 s after power-on and hold it 5 s. Every
+// setting and the Wi-Fi details go to their defaults, then the board restarts. A press held at power-on starts ROM
+// download mode instead (the chip reads GPIO0 at reset), so the press must start after power-on. The LED flashes at
+// 10 Hz during the hold. Outside the window, and after a release before 5 s, the button acts as before.
+bool erase_window = false;       // setup(): this start is a power-on, or "btn0 window" asked for it
+RTC_NOINIT_ATTR uint32_t btn_window_once;  // "btn0 window": the next software restart opens the erase window
+#define BTN_WINDOW_MAGIC 0x42574E44u
+bool erase_hold = false;         // the gesture owns the button
+uint32_t erase_hold_ms = 0;
+#if 1
+bool btn0_sim = false;           // bench: USB "btn0 down" / "btn0 up" stands for the button (the bench cannot press it)
+#endif
 int32_t bttn_3s_armed = 0;  // calibration press window armed
 int32_t bttn_6s_state = 0;  // state of a 6s press
 
 
 void receiveStmUart();  // ISR routine to set data ready flag
+void rtcWdtStart();     // 0.6.7: the RTC watchdog, both roles
+void dtTelemetry();     // 0.6.11: dual tone polarity items (ids 9, 10) into the telemetry table
+void dtPollService();   // 0.6.12: CID 50 read, the Tx channels decoded now
+#ifndef DT_SIGN_PLUS_IS_LEFT
+#define DT_SIGN_PLUS_IS_LEFT 1  // 0.6.13: over the wire, item 9 = +1 means Side A lies to the vehicle's left (0: to its right)
+#endif
+int32_t dt_decoded = -1;     // 0.6.12: the last CID 50 index 0 read (bit mask of decoded Tx channels); -1 none
+uint32_t dt_decoded_ms = 0;  // when it came
 void flushSerial1RxBounded();  // Drain limited stale UART bytes without blocking the loop
 static uint16_t crc16_ibm(const uint8_t *data, size_t len);  // CRC-16/IBM: poly 0x8005, init 0xFFFF, no reflection
 int stmFrameLen();     // bytes of one STM32 frame for the link version (unknown: the v2 length, the shorter)
+int stm_v2_len = STM_FRAME_LEN;  // 0.5.128: the layout 2 frame length in use: 128 B (version 2) or 144 B (version 3)
 bool stmReadFrame();   // one STM32 frame (v1 or v2) into stmPacket; false: bad CRC or version (counted)
 void stmV2Config();    // v2: lane inputs and detail formats to the link
 void dspApply();       // v2: the DSP settings (config.json dsp_*) to the STM32, then run
 void dspOnAnswer(const stmv2::Answer& a);  // v2: a DSP write answer -> g_dsp_eff
+void sweepFrame();         // v2: the sweep bins of a frame to the log (body 0x32)
+void polarFrame();         // Rx STM32 2.0.67+: the polarity detector block of a frame to the log (body 0x37)
+void uartCommand(const char* a);  // bench "uart": the Rx UART frame
+void stmTxBlockOnly();  // Rx UART frame: the control block in a frame with no control step
+extern volatile uint32_t uart_last_good_ms;
+extern uint8_t uart_blk[2][ESP_UART_FRAME_LEN], uart_cmdf[ESP_UART_FRAME_LEN];
+extern volatile uint8_t uart_blk_i;
+extern volatile bool uart_blk_ok, uart_cmd_ready, uart_isr_go, uart_blk_sent;
+extern volatile uint32_t uart_isr_none, uart_isr_fifo, uart_isr_repeat, uart_edge_seq;
+void uartRefresh();
+extern uint32_t uart_frames;
+extern bool uart_force_old;
+extern uint32_t uart_pause_until;
+extern uint32_t uart_pause_t0;
+extern int32_t uart_cp_off_ms;
+extern uint32_t polar_frames, polar_samples, polar_sent, polar_dropped, polar_lost_flags;
+extern int32_t sweep_sent_bins;
+extern const char* dsp_apply_reason;
 void stmCaptureService();  // bench: paced print of captured v2 frames
 void stm32_boot_handshake();  // IAP hello/boot handshake — call once after Serial1.begin()
 void stmFastFrameGuard();     // boot: a v2 STM32 with frames faster than 100 a second gets the 10 ms period
 size_t serial1Drain();        // the STM32 UART input bytes there now, read in blocks; returns the count
 int stm32_iap_boot(int hello_tries, char* hello_text, size_t text_len, uint8_t* hello_len);  // HELLO, BOOT, first nDATA_READY
 void writePwmMicros(uint8_t ch, uint32_t micros); // Write PWM output pulse width in microseconds
+extern uint32_t pwm_test_us;  // 0.5.104: bench "pwm" (writePwmMicros)
+extern uint32_t usb_rx_ms;    // 0.5.104: the last USB input byte (benchSerial)
+extern bool period_ack_want;  // 0.5.104: "set dsp_frame_period_us" answers after the Rx STM32 (periodAckService)
+void periodAckDefer(bool usb, const uint8_t* mac, uint16_t seq);
 void mainLoopCounter();  // increment main loop counter
 void buttonLogic();  // handle button events
 
@@ -576,11 +669,11 @@ stmset::Link stmLink;
 // 2.0.2 and later). Layout 1 (98 B, app 2.0.0/2.0.1 prototypes) is no longer read. 50 bad frames in a
 // row make the version unknown again (for example after an STM32 app update through the bridge).
 stmv2::Decoder stmDec;
-// Bench "rt bench" (rt task draft, step 1): CPU cycles of the live v2 frame read and decode (mean, max since the
+// Bench "rt bench": CPU cycles of the live v2 frame read and decode (mean, max since the
 // last report), then 1000 decodes of the last good frame in a copy of the decoder, then single float operations.
 uint8_t rt_last_frame[STM_FRAME_LEN];
 bool rt_last_ok = false;
-uint64_t rt_read_cyc = 0, rt_dec_cyc = 0;
+uint64_t rt_read_cyc = 0, rt_dec_cyc = 0, rt_ans_cyc = 0, rt_post_cyc = 0;
 uint32_t rt_read_max = 0, rt_dec_max = 0, rt_bench_n = 0;
 stmv2::Answer stmAns;
 uint8_t stm_link_ver = 0;          // 0 not known, 1 = v1, 2 = v2.0 layout 2
@@ -594,7 +687,7 @@ bool stm_v2_save_ok = false;       // layout 2: a CID 3 goes out only after a ce
 bool stm_v2_autorun = true;        // send run after the configuration and each STM32 reset ('stm run 0' stops it)
 uint32_t stm_v2_run_ms = 0;        // millis() of the last run command queued
 uint32_t stm_ans_print_until = 0;  // bench: print each v2 answer until this millis()
-// Bench (performance plan): raw v2 frames into RAM ('stm cap <n>', n <= 300, 128 B each, heap), printed
+// Bench: raw v2 frames into RAM ('stm cap <n>', n <= 300, 128 B each, heap), printed
 // later at the pace the USB queue takes ('stm dump'). Command round trip in frames: the frame seq when a
 // command goes out against the frame seq of its answer (stm v2 'rtt').
 uint8_t* stm_cap = nullptr;
@@ -813,7 +906,8 @@ uint32_t stm_iap_fails = 0;
 // For cid, don't forget to do (cid | 0x80000000) for write commands
 void espPacketFifo_addCmdInt32(uint32_t cid, int32_t cmd);  // Add a command with a int32 payload to the queue
 void espPacketFifo_addCmdFloat(uint32_t cid, float cmd);  //  add a command with a float payload to the queue
-void espPacketFifo_sendCmd();  // Read the answer in this packet, then send up to one command; call after each valid STM32 packet
+void espPacketFifo_sendCmd();  // Send up to one command; call after each valid STM32 packet (v2 answers: stmV2Answer)
+void stmV2Answer();
 void stmLinkEvents();  // link events to the vehicle log (event 18) and USB
 void stmRecoveryService();  // STM32 silent after packets: HELLO/BOOT again (an STM32 that restarted waits in its boot checker)
 
@@ -871,8 +965,6 @@ uint32_t espnow_send_err = 0, espnow_pong_count = 0;
 bool espnow_thru_active = false;
 uint32_t espnow_thru_period_us = 0, espnow_thru_size = 0, espnow_thru_left = 0, espnow_thru_seq = 0, espnow_thru_last_us = 0;
 bool bench_timing_print = false;
-bool bench_erase_block = false;  // bench "erase off": no flash ring erase (throughput tests without the erase losses)
-bool bench_sim_armed = false;    // bench "armed sim on": the erase rule treats the motors as armed (simulated run, no ODrive)
 bool update_mode = false;        // from "ota begin": loop() serves only USB and the update (see loop())
 bool monitor_role_on = false;    // this boot runs the monitor role: monitor_role::loop(), no vehicle code
 // USB command "monitor": the next boot only runs the monitor role (PC-tethered monitor role). The flag
@@ -891,7 +983,7 @@ volatile uint32_t sim_dropped_tx = 0, sim_dropped_rx = 0;
 #define ESPNOW_TYPE_CMD     0x10
 #define ESPNOW_TYPE_ACK     0x11
 #define ESPNOW_TYPE_STOP    0x12  // u8 type, u16 seq, u32 fleet key: stop at once (docs/espnow_protocol.md)
-#define SETTINGS_DEF_VERSION 6  // docs/settings_def.json version (6: DSP settings dsp_*, groups for users)
+#define SETTINGS_DEF_VERSION 13  // docs/settings_def.json version (13: generated from include/settings_table.h by tools/gen_settings_def.py; 6: DSP settings dsp_*, groups for users; 7: servo map, drive_output, vehicle_name, steer_lpf_hz; 8: radio_mode, wifi_ssid, wifi_password; 9: dsp_sweep_bins; 10: dsp_frame_period_us min 2000; 11: min 2336; 12: min 2938)
 #define ESPNOW_TYPE_RESTART 0x7F
 #define ESPNOW_TYPE_MON     0x44  // monitor broadcast, once a second: u8 type, u8 version, u32 monitor ms, u64 PC unix ms (0 = unknown), u8 n
 // The last MON frame (set in the Wi-Fi task, read in loop()).
@@ -914,6 +1006,8 @@ uint8_t espnow_busy_mac[6];
 uint16_t espnow_busy_seq = 0;
 volatile uint8_t espnow_restart_request = 0;  // 1 normal restart, 2 restart into ROM download mode
 volatile int espnow_list_index = -1;          // >= 0 while a "list" answer is in progress
+bool espnow_list_saved = false;               // 0.6.15: the answer in progress is "list saved"
+DeviceConfig g_saved_config;                  // 0.6.15: the settings of the next start, loaded at each "list saved"
 volatile bool espnow_stop_request = false;    // STOP frame received; loop() stops at its next pass
 uint8_t espnow_stop_mac[6];
 uint16_t espnow_stop_seq = 0;
@@ -944,7 +1038,42 @@ inline void mark(uint8_t s) { cpuprof::section(s); rtprof::part(s); last_state.s
 const char* const SEC_NAMES[SEC_N] = {"usb", "update", "bridge", "monitor", "drive", "msc", "packet", "rover", "sample",
                                       "stmcmd", "radio", "log", "bench", "debug", "mpu"};
 bool safe_mode = false;
-bool espnowWanted(){ return !safe_mode && (g_deviceConfig.espnow_enabled || g_deviceConfig.telemetry_enabled); }
+// Radio mode (setting radio_mode), fixed at boot: ESP-NOW or a Wi-Fi network, never both. A change
+// takes effect at the next start. In "wifi" mode the same flags (espnow_enabled, telemetry_enabled)
+// switch the radio on, and the same frames go to the PC telemetry server as UDP (lib/wifi_telem).
+bool radio_wifi = false;
+// 0.5.103: the shortest update period for each link mode: the shortest setting with all counts zero and
+// a mean CPU load under 90 % (0.5.102 table, 2026-10-14: every mode passes at the shortest setting tested, 2000 us =
+// 2.38 ms frames; Wi-Fi 78 %, ESP-NOW 65 %, no link 58 %). A later link mode gets its own row.
+// 0.5.105: 2938 us in every mode: Rx STM32 2.0.57 keeps only 7 % free time at 2354 us
+// (GAPS run). The floor no longer follows the Rx STM32 shortest period (2354 / 2336 us), which sits below it.
+// A "set" below the minimum of the link mode is refused with the minimum; dspApply sends at least the minimum.
+#define PERIOD_MIN_NO_LINK_US 2938
+#define PERIOD_MIN_ESPNOW_US 2938
+#define PERIOD_MIN_WIFI_US 2938
+enum { LINK_NONE, LINK_ESPNOW, LINK_WIFI };
+static int linkModeOf(const DeviceConfig& c, bool wifi) {
+  if (safe_mode || !(c.espnow_enabled || c.telemetry_enabled)) return LINK_NONE;
+  return wifi ? LINK_WIFI : LINK_ESPNOW;
+}
+static int periodMinUs(int m) { return m == LINK_WIFI ? PERIOD_MIN_WIFI_US : m == LINK_ESPNOW ? PERIOD_MIN_ESPNOW_US : PERIOD_MIN_NO_LINK_US; }
+// 0.5.104: the shortest period the Rx STM32 runs (2.0.57): 2354 us with the slow ADC on (CID 39
+// = 1, the default), 2336 us with it off. A shorter request runs at that period with no notice, so the floor is the
+// larger of the link mode row and this value.
+#define STM_PERIOD_MIN_SLOW_US 2354
+#define STM_PERIOD_MIN_FAST_US 2336
+static int periodFloorUs(int m, const DeviceConfig& c) {
+  const int stm = c.dsp_slow_adc ? STM_PERIOD_MIN_SLOW_US : STM_PERIOD_MIN_FAST_US;
+  return periodMinUs(m) > stm ? periodMinUs(m) : stm;
+}
+static const char* linkModeName(int m) { return m == LINK_WIFI ? "Wi-Fi" : m == LINK_ESPNOW ? "ESP-NOW" : "no link"; }
+// The link mode with the longer minimum: the one in use now, or the one of the next start (radio_mode).
+static int linkModeStrict(const DeviceConfig& c) {
+  const int now_m = linkModeOf(c, radio_wifi), next_m = linkModeOf(c, c.radio_mode == RADIO_MODE_WIFI);
+  return periodMinUs(now_m) >= periodMinUs(next_m) ? now_m : next_m;
+}
+bool espnowWanted(){ return !safe_mode && !radio_wifi && (g_deviceConfig.espnow_enabled || g_deviceConfig.telemetry_enabled); }
+bool wifiWanted(){ return !safe_mode && radio_wifi && (g_deviceConfig.espnow_enabled || g_deviceConfig.telemetry_enabled); }
 
 void receiveCallback(const uint8_t *macAddr, const uint8_t *data, int dataLen)
 // Called when data is received (Wi-Fi task): copy a PING, CMD or RESTART for loop(), nothing else
@@ -1116,6 +1245,7 @@ void monLedService(){
 void espnowStart(){
   if (espnow_started || espnow_failed) return;
   const uint32_t t0 = millis();
+  WiFi.persistent(false);  // the Wi-Fi driver keeps its settings in RAM: no write to its NVS area at a start
   WiFi.mode(WIFI_STA); // Set device as a Wi-Fi Station (no AP, default channel)
   if (esp_now_init() != ESP_OK) {
     usbOut.println("ESP-NOW Init Failed (ESP-NOW stays off until a restart)");
@@ -1147,12 +1277,143 @@ void espnowSendAck(const uint8_t* mac, uint16_t seq, uint8_t result, const char*
   frame[3] = result;
   const size_t n = min(strlen(text), (size_t)(ESP_NOW_MAX_DATA_LEN - 4));
   memcpy(&frame[4], text, n);
+  if (radio_wifi) {  // Wi-Fi mode: the ACK goes to the server as a datagram (docs/wifi_interface.md)
+    if (!wifilink::send(frame, 4 + n)) espnow_send_err++;
+    return;
+  }
   espnowEnsurePeer(mac);
   if (esp_now_send(mac, frame, 4 + n) != ESP_OK) espnow_send_err++;
 }
 
+// Wi-Fi telemetry (radio_mode "wifi", lib/wifi_telem) ------------------------------------------------
+// The same payloads as the ESP-NOW path: the log frames (live, INFO, backfill) and the text telemetry
+// message. Each goes to the PC telemetry server as one unicast UDP datagram. Telemetry only: no
+// command comes in over Wi-Fi.
+void wifiEvent(int32_t a, int32_t b, const char* text){ telemetryEvent(rec::EV_WIFI, a, b, text); }
+// A payload from the server: only a REQ (backfill request) is used, and the log takes it as from
+// ESP-NOW. The MAC is a fixed stand-in: in wifi mode every send goes to the server.
+void wifiFrame(const uint8_t* data, int len){
+  static const uint8_t server_mac[6] = {0x02, 0x57, 0x49, 0x46, 0x49, 0x00};  // locally administered
+  // 0.5.86: CMD, STOP, RESTART and REQ from the server take the ESP-NOW path (fleet key, one CMD at a time, retry
+  // cache); the answers go back as datagrams. wifilink passes only datagrams from the known server address.
+  receiveCallback(server_mac, data, len);
+}
+uint32_t web_upload_quiet_ms = 0;  // 0.6.15: millis() of the last update page grant; telemetry pauses 5 min from it
+bool wifiTelemetrySend(const uint8_t mac[6], const uint8_t* buf, size_t len){
+  (void)mac;  // the server address replaces it
+  if (sim_loss_tx && esp_random() % 100 < sim_loss_tx) { sim_dropped_tx++; return true; }  // bench loss simulation, as telemetrySend()
+  // 0.6.15: no telemetry datagrams during an update page upload. Each one takes and frees heap; over the upload the
+  // largest free block fell to 2.3 KB, the Wi-Fi task could not take its 2.3 KB receive buffers (189 failures) and
+  // the upload stopped for 30 s. The upload ends in a restart, or the pause in 5 min.
+  if (web_upload_quiet_ms && millis() - web_upload_quiet_ms < 300000) return true;
+  return wifilink::send(buf, len);  // false before the server is known: counted as unsent
+}
+// Radio start in wifi mode, once; stops loop() for about 220 ms, as espnowStart() does.
+// The WPA2 key (PBKDF2-SHA1, 4096 rounds, 32 bytes) as 64 hex digits. Given a passphrase, the Wi-Fi driver calculates
+// this key in its own task at the first association; that task stopped loop() for 190 to 417 ms. Given the key, the
+// driver calculates nothing. False for an open network or a password that is already 64 hex digits.
+bool wifiKeyFromPassphrase(const char* ssid, const char* pass, char out[65]){
+  const size_t n = strlen(pass);
+  if (n < 8 || n > 63) return false;
+  uint8_t pmk[32];
+  mbedtls_md_context_t ctx;
+  mbedtls_md_init(&ctx);
+  const bool ok = mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(MBEDTLS_MD_SHA1), 1) == 0 &&
+                  mbedtls_pkcs5_pbkdf2_hmac(&ctx, (const unsigned char*)pass, n, (const unsigned char*)ssid, strlen(ssid),
+                                            4096, sizeof(pmk), pmk) == 0;
+  mbedtls_md_free(&ctx);
+  if (ok) for (int i = 0; i < 32; i++) snprintf(out + 2 * i, 3, "%02x", pmk[i]);
+  memset(pmk, 0, sizeof(pmk));
+  return ok;
+}
+// wifilink::begin() or setCredentials() with the key in place of the passphrase.
+void wifiCredentials(const char* ssid, const char* pass){
+  char key[65];
+  const uint32_t t0 = millis();
+  const bool derived = wifiKeyFromPassphrase(ssid, pass, key);
+  if (derived) usbOut.printf("WIFI key calculated in %lu ms\n", (unsigned long)(millis() - t0));
+  if (wifilink::started()) wifilink::setCredentials(ssid, derived ? key : pass);
+  else wifilink::begin(ssid, derived ? key : pass);
+  memset(key, 0, sizeof(key));
+}
+void wifiStart(){
+  if (wifilink::started()) return;
+  char pass[WIFI_PASS_MAX + 1];
+  msc_fat_wifi_password(pass, sizeof(pass));
+  wifiCredentials(msc_fat_wifi_ssid(), pass);
+  memset(pass, 0, sizeof(pass));
+  applyTxPower();  // espnow_tx_power_dbm sets the Wi-Fi transmit power too
+}
+// The text telemetry message that broadcastTelemetry() queues, over UDP (telemetryFifo_sendMessage() for Wi-Fi).
+void wifiTelemetryFifoSend(){
+  if (millis() - lastTelemetrySendTime < 100 || telemetry_fifo_head == telemetry_fifo_tail) return;
+  const String& m = telemetryFifo[telemetry_fifo_tail].message;
+  wifiTelemetrySend(nullptr, (const uint8_t*)m.c_str(), m.length());
+  telemetry_fifo_tail = (telemetry_fifo_tail + 1) % TELEMETRY_FIFO_LENGTH;
+  lastTelemetrySendTime = millis();
+}
+
+// USB "wifi" commands. The password goes to NVS only; no line, event or log record carries it.
+//   wifi                          status: mode, network, association, RSSI, IP, server, beacon age, counters
+//   wifi scan                     one line per network: SSID, RSSI, channel, security
+//   wifi set <ssid> <password>    "wifi set "<ssid with spaces>" <password>"; no password: an open network
+//   wifi clear                    removes the network and the password
+//   wifi blast <bytes> <per_s> <secs> [port]   throughput test to the server address (wifilink::blastStart)
+bool vehicleStationary();
+void wifiUsbCommand(const char* line){
+  const char* mode = radio_wifi ? "wifi" : "espnow";
+  const char* setting = g_deviceConfig.radio_mode == RADIO_MODE_WIFI ? "wifi" : "espnow";
+  if (!strcmp(line, "wifi")) {
+    wifilink::printStatus(mode, setting, msc_fat_wifi_ssid());
+    usbOut.printf("WIFI password=%s\n", wifitelem::passwordState(msc_fat_wifi_has_password()));
+  } else if (!strcmp(line, "wifi scan")) {
+    // In espnow mode the scan takes the radio off the ESP-NOW channel for about 2 s: not while the vehicle moves.
+    if (!radio_wifi && !espnow_started) usbOut.println("WIFI scan refused: the radio is off (espnow_enabled and telemetry_enabled false)");
+    else if (radio_wifi && !wifilink::started()) usbOut.println("WIFI scan refused: the radio is off (espnow_enabled and telemetry_enabled false)");
+    else if (!radio_wifi && !vehicleStationary()) usbOut.println("WIFI scan refused: Stop the vehicle first (a scan pauses ESP-NOW for about 2 s)");
+    else wifilink::scanStart();
+  } else if (!strcmp(line, "wifi blast stop")) {
+    wifilink::blastStop();
+  } else if (!strncmp(line, "wifi blast ", 11)) {
+    unsigned b = 0, r = 0, s = 0, port = 47702;
+    if (sscanf(line + 11, "%u %u %u %u", &b, &r, &s, &port) < 3 || b < 16 || b > 1472 || !r || r > 5000 || !s || s > 600 || port > 65535)
+      usbOut.println("WIFI usage: wifi blast <bytes 16-1472> <per_s 1-5000> <secs 1-600> [port, default 47702] | wifi blast stop");
+    else if (!wifilink::blastStart(b, r, s, port)) usbOut.println("WIFI blast refused: no association or no server");
+  } else if (!strncmp(line, "wifi set ", 9) || !strcmp(line, "wifi clear")) {
+    if (!vehicleStationary() || drive_mode_status == 2) { usbOut.println("WIFI refused: Stop the vehicle first"); return; }
+    if (!strcmp(line, "wifi clear")) {
+      msc_fat_wifi_clear();
+      if (wifilink::started()) wifilink::setCredentials("", "");
+      usbOut.println("WIFI cleared: no network stored");
+      telemetryEvent(rec::EV_SETTING, 0, 0, "wifi clear");
+      return;
+    }
+    char ssid[WIFI_SSID_MAX + 1], pass[WIFI_PASS_MAX + 1];
+    const wifitelem::SetResult r = wifitelem::parseWifiSet(line + 9, ssid, pass);
+    if (r == wifitelem::SET_USAGE) usbOut.println("WIFI usage: wifi set <ssid> <password> | wifi set \"<ssid>\" <password>");
+    else if (r == wifitelem::SET_SSID_LENGTH) usbOut.println("WIFI refused: the SSID must be 1 to 32 bytes");
+    else if (r == wifitelem::SET_PASS_LENGTH) usbOut.println("WIFI refused: the password must be 8 to 63 characters, 64 hex digits, or none");
+    else if (!msc_fat_wifi_set(ssid, pass)) usbOut.println("WIFI NVS write failed");
+    else {
+      if (wifilink::started()) wifiCredentials(ssid, pass);
+      usbOut.printf("WIFI stored ssid=\"%s\" password=%s%s\n", ssid, wifitelem::passwordState(pass[0] != 0),
+                    radio_wifi ? "" : " (radio_mode is espnow: set radio_mode wifi, save, restart)");
+      telemetryEvent(rec::EV_SETTING, 0, 0, "wifi set (value not logged)");
+    }
+    memset(pass, 0, sizeof(pass));
+  } else {
+    usbOut.println("WIFI usage: wifi | wifi scan | wifi set <ssid> <password> | wifi clear");
+  }
+}
+
 uint8_t configCommand(const char* t, bool over_espnow, String& reply);
 uint8_t configCommandRun(const char* t, bool over_espnow, String& reply);
+// Update commands from the telemetry app ("ota url|status|abort", "stm url|status", "get rx_stm32_version"; see
+// "Update commands from the telemetry app" below).
+bool stmUrlBusy();
+bool updateAllowed(const char* t);
+bool updateCommand(const char* t, bool radio, String& line);
+uint8_t updateResult(const String& line);
 
 // Restarts that the PC sees (bench tests). With USB persist off
 // (arduino-esp32 2.0.17), usb_persist_restart() resets the USB core but leaves the D+ pull-up on:
@@ -1167,6 +1428,11 @@ void usbDetachForRestart(){
   delay(300);
 }
 void restartIntoRom(){  // ROM download mode, for esptool --before no_reset --after hard_reset
+  // 0.6.15: the RTC watchdog (8 s, rtcWdtStart) survives the restart into the ROM loader, which never feeds it: the
+  // ROM loader reset every 8 s and a flash write from the update page stopped part way. Off first.
+  rtc_wdt_protect_off();
+  rtc_wdt_disable();
+  rtc_wdt_protect_on();
   usbDetachForRestart();
   usb_persist_restart(RESTART_BOOTLOADER);
   ESP.restart();  // only if the shutdown handler could not be registered
@@ -1181,10 +1447,7 @@ void restartApp(){
 bool vehicleStationary();
 bool otaMayStart(){
   if (!vehicleStationary()) return false;
-  writePwmMicros(1, PWM_OUT_1_DEFAULT);
-  writePwmMicros(2, PWM_OUT_2_DEFAULT);
-  writePwmMicros(3, PWM_OUT_3_DEFAULT);
-  writePwmMicros(4, PWM_OUT_4_DEFAULT);
+  servoIdle();
   if (!update_mode) {
     usbOut.println("UPDATE mode on: USB and the update only; loop watchdog paused");
     disableLoopWDT();  // the image check at "ota end" can run past 5 s (bench test)
@@ -1194,8 +1457,26 @@ bool otaMayStart(){
   return true;
 }
 
+// usb_ota "ota url": Wi-Fi mode with the station connected (the driver state: the link service stops in update mode).
+bool otaNetReady(){
+  return radio_wifi && WiFi.status() == WL_CONNECTED;
+}
+
 // Config commands and restarts, from loop() (docs/espnow_protocol.md).
 uint8_t runCommand(bool start, const char* source, String& reply);
+// The last ACK of a command with an effect, for a retry with the same seq (the ACK was lost).
+static uint8_t last_mac[6];
+static uint16_t last_seq = 0;
+static bool have_last = false;
+static uint8_t last_result = 0;
+static String last_reply;
+void espnowCacheAck(const uint8_t* mac, uint16_t seq, uint8_t result, const String& reply){
+  memcpy(last_mac, mac, 6);
+  last_seq = seq;
+  last_result = result;
+  last_reply = reply;
+  have_last = true;
+}
 void espnowCommands(){
   if (espnow_stop_request) {
     espnow_stop_request = false;
@@ -1209,7 +1490,7 @@ void espnowCommands(){
     const int what = espnow_restart_request;
     espnow_restart_request = 0;
     if (!vehicleStationary()) {  // never a restart while the vehicle moves (the main-branch baseline has no remote restart)
-      usbOut.printf("ESP-NOW restart request %d refused: the vehicle moves\n", what);
+      usbOut.printf("ESP-NOW restart request %d refused: Stop the vehicle first\n", what);
       telemetryEvent(rec::EV_RESTART_REFUSED, what, 1, "ESP-NOW restart refused: the vehicle moves");
     } else {
       usbOut.printf("ESP-NOW restart request %d\n", what);
@@ -1227,7 +1508,8 @@ void espnowCommands(){
   if (espnow_list_index >= 0 && millis() - espnow_list_ms >= 5) {  // one key every 5 ms
     espnow_list_ms = millis();
     String line;
-    if (msc_fat_key_at(&g_deviceConfig, espnow_list_index, &line)) {
+    if (espnow_list_saved ? msc_fat_key_pair_at(&g_deviceConfig, &g_saved_config, espnow_list_index, &line)
+                          : msc_fat_key_at(&g_deviceConfig, espnow_list_index, &line)) {
       espnowSendAck(espnow_cmd_mac, espnow_cmd_seq, 0, line.c_str());
       espnow_list_index = espnow_list_index + 1;
     } else {
@@ -1243,12 +1525,9 @@ void espnowCommands(){
   }
   if (!espnow_cmd_pending) return;
   // A retry (same sender, same seq: the ACK was lost) gets the cached ACK and does not run again.
-  static uint8_t last_mac[6];
-  static uint16_t last_seq = 0;
-  static bool have_last = false;
-  static uint8_t last_result = 0;
-  static String last_reply;
-  if (!strcmp(espnow_cmd_text, "list")) {
+  if (!strcmp(espnow_cmd_text, "list") || !strcmp(espnow_cmd_text, "list saved")) {
+    espnow_list_saved = espnow_cmd_text[4] != 0;  // 0.6.15: "list saved": each key with its value of the next start
+    if (espnow_list_saved) msc_fat_saved_config(&g_saved_config);
     espnow_list_index = 0;  // the CMD's mac and seq stay in hand until "end"
     espnow_list_ms = 0;
   } else if (have_last && espnow_cmd_seq == last_seq && !memcmp(espnow_cmd_mac, last_mac, 6)
@@ -1259,13 +1538,13 @@ void espnowCommands(){
     espnowSendAck(espnow_cmd_mac, espnow_cmd_seq, last_result, last_reply.c_str());
   } else {
     String reply;
-    const uint8_t r = configCommand(espnow_cmd_text, true, reply);
-    espnowSendAck(espnow_cmd_mac, espnow_cmd_seq, r, reply.c_str());
-    memcpy(last_mac, espnow_cmd_mac, 6);
-    last_seq = espnow_cmd_seq;
-    last_result = r;
-    last_reply = reply;
-    have_last = true;
+    uint8_t r;
+    if ((update_mode || stmUrlBusy()) && !updateAllowed(espnow_cmd_text)) { reply = "refused: an update runs"; r = 4; }
+    else if (updateCommand(espnow_cmd_text, true, reply)) r = updateResult(reply);  // the ACK text = the USB line
+    else r = configCommand(espnow_cmd_text, true, reply);
+    if (period_ack_want) periodAckDefer(false, espnow_cmd_mac, espnow_cmd_seq);  // 0.5.104: answer after the Rx STM32
+    else espnowSendAck(espnow_cmd_mac, espnow_cmd_seq, r, reply.c_str());
+    espnowCacheAck(espnow_cmd_mac, espnow_cmd_seq, r, reply);
   }
   espnow_cmd_pending = false;
 }
@@ -1280,7 +1559,8 @@ void espnowCommands(){
 // docs/rover_guide.md, "Settings", has the same list.
 static const char* const STATIONARY_KEYS[] = {
   "rx_channel", "enable_sensor_2", "pid_direction",
-  "PWM_OUT_1_DEFAULT", "PWM_OUT_1_MIN", "PWM_OUT_1_MAX", "PWM_OUT_2_DEFAULT", "PWM_OUT_2_MIN", "PWM_OUT_2_MAX",
+  "drive_output", "steer_output", "throttle_output", "steer_center_us", "steer_min_us", "steer_max_us",
+  "throttle_center_us", "throttle_min_us", "throttle_max_us",
   "PWM_OUT_3_DEFAULT", "PWM_OUT_3_MIN", "PWM_OUT_3_MAX", "PWM_OUT_4_DEFAULT", "PWM_OUT_4_MIN", "PWM_OUT_4_MAX",
   "CHARGE_VBATT_STOP", "CHARGE_MAX_CURRENT", "CHARGE_MAX_SECONDS", "BTxFollowChannel",
   "espnow_enabled", "telemetry_enabled",
@@ -1331,23 +1611,168 @@ uint8_t configCommand(const char* t, bool over_espnow, String& reply){
     reply = drive_mode_status == 2 ? "run=running" : "run=stopped";
     return 0;
   }
+  if (!strcmp(t, "tlm")) {  // 0.5.116: the table hash (telemetry_def.json "version") and the number of table values
+    char b[48];
+    snprintf(b, sizeof(b), "tlm=%08lx values=%d", (unsigned long)tlm::hash(), tlm::count());
+    reply = b;
+    return 0;
+  }
+  if (!strcmp(t, "get telemetry_def")) {  // the telemetry_def.json "version" of this build (the table hash)
+    char b[32];
+    snprintf(b, sizeof(b), "telemetry_def=%08lx", (unsigned long)tlm::hash());
+    reply = b;
+    return 0;
+  }
+  if (!strncmp(t, "wifi", 4)) {  // Wi-Fi network and password: USB "wifi set" only, never over the radio
+    reply = "wifi: USB only";
+    telemetryEvent(rec::EV_SETTING, 4, over_espnow ? 1 : 0, "wifi (value not logged) -> refused");
+    return 4;
+  }
   const uint8_t r = configCommandRun(t, over_espnow, reply);
   if (strncmp(t, "get ", 4)) {  // one event per set or save, applied or refused: the log shows what was tried
-    telemetryEvent(rec::EV_SETTING, r, over_espnow ? 1 : 0, (String(t) + " -> " + reply).c_str());
+    char safe[ESPNOW_CMD_TEXT_MAX + 32];
+    wifitelem::logSafeCommand(t, safe, sizeof(safe));  // "set wifi_..." keeps no value: the log never holds a password
+    telemetryEvent(rec::EV_SETTING, r, over_espnow ? 1 : 0, (String(safe) + " -> " + reply).c_str());
   }
   return r;
+}
+
+// 0.5.104: "set dsp_frame_period_us" answers with the period in effect, after the Rx STM32 answer to CID 18 (up to
+// 500 ms; the loop runs on meanwhile). configCommandRun sets period_ack_want; the caller (USB or radio) hands its
+// reply address to periodAckDefer and sends nothing; periodAckService sends the answer.
+bool period_ack_want = false;
+long period_ack_asked = 0;
+uint32_t period_ack_answers0 = 0, dsp_period_answers = 0;
+struct { bool on, usb, web; uint8_t mac[6]; uint16_t seq; long asked; uint32_t t0, answers0; } period_ack = {};
+void espnowSendAck(const uint8_t* mac, uint16_t seq, uint8_t result, const char* text);
+void espnowCacheAck(const uint8_t* mac, uint16_t seq, uint8_t result, const String& reply);
+void periodAckDefer(bool usb, const uint8_t* mac, uint16_t seq){
+  period_ack_want = false;
+  period_ack.on = true; period_ack.usb = usb; period_ack.web = false;
+  if (mac) memcpy(period_ack.mac, mac, 6);
+  period_ack.seq = seq; period_ack.asked = period_ack_asked;
+  period_ack.t0 = millis(); period_ack.answers0 = period_ack_answers0;
+}
+void periodAckService(){
+  if (!period_ack.on) return;
+  const bool answered = dsp_period_answers != period_ack.answers0;
+  if (!answered && millis() - period_ack.t0 < 500) return;
+  period_ack.on = false;
+  String reply = "dsp_frame_period_us=";
+  const double eff = g_dsp_eff[DSP_EFF_PERIOD];
+  if (!answered || !isfinite(eff)) reply += String(period_ack.asked) + " (no Rx STM32 answer)";
+  else if ((long)eff == period_ack.asked) reply += String((long)eff);
+  else reply += String((long)eff) + " (asked " + period_ack.asked + ")";
+  if (period_ack.web) webcfg::answer(0, reply);
+  else if (period_ack.usb) usbOut.printf("CFG 0 %s\n", reply.c_str());
+  else { espnowSendAck(period_ack.mac, period_ack.seq, 0, reply.c_str()); espnowCacheAck(period_ack.mac, period_ack.seq, 0, reply); }
+}
+
+// Settings page (src/web_settings.cpp): one page command, in loop(). The page uses the Wi-Fi link, so the rules of a
+// radio command apply: a key that would cut the link is refused, "config erase" keeps the link settings and the Wi-Fi
+// details. "restart": refused while the vehicle moves; the page module restarts after its answer.
+// *deferred: a new update period answers later, after the Rx STM32 answer (periodAckService -> webcfg::answer).
+uint8_t webCommand(const char* t, String& reply, bool* deferred){
+  *deferred = false;
+  if ((update_mode || stmUrlBusy()) && !updateAllowed(t)) { reply = "refused: an update runs"; return 4; }
+  if (!strcmp(t, "restart")) {
+    if (vehicleStationary()) { reply = "restart=restarting"; return 0; }
+    reply = "restart=Stop the vehicle first";
+    telemetryEvent(rec::EV_RESTART_REFUSED, 1, 2, "page restart refused: the vehicle moves");
+    return 4;
+  }
+  const uint8_t r = configCommand(t, true, reply);
+  if (period_ack_want) {
+    periodAckDefer(false, nullptr, 0);
+    period_ack.web = true;
+    *deferred = true;
+  }
+  return r;
+}
+
+// 0.5.104: after "bin <i> <hz>", read CID 20 index i every 50 ms (up to 1.5 s) until the Rx STM32 answers hz: 2.0.58 moves
+// the bin about 10 frames after the write and answers the old frequency to the write itself. The reads keep
+// dsp_bin_hz_<i>_eff true for the app.
+int bin_poll_idx = -1;
+float bin_poll_hz = 0;
+uint32_t bin_poll_t0 = 0, bin_poll_last = 0;
+void binPollService(){
+  if (bin_poll_idx < 0 || stm_link_ver != 2) return;
+  const uint32_t now = millis();
+  if (fabs(g_dsp_eff[DSP_EFF_BIN0 + bin_poll_idx] - bin_poll_hz) < 0.5 || now - bin_poll_t0 > 1500) { bin_poll_idx = -1; return; }
+  if (now - bin_poll_last < 50) return;
+  bin_poll_last = now;
+  stmLink.push(20, 0, (uint8_t)bin_poll_idx);
 }
 
 uint8_t configCommandRun(const char* t, bool over_espnow, String& reply){
   char key[48] = {0}, value[64] = {0};
   String out;
+  // "config erase" (settings to defaults; the Wi-Fi details stay) and "config erase wifi" (the Wi-Fi details too).
+  // Only while stopped (a flash write stops the CPU). Over a radio link the link settings stay (radio_mode,
+  // espnow_enabled, telemetry_enabled, cmd_key), and "wifi" is USB only, as "wifi set" and "wifi clear".
+  if (!strcmp(t, "config erase") || !strcmp(t, "config erase wifi")) {
+    const bool wifi = !strcmp(t, "config erase wifi");
+    const String k = wifi ? "config erase wifi" : "config erase";
+    if (drive_mode_status == 2 || !vehicleStationary()) { reply = k + "=Stop the vehicle first"; return 4; }
+    if (wifi && over_espnow) { reply = k + "=USB only"; return 4; }
+    usbOut.drain(100);  // the USB output empty first: no USB transfer runs into the flash write
+    const bool ok = msc_fat_erase(&g_deviceConfig, wifi, over_espnow);
+    applyDeviceConfig(g_deviceConfig);
+    reply = k + (ok ? "=done: settings at defaults" : "=settings at defaults; config.json write failed");
+    reply += wifi ? "; Wi-Fi details erased" : over_espnow ? "; link settings and Wi-Fi details kept" : "; Wi-Fi details kept";
+    return ok ? 0 : 4;
+  }
   if (!strcmp(t, "save")) {
-    if (!vehicleStationary()) { reply = "save=not while moving"; return 4; }  // a flash write stops the CPU
+    // Run model (0.5.95): a save only while stopped. A flash write halts everything else for its time.
+    if (drive_mode_status == 2 || !vehicleStationary()) { reply = "save=Stop the vehicle first"; return 4; }  // a flash write stops the CPU
+    usbOut.drain(100);  // the USB output empty first: no USB transfer runs into the flash write
     // NVS and config.json (design choice 2026-10-10: a save is a save of the file). config.json overrides
     // NVS at boot, so an NVS-only save of a key that the file holds was lost at the next boot.
     if (msc_fat_save_all(&g_deviceConfig)) { reply = "save=json"; return 0; }
     reply = "save=nvs only: config.json write failed";
     return 4;
+  }
+  // "sweep <index> <value>": CID 43 to the Rx STM32 as it is (index 0 sweep bins 0-8 or 255 auto; 1 range start Hz;
+  // 2 range stop Hz; 0 = the span edge). The PC chooses; the Rx STM32 answers (OK, OK_CLAMPED). A change of the bin
+  // count restarts the DSP set-up: not while the vehicle moves. The range is safe while driving. Not saved: the next
+  // DSP set sends dsp_sweep_bins again.
+  {
+    int si = -1;
+    long sv = 0;
+    if (sscanf(t, "sweep %d %ld", &si, &sv) == 2) {
+      if (si < 0 || si > 2) { reply = "sweep"; return 2; }
+      if (si == 0 && !vehicleStationary()) { reply = "sweep=Stop the vehicle first"; return 4; }
+      if (stm_link_ver != 2) { reply = "sweep=no Rx STM32 v2 link"; return 4; }
+      if (si == 0) sweep_sent_bins = (int32_t)sv;
+      stmLink.pushInt(43 | 0x80000000, (int32_t)sv, (uint8_t)si);
+      stm_ans_print_until = millis() + 2000;  // USB shows the answer (STM ans ...)
+      reply = String("sweep ") + si + "=" + sv + " sent";
+      return 0;
+    }
+  }
+  // "bin <index> <hz>" (0.5.103): CID 20 to the Rx STM32 as it is: bin index 0-7 to hz (0 = back to the sweep; the Rx
+  // STM32 takes 46 800-62 800 Hz and answers the value in effect). The spectrum view puts a spare bin on a cursor
+  // frequency. Safe while driving; the wire bin of each sensor is refused. Not saved: no Rx STM32 save, no settings
+  // change; the next DSP set sends dsp_bin_hz again.
+  {
+    int bi = -1;
+    float bhz = 0;
+    if (sscanf(t, "bin %d %f", &bi, &bhz) == 2) {
+      // The answer texts go to the app as they are. The ACK goes before the Rx STM32 answer; the value
+      // in effect is "get dsp_bin_hz_<index>_eff" (empty until the Rx STM32 answers).
+      if (bi < 0 || bi >= (int)WFRX_BINS) { reply = "bin=Bin index out of range: 0 to 7"; return 2; }
+      const String k = String("bin ") + bi;
+      if (!isfinite(bhz) || (bhz != 0 && (bhz < 46800 || bhz > 62800))) { reply = k + "=Frequency out of range: 46800 to 62800 Hz"; return 2; }
+      if (stm_link_ver != 2) { reply = k + "=No Rx STM32 link"; return 4; }
+      for (int sn = 0; sn < 2; sn++)
+        if (stmDec.wireBin(sn) == bi) { reply = k + "=Wire bin of sensor " + (sn + 1) + ": not free"; return 4; }
+      stmLink.pushFloat(20 | 0x80000000, bhz, (uint8_t)bi);
+      stm_ans_print_until = millis() + 2000;  // USB shows the answer (STM ans ...)
+      if (bhz != 0) { bin_poll_idx = bi; bin_poll_hz = bhz; bin_poll_t0 = millis(); bin_poll_last = 0; }  // 0.5.104
+      reply = bhz == 0 ? k + "=sweep" : k + "=" + String((long)lroundf(bhz)) + " Hz";
+      return 0;
+    }
   }
   if (sscanf(t, "get %47s", key) == 1) {
     if (!msc_fat_get_key(&g_deviceConfig, key, &out)) { reply = key; return 1; }
@@ -1355,11 +1780,28 @@ uint8_t configCommandRun(const char* t, bool over_espnow, String& reply){
     return 0;
   }
   if (sscanf(t, "set %47s %63s", key, value) == 2) {
-    if (strpbrk(value, ",{}[]:\"")) { reply = key; return 2; }  // one literal only: no JSON injection of other keys
+    // A text setting (vehicle_name, drive_output; 0.5.69): the rest of the line, spaces included, with no
+    // quotes needed; letters, digits, space, '_', '-' and '.' only. It goes to the parser as one JSON string.
+    String cur;
+    if (msc_fat_get_key(&g_deviceConfig, key, &cur) && cur.startsWith("\"")) {
+      const char* v = t + 4;
+      while (*v == ' ') v++;
+      v += strlen(key);
+      while (*v == ' ') v++;
+      String raw = v;
+      raw.trim();
+      if (raw.length() >= 2 && raw.startsWith("\"") && raw.endsWith("\"")) raw = raw.substring(1, raw.length() - 1);
+      if (raw.length() == 0 || raw.length() > 32) { reply = key; return 2; }
+      for (size_t i = 0; i < raw.length(); i++) {
+        const char ch = raw[i];
+        if (!isalnum((unsigned char)ch) && ch != ' ' && ch != '_' && ch != '-' && ch != '.') { reply = key; return 2; }
+      }
+      snprintf(value, sizeof(value), "\"%s\"", raw.c_str());
+    } else if (strpbrk(value, ",{}[]:\"")) { reply = key; return 2; }  // one literal only: no JSON injection of other keys
     if (over_espnow && !strcmp(key, "cmd_key")) { reply = "cmd_key not over ESP-NOW"; return 4; }
     if (stationaryKey(key) && !vehicleStationary()) {
       msc_fat_get_key(&g_deviceConfig, key, &out);
-      reply = String(key) + "=" + out + " not while moving";
+      reply = String(key) + "=" + out + " (Stop the vehicle first)";
       return 4;
     }
     const bool radio_key = !strcmp(key, "espnow_enabled") || !strcmp(key, "telemetry_enabled");
@@ -1367,11 +1809,62 @@ uint8_t configCommandRun(const char* t, bool over_espnow, String& reply){
       reply = String(key) + "=true";  // would cut the link that carries the command
       return 4;
     }
-    const int r = msc_fat_set_key(&g_deviceConfig, key, value);
-    if (r != 0) { reply = key; return (uint8_t)r; }
+    // Over a radio link (ESP-NOW, or Wi-Fi from 0.5.86), radio_mode keeps that link: another value would cut the
+    // link that carries the command (after the next start).
+    const char* link_mode = radio_wifi ? "wifi" : "espnow";
+    if (over_espnow && !strcmp(key, "radio_mode") && strcmp(value, link_mode) && strcmp(value, (String("\"") + link_mode + "\"").c_str())) {
+      reply = String(key) + "=\"" + link_mode + "\"";
+      return 4;
+    }
+    {  // 0.5.103: the update period must suit the link mode (a change of the period, radio_mode or the radio keys)
+      static DeviceConfig next;
+      next = g_deviceConfig;
+      const bool period_key = !strcmp(key, "dsp_frame_period_us");
+      char* num_end = nullptr;
+      const long asked_num = strtol(value, &num_end, 10);
+      const bool period_int = period_key && num_end != value && *num_end == 0;
+      const int tr = msc_fat_set_key(&next, key, value);  // a trial on a copy
+      if (tr == 0 || (tr == 2 && period_int)) {
+        if (tr == 2) next = g_deviceConfig;  // the period out of the table range: the floor of the present link mode
+        const int m = linkModeStrict(next);
+        // the value as asked: under the floor the answer stays "Update period too short" (the table range would refuse it too)
+        const long asked = period_key ? asked_num : next.dsp_frame_period_us;
+        if (asked < periodFloorUs(m, next)) {
+          reply = String(key) + "=Update period too short: " + String(periodFloorUs(m, next) / 1000.0, 2) + " ms or longer";
+          return 2;
+        }
+      }
+    }
+    const int old_period = g_deviceConfig.dsp_frame_period_us;
+    String why;  // out of range: "Range <min> to <max>" (refused, no change)
+    const int r = msc_fat_set_key(&g_deviceConfig, key, value, &why);
+    if (r != 0) { reply = why.length() ? String(key) + "=" + why : String(key); return (uint8_t)r; }
+    // 0.5.104: a new update period goes to the Rx STM32 (dspApply); the answer waits for its CID 18 answer (periodAckService).
+    // 0.6.1: also an unchanged setting when the period in effect differs by more than 1 % (a direct CID 18 write, "stm cmd
+    // 18", or an Rx STM32 restart left another period): the asked period goes again (0.6.0 answered "(asked ...)" only).
+    bool period_resend = false;
+    if (!strcmp(key, "dsp_frame_period_us") && stm_link_ver == 2) {
+      const double eff = g_dsp_eff[DSP_EFF_PERIOD];
+      const long want = g_deviceConfig.dsp_frame_period_us;
+      period_resend = g_deviceConfig.dsp_frame_period_us == old_period && isfinite(eff) && fabs(eff - want) > want / 100.0;
+      if (g_deviceConfig.dsp_frame_period_us != old_period || period_resend) {
+        period_ack_want = true;
+        period_ack_asked = g_deviceConfig.dsp_frame_period_us;
+        period_ack_answers0 = dsp_period_answers;
+      }
+    }
     applyDeviceConfig(g_deviceConfig);
+    if (period_resend) { dsp_apply_reason = "period in effect differs"; dspApply(); }
     msc_fat_get_key(&g_deviceConfig, key, &out);
     reply = String(key) + "=" + out;
+    if (!strcmp(key, "dsp_frame_period_us") && !period_ack_want) {  // no change: the period in effect now
+      const double eff = g_dsp_eff[DSP_EFF_PERIOD];
+      if (isfinite(eff) && (long)eff != g_deviceConfig.dsp_frame_period_us)
+        reply = String(key) + "=" + String((long)eff) + " (asked " + g_deviceConfig.dsp_frame_period_us + ")";
+    }
+    if (!strcmp(key, "radio_mode") && !over_espnow)  // the reply stays "key=value" for the PC; the note is a line of its own
+      usbOut.printf("RADIO radio_mode=%s in effect from the next start (save, then restart); now %s\n", out.c_str(),
+                    radio_wifi ? "wifi" : "espnow");
     return 0;
   }
   reply = "unknown command";
@@ -1449,6 +1942,7 @@ void benchSend(const char* arg){
 // returns to the 2 Mbaud packet link. A PC tool runs the protocol.
 bool stm_raw = false;
 void stmRestartCommand(const char* arg);
+void stmRawStreamCommand(const char* arg);
 // STM32 app update through the boot checker (IAP), bench and field: "stm iaphold" sets a one-shot
 // flag in NVS. At the next power-on the handshake sends HELLO only (no BOOT), so the STM32 stays in
 // its boot checker, and the board becomes a transparent bridge between USB and the STM32 UART
@@ -1631,6 +2125,264 @@ void stmBridgeService(){
   serial1Drain();
   data_ready = 0;
 }
+// Raw stream (0.5.73): the Rx STM32 UART passed through to USB, and the rate tests for it.
+//   raw usb <s>          USB output as fast as it goes: 512 B blocks "RAWU", u32 sequence, 504 pattern bytes
+//   raw pass <baud> <s>  the Rx STM32 UART at <baud> (up to 5000000, the ESP32-S2 UART maximum); every byte to USB unchanged
+//   raw loop <baud> <s>  the UART at <baud> in internal loopback: the ESP32 sends a counter pattern and checks it
+// Nothing else runs meanwhile (no Rx STM32 packets, no drive output, no radio, no log); stationary only. "RAW start"
+// before and "RAW end ..." after (bytes in and out, bytes dropped when USB could not take them, pattern errors, kB/s).
+// Then the UART goes back to 2 Mbaud and the Rx STM32 link starts again as after the USB bridge.
+uint8_t raw_mode = 0;  // 0 off, 1 usb, 2 pass, 3 loop
+uint32_t raw_baud = 0, raw_t0 = 0, raw_end_ms = 0, raw_seq = 0;
+uint64_t raw_in = 0, raw_out = 0, raw_drop = 0, raw_err = 0;
+uint8_t raw_expect = 0, raw_tx = 0;
+bool raw_first = true;
+// "stm raw" (Rx STM32 command 42, RAW_STREAM_INTERFACE.md section 4): the packets pass from the first A5 5A to the
+// end packet A5 5B (14 B); bytes before the first sync are dropped (the baud switch), a lost boundary resyncs.
+bool raw_stm = false;           // pass mode for an Rx STM32 stream (packet framing, stop at the end packet)
+uint8_t raw_stm_state = 0;      // 0 wait for the CID 42 answer, 1 before the first sync, 2 in the stream
+uint16_t raw_pkt_len = 40;      // 8 + 32 x coils
+uint32_t raw_pkt_pos = 0, raw_pkts = 0, raw_resync = 0, raw_presync = 0, raw_cmd_ms = 0, raw_last_rx_ms = 0;
+uint8_t raw_prev = 0;
+bool raw_end_pkt = false;
+uint32_t raw_first_ms = 0;  // millis() of the first stream byte
+bool raw_usb_stop = false, raw_stop_sent = false;  // USB input stopped the stream; the stop byte went to the Rx STM32
+uint32_t raw_stm_value = 0, raw_stm_sec = 0, raw_stm_baud = 0;
+size_t raw_rxbuf = 0;  // the UART receive buffer of the stream in effect (RAW start line)
+// Returns the receive buffer it got: rxbuf, or half of it down to 4 KB when the largest free heap block is short
+// (Wi-Fi mode leaves about 27 kB free: a 16 KB buffer failed with no message and the stream gave 0 bytes). 0: none.
+size_t rawUartBegin(uint32_t baud, size_t rxbuf){
+  // The Rx STM32 ends a stream on any received byte. Serial1.end() releases the TX pin (GPIO17); a low level on
+  // the floating line can read as a start bit. The pin is driven high between end() and begin(), as at power-on.
+  Serial1.flush();
+  Serial1.end();
+  pinMode(17, OUTPUT);
+  digitalWrite(17, HIGH);
+  const size_t blk = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  while (rxbuf > 4096 && rxbuf + 4096 > blk) rxbuf /= 2;
+  Serial1.setRxBufferSize(rxbuf);
+  Serial1.begin(baud);
+  if (!uart_is_driver_installed(UART_NUM_1)) return 0;
+  Serial1.setRxFIFOFull(64);
+  return rxbuf;
+}
+void rawStop(){
+  const uint32_t ms = millis() - raw_t0;
+  const uint8_t mode = raw_mode;
+  raw_mode = 0;
+  if (mode == 3) uart_set_loop_back(UART_NUM_1, false);
+  if (mode >= 2) {
+    if (!rawUartBegin(2000000, 2048)) usbOut.println("RAW error: the Rx STM32 UART did not start again (restart the board)");  // the link as in setup()
+    stm_link_ver = 0;             // learn the link again, as after the USB bridge
+    stm_v2_cfg_sent = false;
+    stmDec.reset();
+    serial1Drain();
+    data_ready = 0;
+  }
+  const double s = ms / 1000.0;
+  if (raw_stm) usbOut.printf("\nRAW stm packets=%lu resyncs=%lu presync=%lu end_packet=%d first_ms=%lu last_ms=%lu\n",
+                             (unsigned long)raw_pkts, (unsigned long)raw_resync, (unsigned long)raw_presync, (int)raw_end_pkt,
+                             (unsigned long)(raw_first_ms - raw_t0), (unsigned long)(raw_last_rx_ms - raw_t0));
+  const bool was_stm = raw_stm;
+  raw_stm = false;
+  raw_stm_state = 0;
+  stm_last_packet_ms = millis();  // the silence recovery counts from the stream end, not from the last frame before it
+  const char* stop = raw_usb_stop ? "usb" : "time";
+  raw_usb_stop = raw_stop_sent = false;
+  usbOut.printf("\nRAW end mode=%s stop=%s baud=%lu ms=%lu in=%llu out=%llu dropped=%llu errors=%llu kBps_in=%.1f kBps_out=%.1f heap=%lu\n",
+                mode == 1 ? "usb" : was_stm ? "stm" : mode == 2 ? "pass" : "loop", stop, (unsigned long)raw_baud, (unsigned long)ms,
+                (unsigned long long)raw_in, (unsigned long long)raw_out, (unsigned long long)raw_drop, (unsigned long long)raw_err,
+                s > 0 ? raw_in / 1000.0 / s : 0.0, s > 0 ? raw_out / 1000.0 / s : 0.0, (unsigned long)ESP.getFreeHeap());
+}
+// "stm raw <mask> <shift> <seconds> [baud]": Rx STM32 command 42 (idle mode first), then on its answer 1 the UART
+// goes to the stream baud at once (the first packet comes 50 ms after the answer frame) and the stream passes to USB.
+void stmRawStreamCommand(const char* arg){
+  unsigned long mask = 0, shift = 0, sec = 0, baud = 4923077;
+  const int n = sscanf(arg, "%lu %lu %lu %lu", &mask, &shift, &sec, &baud);
+  int coils = 0;
+  for (int i = 0; i < 4; i++) coils += (mask >> i) & 1;
+  if (n < 3 || coils < 1 || coils > 4 || mask > 15 || shift > 9 || sec < 1 || sec > 600 || baud < 115200 || baud > 5000000) {
+    usbOut.println("STM raw usage: stm raw <coil mask 1..15> <shift 0..9> <seconds 1..600> [baud, default 4923077]");
+    return;
+  }
+  if (stm_link_ver != 2) { usbOut.println("STM raw refused: no v2 link to the Rx STM32"); return; }
+  if (!vehicleStationary()) { usbOut.println("STM raw refused: the vehicle moves"); return; }
+  if (raw_mode || raw_stm_state) { usbOut.println("STM raw refused: busy"); return; }
+  raw_stm_value = (uint32_t)mask | ((uint32_t)shift << 8) | ((uint32_t)sec << 16);
+  raw_stm_sec = sec;
+  raw_stm_baud = baud;
+  raw_pkt_len = (uint16_t)(8 + 32 * coils);
+  raw_stm_state = 0xFE;  // waiting for the idle mode answer, then command 42
+  stmLink.pushInt(STM_RUN_CMD | 0x80000000, 0);
+  stmLink.push(42 | stmset::WRITE, raw_stm_value, 0);
+  raw_cmd_ms = millis();
+  usbOut.printf("STM raw: command 42 value=0x%08lx (packet %u B), stream at %lu baud\n", (unsigned long)raw_stm_value,
+                (unsigned)raw_pkt_len, baud);
+}
+// One v2 answer (before stmLink.onAnswerV2). Answer 1 to command 42: the UART switches now; nothing more goes out.
+void stmRawStreamOnAnswer(const stmv2::Answer& a){
+  if (raw_stm_state != 0xFE || !a.present || a.cid != (42 | ESP_CID_WRITE)) return;
+  if (a.status != RSP_OK || a.value != 1) {
+    raw_stm_state = 0;
+    usbOut.printf("STM raw refused by the Rx STM32: status %u value %ld\n", (unsigned)a.status, (long)(int32_t)a.value);
+    if (stm_v2_autorun) { stmLink.pushInt(STM_RUN_CMD | 0x80000000, 1); stm_v2_run_ms = millis(); }
+    return;
+  }
+  raw_in = raw_out = raw_drop = raw_err = 0;
+  raw_pkts = raw_resync = raw_presync = 0;
+  raw_pkt_pos = 0; raw_prev = 0; raw_end_pkt = false;
+  raw_baud = raw_stm_baud;
+  web::stop();  // the page server frees its heap for the stream buffer (it starts again after the stream)
+  raw_rxbuf = rawUartBegin(raw_stm_baud, 16384);  // within the 50 ms before the first packet
+  if (!raw_rxbuf) {
+    raw_stm_state = 0;
+    raw_mode = 2;  // rawStop restores the 2 Mbaud link
+    raw_t0 = millis();
+    usbOut.printf("RAW error: no memory for the UART buffer (largest free block %lu B)\n",
+                  (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    rawStop();
+    return;
+  }
+  raw_stm = true;
+  raw_stm_state = 1;
+  raw_mode = 2;
+  raw_t0 = millis();
+  raw_last_rx_ms = raw_t0;
+  raw_end_ms = raw_t0 + raw_stm_sec * 1000 + 3000;  // the stream time, the end packet and a margin
+  usbOut.printf("RAW start mode=stm baud=%lu s=%lu rxbuf=%u\n", (unsigned long)raw_stm_baud, (unsigned long)raw_stm_sec,
+                (unsigned)raw_rxbuf);
+}
+
+void rawCommand(const char* arg){
+  char m[8] = {0};
+  unsigned long baud = 0, sec = 0;
+  const int n = sscanf(arg, "%7s %lu %lu", m, &baud, &sec);
+  const bool usb = !strcmp(m, "usb") && n >= 2, uart = (!strcmp(m, "pass") || !strcmp(m, "loop")) && n == 3;
+  if (usb) { sec = baud; baud = 0; }
+  if ((!usb && !uart) || sec < 1 || sec > 120 || (uart && (baud < 115200 || baud > 5000000))) {
+    usbOut.println("RAW usage: raw usb <s> | raw pass <baud> <s> | raw loop <baud> <s> (baud up to 5000000, s 1..120)");
+    return;
+  }
+  if (!vehicleStationary()) { usbOut.println("RAW refused: the vehicle moves"); return; }
+  raw_in = raw_out = raw_drop = raw_err = 0;
+  raw_seq = 0; raw_expect = 0; raw_tx = 0; raw_first = true;
+  raw_baud = baud;
+  usbOut.printf("RAW start mode=%s baud=%lu s=%lu\n", m, baud, sec);
+  usbOut.drain(300);  // the start line out before the binary data
+  if (uart) {
+    web::stop();
+    raw_rxbuf = rawUartBegin(baud, 16384);  // 16 KB: 33 ms at 5 Mbaud (less when the heap is short)
+    if (!raw_rxbuf) {
+      usbOut.println("RAW error: no memory for the UART buffer");
+      raw_mode = 2;
+      raw_t0 = millis();
+      rawStop();
+      return;
+    }
+    if (m[0] == 'l') uart_set_loop_back(UART_NUM_1, true);
+  }
+  raw_mode = usb ? 1 : m[0] == 'p' ? 2 : 3;
+  raw_t0 = millis();
+  raw_end_ms = raw_t0 + sec * 1000;
+}
+void rawService(){
+  if ((int32_t)(millis() - raw_end_ms) >= 0) { rawStop(); return; }
+  static uint8_t b[512];
+  // Any USB input stops the stream early (the RAW end line then says stop=usb). An Rx STM32 stream gets one byte (it
+  // ends its stream on any byte) and ends as at its time: at the end packet, or after 500 ms with no byte. The other
+  // raw modes stop at once. No text goes out before the end lines: it would mix with the stream bytes.
+  if (Serial.available()) {
+    while (Serial.available()) Serial.read();
+    raw_usb_stop = true;
+    if (!raw_stm) { rawStop(); return; }
+    if (raw_stm_state >= 1 && !raw_stop_sent) {
+      const uint8_t z = 0;
+      Serial1.write(&z, 1);
+      raw_stop_sent = true;
+      raw_end_ms = millis() + 2000;  // the end packet or 500 ms of silence comes first
+    }
+  }
+  if (raw_mode == 1) {  // the USB transmit buffer holds less than a block: each block goes out in pieces
+    static size_t off = 0;
+    for (int i = 0; i < 256; i++) {
+      if (off == 0) {
+        memcpy(b, "RAWU", 4);
+        memcpy(b + 4, &raw_seq, 4);
+        for (int k = 8; k < (int)sizeof(b); k++) b[k] = (uint8_t)(raw_seq + k);
+      }
+      const int room = Serial.availableForWrite();
+      if (room <= 0) break;
+      const size_t n = (size_t)room < sizeof(b) - off ? (size_t)room : sizeof(b) - off;
+      const size_t w = Serial.write(b + off, n);
+      raw_out += w;
+      off += w;
+      if (off >= sizeof(b)) { off = 0; raw_seq++; }
+      if (w < n) break;
+    }
+    return;
+  }
+  if (raw_mode == 3) {  // loopback: keep the transmitter busy with the counter pattern
+    int room = Serial1.availableForWrite();
+    if (room > (int)sizeof(b)) room = sizeof(b);
+    for (int k = 0; k < room; k++) b[k] = raw_tx++;
+    if (room > 0) Serial1.write(b, room);
+  }
+  int avail = Serial1.available();
+  while (avail > 0) {
+    const size_t k = Serial1.read(b, avail < (int)sizeof(b) ? (size_t)avail : sizeof(b));
+    if (k == 0) break;
+    raw_in += k;
+    avail -= (int)k;
+    if (raw_mode == 3) {
+      for (size_t i = 0; i < k; i++) {
+        if (raw_first) { raw_expect = b[i]; raw_first = false; }
+        if (b[i] != raw_expect) { raw_err++; raw_expect = b[i]; }
+        raw_expect++;
+      }
+      continue;
+    }
+    raw_last_rx_ms = millis();
+    size_t from = 0, to = k;
+    if (raw_stm) {  // framing: drop bytes before the first sync; stop after the end packet
+      size_t i = 0;
+      for (; i < k; i++) {
+        const uint8_t c = b[i];
+        if (raw_stm_state == 1) {  // before the first sync
+          if (raw_prev == 0xA5 && c == 0x5A) {  // the first sync: the packet starts at its A5
+            raw_stm_state = 2; raw_pkt_pos = 2; raw_pkts = 1; raw_first_ms = millis();
+            if (i == 0) { const uint8_t a5 = 0xA5; raw_out += Serial.write(&a5, 1); from = 0; }  // its A5 came in the last read
+            else from = i - 1;
+          }
+          else raw_presync++;
+          raw_prev = c;
+          continue;
+        }
+        raw_pkt_pos++;
+        if (raw_pkt_pos == 2 && raw_prev == 0xA5) {  // the second byte of a packet
+          if (c == 0x5A) raw_pkts++;
+          else if (c == 0x5B) raw_end_pkt = true;
+        }
+        if (raw_pkt_pos == 1 && c != 0xA5) { raw_resync++; raw_pkt_pos = 0; }  // a lost boundary: wait for A5
+        raw_prev = c;
+        const uint32_t len = raw_end_pkt ? 14 : raw_pkt_len;
+        if (raw_pkt_pos >= len) {
+          raw_pkt_pos = 0;
+          if (raw_end_pkt) { to = i + 1; break; }
+        }
+      }
+      if (raw_stm_state == 1) { continue; }  // nothing to pass yet
+    }
+    const size_t n = to - from;
+    const int room = Serial.availableForWrite();
+    const size_t w = room <= 0 ? 0 : Serial.write(b + from, (size_t)room < n ? (size_t)room : n);
+    raw_out += w;
+    raw_drop += n - w;
+    if (raw_stm && raw_end_pkt) { rawStop(); return; }
+  }
+  // An Rx STM32 stream with no byte for 500 ms after its start: over (interface step 5)
+  if (raw_stm && raw_stm_state >= 1 && millis() - raw_last_rx_ms > 500) rawStop();
+}
+
 void stmRawService(){
   uint8_t b[64];
   int n = 0;
@@ -1690,6 +2442,7 @@ void stmRawCommand(const char* arg){
     }
     const uint8_t idx = (uint8_t)strtol(e, nullptr, 0);
     if (cid == 13 && w && raw <= 3) stm_v2_lanes = (uint8_t)raw;
+    if (cid == 3 && w) stm_v2_save_ok = true;  // a bench save goes out (a user action), as after a centre calibration
     stm_ans_print_until = millis() + 2000;
     if (dup) {
       if (stm_link_ver != 2) { usbOut.println("STM dup: v2 link only"); return; }
@@ -1755,6 +2508,24 @@ void stmRawCommand(const char* arg){
     stmLink.pushInt(STM_RUN_CMD | 0x80000000, v);
     stm_ans_print_until = millis() + 2000;
     usbOut.printf("STM run %d%c", v, 10);
+  } else if (!strcmp(arg, "ext")) {
+    // bench: frame version 3 extension items (Rx STM32 2.0.81+): the last value and age of each item id and index
+    usbOut.printf("STM ext proto=%u frame=%d B items=%lu bad=%lu%c", (unsigned)stmDec.proto, stm_v2_len,
+                  (unsigned long)stmDec.ext_items, (unsigned long)stmDec.ext_bad, 10);
+    const uint16_t now10 = (uint16_t)(millis() / 10u);
+    for (unsigned id = 0; id < WFRX_EXT_IDS; id++)
+      for (unsigned sl = 0; sl < 16; sl++) {
+        if (!stmDec.ext_t10[id][sl]) continue;
+        usbOut.printf("STM ext id=%u sensor=%u index=%u value=%d age_ms=%u%c", id + 1, sl >> 3, sl & 7u, (int)stmDec.ext_val[id][sl],  // sensor = index bit 4
+                      (unsigned)((uint16_t)(now10 - stmDec.ext_t10[id][sl]) * 10u), 10);
+      }
+  } else if (!strcmp(arg, "polar")) {
+    // bench: the polarity detector stream (Rx STM32 2.0.67+, CID 52 on) and its record (body 0x37)
+    const uint8_t* b = stmDec.polar;
+    usbOut.printf("STM polar on=%d frames=%lu samples=%lu sent=%lu dropped=%lu lost_flags=%lu last: n=%u det=%u lost=%u gaps=%u out=%u in=%u%c",
+                  (int)stmDec.polar_on, (unsigned long)polar_frames, (unsigned long)polar_samples, (unsigned long)polar_sent,
+                  (unsigned long)polar_dropped, (unsigned long)polar_lost_flags, b[0], b[1] & 7u, (b[1] >> 7) & 1u,
+                  (unsigned)(b[2] | b[3] << 8), (unsigned)(b[4] | b[5] << 8), (unsigned)(b[6] | b[7] << 8), 10);
   } else if (!strcmp(arg, "bins")) {
     // bench: the coil magnitudes (or x/y in um for a bin in xy mode) of all 8 bins, both lanes, last frame
     for (unsigned k = 0; k < WFRX_RESULTS; k++) {
@@ -1785,6 +2556,8 @@ void stmRawCommand(const char* arg){
   } else if (!strcmp(arg, "iaphold")) {
     if (stm_link_ver == 2 && stm_cal_phase == CAL_IDLE) { stm_cal_then_hold = true; stmCalStart(CAL_READ); }  // copy first
     else { if (stm_cal_valid) stmCalSetPending(true); stmIapHoldSet(); }
+  } else if (!strncmp(arg, "raw ", 4)) {
+    stmRawStreamCommand(arg + 4);
   } else if (!strncmp(arg, "restart", 7)) {
     stmRestartCommand(arg + 7);
   } else if (!strcmp(arg, "cal")) {
@@ -1798,13 +2571,15 @@ void stmRawCommand(const char* arg){
     else if (!stm_cal_valid) usbOut.println("STM cal: no stored copy");
     else stmCalStart(CAL_WRITE);
   } else {
-    usbOut.println("STM usage: stm rom | stm peek | stm tx <hex> | stm off | stm iaphold | stm restart clear|add <hex>|go | stm cmd <cid> <value> [index] | stm read <cid> [index] | stm dup <cid> <value> [index] | stm pos | stm v2");
+    usbOut.println("STM usage: stm rom | stm peek | stm tx <hex> | stm off | stm iaphold | stm restart clear|add <hex>|go | stm url <url> <size> <sha256> | stm status | stm cmd <cid> <value> [index] | stm read <cid> [index] | stm dup <cid> <value> [index] | stm pos | stm v2");
   }
 }
 
+uint32_t usb_rx_ms = 0;  // 0.5.104: the last USB input byte (EV_USB "no input")
 void benchSerial(){
   static char line[1200];  // "ota w <offset> <hex of up to 512 bytes>" fits
   static uint16_t n = 0;
+  if (Serial.available()) usb_rx_ms = millis();
   while (Serial.available()) {
     const char c = (char)Serial.read();
     if (c != '\n' && c != '\r') {
@@ -1814,6 +2589,15 @@ void benchSerial(){
     if (n == 0) continue;
     line[n] = 0;
     n = 0;
+    // 0.6.14: no USB reconnect in the vehicle role. A host that holds the port open and reads nothing fills the
+    // output; a reconnect under the open port could make the host fail to enumerate the board again and remove its
+    // power (both chips reset). The vehicle role needs no USB: undrained output is dropped and counted
+    // (usb_guard stalls).
+    if (stmUrlBusy() && !updateAllowed(line)) { usbOut.printf("STM refused: an Rx STM32 update runs (%s)\n", line); continue; }
+    {
+      String l;
+      if (updateCommand(line, false, l)) continue;  // stm url, stm status, get rx_stm32_version; ota url refused during stm url
+    }
     unsigned long hz = 0, size = 0, count = 0;
     unsigned tm[6];
     const int thru_args = sscanf(line, "thru %lu %lu %lu %x:%x:%x:%x:%x:%x", &hz, &size, &count,
@@ -1839,16 +2623,28 @@ void benchSerial(){
     } else if (!strcmp(line, "thru stop")) {
       espnow_thru_active = false;
       usbOut.printf("BENCH thru stopped sent=%lu\n", (unsigned long)espnow_thru_seq);
+    } else if (!strcmp(line, "tasks")) {  // bench: the FreeRTOS tasks by name (the framework has no task list): priority, least free stack
+      static const char* const names[] = {"loopTask", "usbd", "wifi", "tiT", "esp_timer", "sys_evt", "arduino_events",
+                                          "mdns", "Tmr Svc", "IDLE"};
+      usbOut.printf("TASKS count=%u (named below: %u)\n", (unsigned)uxTaskGetNumberOfTasks(), (unsigned)(sizeof(names) / sizeof(names[0])));
+      for (const char* nm : names) {
+        TaskHandle_t h = xTaskGetHandle(nm);
+        if (!h) { usbOut.printf("TASK %s none\n", nm); continue; }
+        usbOut.printf("TASK %s prio=%u stack_free_min=%u B\n", nm, (unsigned)uxTaskPriorityGet(h), (unsigned)uxTaskGetStackHighWaterMark(h));
+      }
+    } else if (!strcmp(line, "nvs")) {  // bench: NVS entry counts; a write adds used entries (the proof of no repeating writes)
+      nvs_stats_t ns;
+      if (nvs_get_stats(NULL, &ns) == ESP_OK)
+        usbOut.printf("NVS used=%u free=%u total=%u namespaces=%u\n", (unsigned)ns.used_entries, (unsigned)ns.free_entries,
+                      (unsigned)ns.total_entries, (unsigned)ns.namespace_count);
+      else usbOut.println("NVS stats failed");
+    } else if (!strcmp(line, "moving on") || !strcmp(line, "moving off")) {  // bench: the stationary rule with no ODrive
+      extern bool bench_moving;
+      bench_moving = !strcmp(line, "moving on");
+      usbOut.printf("BENCH moving %s: the vehicle counts as %s\n", bench_moving ? "on" : "off", bench_moving ? "moving" : "it is");
     } else if (!strcmp(line, "timing on") || !strcmp(line, "timing off")) {
       bench_timing_print = !strcmp(line, "timing on");
       usbOut.printf("BENCH timing %s\n", bench_timing_print ? "on" : "off");
-    } else if (!strcmp(line, "armed sim on") || !strcmp(line, "armed sim off")) {
-      // bench: the flash erase rule sees armed motors (a simulated run on a board with no ODrive)
-      bench_sim_armed = !strcmp(line, "armed sim on");
-      usbOut.printf("BENCH armed sim %s: flash erase %s\n", bench_sim_armed ? "on" : "off", bench_sim_armed ? "held" : "per the rule");
-    } else if (!strcmp(line, "erase off") || !strcmp(line, "erase on")) {
-      bench_erase_block = !strcmp(line, "erase off");
-      usbOut.printf("BENCH flash ring erase %s\n", bench_erase_block ? "blocked" : "allowed");
     } else if (!strncmp(line, "ota ", 4)) {
       update_last_ms = millis();
       usb_ota::command(line + 4);
@@ -1859,7 +2655,7 @@ void benchSerial(){
     } else if (!strncmp(line, "send ", 5)) {
       benchSend(line + 5);
     } else if ((!strcmp(line, "restart") || !strcmp(line, "dld")) && !vehicleStationary()) {
-      usbOut.printf("%s refused: the vehicle moves\n", line);  // never a restart while the vehicle moves
+      usbOut.printf("%s refused: Stop the vehicle first\n", line);  // never a restart while the vehicle moves
       telemetryEvent(rec::EV_RESTART_REFUSED, strcmp(line, "dld") ? 1 : 2, 0, "USB restart refused: the vehicle moves");
     } else if (!strcmp(line, "restart")) {
       usbOut.println("BENCH restart");  // software reset: the telemetry rings survive it
@@ -1880,15 +2676,32 @@ void benchSerial(){
     } else if (!strcmp(line, "dld")) {
       usbOut.println("BENCH restart into ROM download mode");  // for esptool, with no 1200 bps touch
       restartIntoRom();
+    } else if (!strcmp(line, "stack")) {  // bench: the least free loop() stack since the start (FreeRTOS high-water mark)
+      usbOut.printf("STACK loop_free_min=%u of %u B\n", (unsigned)uxTaskGetStackHighWaterMark(nullptr),
+                    (unsigned)CONFIG_ARDUINO_LOOP_STACK_SIZE);
+    } else if (!strcmp(line, "rtcwdt test")) {  // bench: stop the RTC watchdog feed; the system resets in 8 s
+      if (!vehicleStationary()) usbOut.println("rtcwdt test refused: the vehicle moves");
+      else { rtc_wdt_test = true; usbOut.println("BENCH rtcwdt test: no feed from now; reset in 8 s"); }
     } else if (!strcmp(line, "crash")) {  // bench: a forced panic, to check the record after a crash
       if (!vehicleStationary()) usbOut.println("crash refused: the vehicle moves");
       else { usbOut.println("BENCH crash: abort() now"); usbOut.drain(200); abort(); }
     } else if (!strncmp(line, "stm ", 4)) {
       stmRawCommand(line + 4);
+    } else if (!strncmp(line, "uart", 4) && (line[4] == 0 || line[4] == ' ')) {  // bench: the Rx UART frame
+      uartCommand(line[4] ? line + 5 : "");
+    } else if (!strcmp(line, "btn0 down") || !strcmp(line, "btn0 up")) {  // bench: the 0 button pressed or released
+      btn0_sim = !strcmp(line, "btn0 down");
+      usbOut.printf("BTN0 sim=%d ms=%lu\n", (int)btn0_sim, (unsigned long)millis());
+    } else if (!strcmp(line, "btn0 window")) {  // bench: restart with the erase window open, as at power-on
+      btn_window_once = BTN_WINDOW_MAGIC;
+      usbOut.println("BTN0 window: restart; the erase window opens for 3 s");
+      usbOut.drain(200);
+      restartApp();
     } else if (!strcmp(line, "boot")) {
       usbOut.printf("BOOT rover-firmware %s reset=%d setup_ms=%lu first_packet_ms=%lu espnow_start_ms=%lu espnow=%d mac=%s board=%s\n",
         ROVER_FW_VERSION, (int)esp_reset_reason(), (unsigned long)boot_setup_ms, (unsigned long)boot_first_packet_ms,
         (unsigned long)boot_espnow_ms, (int)espnow_started, WiFi.macAddress().c_str(), RX_BOARD);
+      if (panic_line[0]) usbOut.printf("%s\n", panic_line);  // the panic before this boot (src/panic_record.cpp)
     } else if (!strcmp(line, "verbose on") || !strcmp(line, "verbose off")) {
       usb_verbose = line[9] == 'n';  // this boot only
       usbOut.printf("verbose=%d%c", (int)usb_verbose, 10);
@@ -1928,11 +2741,24 @@ void benchSerial(){
       static uint32_t rt_f0 = 0;
       const int64_t now = esp_timer_get_time();
       const uint32_t frames = stmDec.st.frames;
-      const uint32_t per = (rt_t0 && frames > rt_f0) ? (uint32_t)((now - rt_t0) / (frames - rt_f0)) : 10000;
+      // the mean period since the last "rt"; on the first "rt" after boot the period in effect (0.6.0 printed 10000 there)
+      const double eff = g_dsp_eff[DSP_EFF_PERIOD];
+      const uint32_t per = (rt_t0 && frames > rt_f0) ? (uint32_t)((now - rt_t0) / (frames - rt_f0))
+                                                     : (isfinite(eff) && eff > 0 ? (uint32_t)eff : 10000u);
       rt_t0 = now; rt_f0 = frames;
       static char b[1100];
       rtprof::report(b, sizeof(b), SEC_NAMES, SEC_N, per);
-      usbOut.printf("%s%c", b, 10);
+      static uint32_t rt_sent0 = 0, rt_writes0 = 0, rt_retries0 = 0;
+      const stmset::Counters& lc = stmLink.counters();
+      usbOut.printf("%s | waits=%lu catchup=%lu usb_stalls=%lu usb_reconnects=%lu stm_cmds=%lu stm_writes=%lu stm_retries=%lu%c", b,
+                    (unsigned long)loop_waits, (unsigned long)stm_catchup_frames,
+                    (unsigned long)usb_guard::stalls(), (unsigned long)usb_guard::restarts(), (unsigned long)(lc.sent - rt_sent0),
+                    (unsigned long)(lc.writes - rt_writes0), (unsigned long)(lc.retries - rt_retries0), 10);
+      rt_sent0 = lc.sent; rt_writes0 = lc.writes; rt_retries0 = lc.retries;
+      stm_catchup_frames = 0;
+      loop_waits = 0;
+    } else if (!strncmp(line, "raw ", 4)) {
+      rawCommand(line + 4);
     } else if (!strncmp(line, "usbload ", 8)) {
       unsigned long bps = 0, sec = 0;
       if (sscanf(line + 8, "%lu %lu", &bps, &sec) == 2 && bps <= 200000 && sec <= 7200) {
@@ -1950,10 +2776,11 @@ void benchSerial(){
       for (int i = 0; i < 11; i++) { usbOut.printf("%lu%c", (unsigned long)radio_tx_hist[i], i < 10 ? ',' : 10); radio_tx_hist[i] = 0; }
     } else if (!strcmp(line, "rt bench")) {
       const double mhz = ESP.getCpuFreqMHz();
-      usbOut.printf("RTBENCH live n=%lu read mean=%.1f max=%.1f us decode mean=%.1f max=%.1f us\n", (unsigned long)rt_bench_n,
-                    rt_bench_n ? rt_read_cyc / mhz / rt_bench_n : 0.0, rt_read_max / mhz,
-                    rt_bench_n ? rt_dec_cyc / mhz / rt_bench_n : 0.0, rt_dec_max / mhz);
-      rt_read_cyc = rt_dec_cyc = 0; rt_read_max = rt_dec_max = 0; rt_bench_n = 0;
+      usbOut.printf("RTBENCH live n=%lu read mean=%.1f max=%.1f us decode mean=%.1f max=%.1f us (answer mean=%.1f, after mean=%.1f)\n",
+                    (unsigned long)rt_bench_n, rt_bench_n ? rt_read_cyc / mhz / rt_bench_n : 0.0, rt_read_max / mhz,
+                    rt_bench_n ? rt_dec_cyc / mhz / rt_bench_n : 0.0, rt_dec_max / mhz,
+                    rt_bench_n ? rt_ans_cyc / mhz / rt_bench_n : 0.0, rt_bench_n ? rt_post_cyc / mhz / rt_bench_n : 0.0);
+      rt_read_cyc = rt_dec_cyc = rt_ans_cyc = rt_post_cyc = 0; rt_read_max = rt_dec_max = 0; rt_bench_n = 0;
       if (rt_last_ok) {
         static stmv2::Decoder d2;
         d2 = stmDec;  // same calibration and lanes; its counters do not touch the live decoder
@@ -2012,6 +2839,9 @@ void benchSerial(){
       usbOut.printf("STMLINK ver=%u frames=%lu crc_err=%lu ver_err=%lu seq_lost=%lu refused=%lu stm_resets=%lu\n",
         (unsigned)stm_link_ver, (unsigned long)stmDec.st.frames, (unsigned long)stmDec.st.crc_err,
         (unsigned long)stmDec.st.ver_err, (unsigned long)stmDec.st.seq_lost, (unsigned long)c.refused, (unsigned long)c.stm_resets);
+    } else if (!strcmp(line, "wifi") || !strncmp(line, "wifi ", 5)) {
+      wifiUsbCommand(line);  // never echoes the line: it can hold the password
+      memset(line, 0, sizeof(line));  // and the line buffer keeps no copy of it
     } else if (!strcmp(line, "list")) {
       String kv;
       int n_keys = 0;
@@ -2020,11 +2850,97 @@ void benchSerial(){
         usbOut.printf("CFG 0 %s\n", kv.c_str());
       }
       usbOut.printf("CFG 0 end %d def %d\n", n_keys, SETTINGS_DEF_VERSION);  // key count; settings_def.json version
+    } else if (!strcmp(line, "list saved")) {
+      // 0.6.15: each setting with the value it takes at the next start (stored, else the default)
+      msc_fat_saved_config(&g_saved_config);
+      String kv;
+      int n_keys = 0;
+      for (; msc_fat_key_pair_at(&g_deviceConfig, &g_saved_config, n_keys, &kv); n_keys++) {
+        if (usbOut.room() < 200) usbOut.drain(100);
+        usbOut.printf("CFG 0 %s\n", kv.c_str());
+      }
+      usbOut.printf("CFG 0 end %d def %d\n", n_keys, SETTINGS_DEF_VERSION);
+    } else if (!strcmp(line, "pwm") || !strncmp(line, "pwm ", 4)) {
+      // 0.5.104, bench pulse check (PWM OUT1 wired to PWM IN1): "pwm <us>" holds OUT1 at <us> (900-2100) while not
+      // driving and clears the IN1 counts; "pwm read" prints the IN1 pulses since the last clear and clears them;
+      // "pwm off" ends the hold. OUT1 is LEDC channel 1 (50 Hz, 14 bit: 1.22 us steps); IN1 is RMT channel 0 (0.1 us).
+      const char* a = line + 3;
+      while (*a == ' ') a++;
+      pwm_stats_t st;
+      if (!strcmp(a, "off")) {
+        pwm_test_us = 0;
+        usbOut.println("PWM off");
+      } else if (!strcmp(a, "read") || !*a) {
+        pwm_read_rmt_stats(0, &st, true);
+        if (st.n) usbOut.printf("PWM out1=%lu in1 n=%lu width mean=%.1f min=%.1f max=%.1f us period mean=%.1f min=%lu max=%lu us\n",
+                                (unsigned long)pwm_test_us, (unsigned long)st.n, st.w_sum / 10.0 / st.n, st.w_min / 10.0, st.w_max / 10.0,
+                                st.n > 1 ? (double)st.p_sum / (st.n - 1) : 0.0, (unsigned long)st.p_min, (unsigned long)st.p_max);
+        else usbOut.printf("PWM out1=%lu in1 n=0 (no pulse from 900 to 2100 us; last width %ld us)\n", (unsigned long)pwm_test_us,
+                           (long)pwm_read_rmt_dur(0));
+        // With no pulse counted only (the pin tests disturb OUT1, 2026-10-15 servo map check): the IN1 pin level itself,
+        // sampled every 10 us for 45 ms (two 50 Hz periods): edges and the high share tell a wire or output fault (no
+        // edges) from a capture fault (edges, but no count)
+        if (!st.n) {
+        // OUT1's own pad too: only its input path is switched on (gpio_set_direction would route the pad back to the GPIO
+        // output register and cut LEDC). Edges there and none on IN1 point at the board path or the wire.
+        PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[PWM_OUT_1]);
+        uint32_t hi = 0, edges = 0, n_s = 0, hi_o = 0, edges_o = 0;
+        int prev = gpio_get_level(PWM_IN_1), prev_o = gpio_get_level(PWM_OUT_1);
+        const uint32_t t_s = micros();
+        while (micros() - t_s < 45000) {
+          const int v = gpio_get_level(PWM_IN_1), vo = gpio_get_level(PWM_OUT_1);
+          hi += v; edges += v != prev; prev = v;
+          hi_o += vo; edges_o += vo != prev_o; prev_o = vo;
+          n_s++;
+          delayMicroseconds(10);
+        }
+        usbOut.printf("PWM pins: samples=%lu in1 high=%.1f%% edges=%lu | out1 high=%.1f%% edges=%lu\n", (unsigned long)n_s,
+                      100.0 * hi / n_s, (unsigned long)edges, 100.0 * hi_o / n_s, (unsigned long)edges_o);
+        // OUT1 as a plain pin for 2 x 5 ms (not while driving; this pass only): high, then low, each read back on OUT1
+        // and IN1. A pad that does not follow points at the pin itself (another driver on the line, or the pin mux).
+        if (drive_mode_status != 2) {
+          ledcDetachPin(PWM_OUT_1);
+          gpio_set_direction(PWM_OUT_1, GPIO_MODE_INPUT_OUTPUT);
+          gpio_set_level(PWM_OUT_1, 1);
+          delayMicroseconds(5000);
+          const int oh = gpio_get_level(PWM_OUT_1), ih = gpio_get_level(PWM_IN_1);
+          gpio_set_level(PWM_OUT_1, 0);
+          delayMicroseconds(5000);
+          const int ol = gpio_get_level(PWM_OUT_1), il = gpio_get_level(PWM_IN_1);
+          ledcAttachPin(PWM_OUT_1, 1);  // the loop writes OUT1's width again on its next pass
+          if (pwm_test_us) writePwmMicros(1, pwm_test_us);
+          usbOut.printf("PWM out1 as a plain pin: set 1 -> out1=%d in1=%d | set 0 -> out1=%d in1=%d\n", oh, ih, ol, il);
+        }
+        pwm_read_rmt_stats(0, &st, true);  // the pulses the tests cut are not counted
+        }
+      } else {
+        const long us = atol(a);
+        if (us < 900 || us > 2100) usbOut.println("PWM usage: pwm <us 900-2100> | pwm read | pwm off");
+        else if (drive_mode_status == 2 || !vehicleStationary()) usbOut.println("PWM refused: Stop the vehicle first");
+        else {
+          pwm_test_us = (uint32_t)us;
+          writePwmMicros(1, pwm_test_us);
+          pwm_read_rmt_stats(0, &st, true);
+          usbOut.printf("PWM out1=%ld\n", us);
+        }
+      }
+#ifdef SETTINGS_SELFTEST
+    } else if (!strcmp(line, "cfgselftest")) {  // self-check build: the old settings code against the table code
+      if (drive_mode_status == 2 || !vehicleStationary()) usbOut.println("CFGTEST refused: Stop the vehicle first");
+      else msc_fat_selftest([](const char* s) {
+        if (usbOut.room() < 300) usbOut.drain(100);
+        usbOut.printf("CFGTEST %s\n", s);
+      });
+#endif
     } else if (!strncmp(line, "get ", 4) || !strncmp(line, "set ", 4) || !strcmp(line, "save")
-               || !strcmp(line, "run start") || !strcmp(line, "run stop")) {
+               || !strcmp(line, "config erase") || !strcmp(line, "config erase wifi")
+               || !strcmp(line, "run start") || !strcmp(line, "run stop")
+               || !strncmp(line, "sweep ", 6) || !strncmp(line, "bin ", 4)  // 0.5.103: sweep and bin on USB too
+               || !strcmp(line, "tlm")) {
       String reply;  // the same config commands as ESP-NOW CMD 0x10, for a board with ESP-NOW off
       const uint8_t r = configCommand(line, false, reply);
-      usbOut.printf("CFG %u %s\n", (unsigned)r, reply.c_str());
+      if (period_ack_want) periodAckDefer(true, nullptr, 0);  // 0.5.104: "CFG 0 ..." after the Rx STM32 answer
+      else usbOut.printf("CFG %u %s\n", (unsigned)r, reply.c_str());
     } else {
       usbOut.printf("BENCH unknown command: %s\n", line);
     }
@@ -2141,6 +3057,7 @@ void stm32_boot_handshake() {
 // Drain the STM32 UART input: only the bytes there now, read in blocks. A byte-by-byte drain
 // ("while available: read") never ends when frames arrive faster than one read() per byte (bench:
 // 2.3 ms frames, a byte each 18 us): loop() hung and the task watchdog reset the board.
+
 size_t serial1Drain(){
   uint8_t tmp[128];
   size_t total = 0;
@@ -2241,12 +3158,67 @@ bool stm_rs_sent = false, stm_rs_got = false;
 uint8_t stm_rs_status = 0;
 uint32_t stm_rs_value = 0, stm_rs_ms = 0, stm_rs_t0 = 0;
 
+void stmUrlOn41Fail(const char* why, long a, long b);
+bool stmUrlOn41Pass();
 void stmRestartFail(const char* why, long a, long b){
   usbOut.printf("STM restart failed: %s (%ld, %ld) after %lu ms\n", why, a, b, (unsigned long)(millis() - stm_rs_t0));
   telemetryEvent(rec::EV_STM32, 0, STM_RS_CID, "Rx STM32 restart command failed");
   stm_rs_phase = RS_IDLE;
   stm_rs_sent = false;
   if (stm_v2_autorun) { stmLink.pushInt(STM_RUN_CMD | 0x80000000, 1); stm_v2_run_ms = millis(); }
+  stmUrlOn41Fail(why, a, b);
+}
+
+extern bool uart_force_old;
+extern bool rtc_wdt_test;
+void stmRestartEnter();
+// 0.6.0: command 41 with no readable Rx STM32 frame (a frame format this ESP32 does not read, or an app whose frames
+// fail): the sequence goes one 10 B command per frame edge with no answer awaited, from the 1092 B held in stm_rs_buf.
+// A running app takes 10 B command frames in every version. The boot checker's HELLO afterwards tells whether the
+// check passed. Blocks loop() for about 280 update periods (2.8 s at 10 ms). false: no frame edges (no app runs).
+bool stmRestartBlind(){
+  const bool force_old = uart_force_old;
+  uart_force_old = true;  // the Rx UART frame interrupt sends nothing meanwhile
+  uint8_t seq = (uint8_t)esp_random();
+  bool ok = true;
+  auto send = [&](uint8_t cid8, uint8_t idx, uint32_t v) {
+    if (!ok) return;
+    const uint32_t e0 = stm_edge_us, t0 = millis();
+    while (stm_edge_us == e0) {  // the next frame edge: the window opens
+      if (millis() - t0 > 200) { ok = false; return; }
+      delayMicroseconds(50);
+    }
+    delayMicroseconds(100);
+    uint8_t f[ESP_FRAME_LEN];
+    stmv2::encodeCmd(seq++, cid8, idx, v, f);
+    Serial1.write(f, ESP_FRAME_LEN);
+    serial1Drain();  // the frames this ESP32 cannot read: nothing to keep
+    feedLoopWDT();
+    if (!rtc_wdt_test) rtc_wdt_feed();
+  };
+  send(1 | ESP_CID_WRITE, 0, 0);  // idle mode: command 41 runs only there
+  send(1 | ESP_CID_WRITE, 0, 0);
+  send(STM_RS_CID | ESP_CID_WRITE, 0, 0);  // start
+  for (unsigned i = 0; i < STM_RS_LEN / 4; i++) {
+    const uint8_t* q = stm_rs_buf + 4 * i;
+    send(STM_RS_CID | ESP_CID_WRITE, 1, (uint32_t)q[0] | ((uint32_t)q[1] << 8) | ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24));
+  }
+  send(STM_RS_CID | ESP_CID_WRITE, 2, 0);  // check: on a pass the app restarts into its boot checker
+  uart_force_old = force_old;
+  return ok;
+}
+
+// The command 41 sequence with the 1092 B held: calibration copy first. nullptr: started; else the refusal.
+const char* stmRestartGo(){
+  if (stm_rs_phase != RS_IDLE) return "in progress";
+  if (stm_link_ver != 2) return "no v2 link to the Rx STM32";
+  if (!vehicleStationary()) return "the vehicle moves";
+  if (stm_cal_phase != CAL_IDLE) return "calibration copy busy";
+  stm_rs_t0 = millis();
+  stm_rs_phase = RS_CAL;
+  stm_cal_then_restart = true;
+  stmCalStart(CAL_READ);  // the calibration copy first: an update erases the Rx STM32 settings
+  return nullptr;
 }
 
 void stmRestartCommand(const char* arg){
@@ -2263,19 +3235,21 @@ void stmRestartCommand(const char* arg){
       h += 2;
     }
     usbOut.printf("STM restart held %u B%s\n", (unsigned)stm_rs_n, h[0] ? ", rest refused (full or not hex)" : "");
+  } else if (!strcmp(arg, "force")) {  // 0.6.0: command 41 with no frame link (a silent or wrong-frame app)
+    if (stm_rs_phase != RS_IDLE) { usbOut.println("STM restart refused: in progress"); return; }
+    if (stm_rs_n != STM_RS_LEN) { usbOut.printf("STM restart refused: %u B held, %u needed\n", (unsigned)stm_rs_n, STM_RS_LEN); return; }
+    if (!vehicleStationary()) { usbOut.println("STM restart refused: the vehicle moves"); return; }
+    stm_rs_t0 = millis();
+    usbOut.println("STM restart force: idle mode and command 41, one command per frame edge, no answer awaited");
+    if (!stmRestartBlind()) { usbOut.println("STM restart force failed: no frame edges (no Rx STM32 app runs; a boot checker waits: stm url probes it)"); return; }
+    stmRestartEnter();  // the boot checker's HELLO, then the USB bridge
   } else if (!strcmp(arg, "go")) {
     if (stm_rs_phase != RS_IDLE) { usbOut.println("STM restart refused: in progress"); return; }
     if (stm_rs_n != STM_RS_LEN) { usbOut.printf("STM restart refused: %u B held, %u needed\n", (unsigned)stm_rs_n, STM_RS_LEN); return; }
-    if (stm_link_ver != 2) { usbOut.println("STM restart refused: no v2 link to the Rx STM32"); return; }
-    if (!vehicleStationary()) { usbOut.println("STM restart refused: the vehicle moves"); return; }
-    if (stm_cal_phase != CAL_IDLE) { usbOut.println("STM restart refused: calibration copy busy"); return; }
-    stm_rs_t0 = millis();
-    stm_rs_phase = RS_CAL;
-    stm_cal_then_restart = true;
-    stmCalStart(CAL_READ);  // the calibration copy first: an update erases the Rx STM32 settings
+    if (const char* e = stmRestartGo()) { usbOut.printf("STM restart refused: %s\n", e); return; }
     usbOut.println("STM restart: calibration copy, then idle mode and command 41");
   } else {
-    usbOut.println("STM usage: stm restart clear | stm restart add <hex> | stm restart go");
+    usbOut.println("STM usage: stm restart clear | stm restart add <hex> | stm restart go | stm restart force");
   }
 }
 
@@ -2347,6 +3321,7 @@ void stmRestartService(uint32_t now){
 
 // From loop() after the check passed: the Rx STM32 restarts into its boot checker. Then the USB bridge.
 void stmRestartEnter(){
+  if (stmUrlOn41Pass()) return;  // "stm url": the ESP32 feeds the boot checker itself
   stm_rs_phase = RS_IDLE;
   stm_rs_n = 0;
   if (stm_cal_valid) stmCalSetPending(true);  // the next v2 start writes the copy back (an update erases it)
@@ -2383,6 +3358,542 @@ void stmRestartEnter(){
   stm_bridge_start_ms = millis();
 }
 
+// Update commands from the telemetry app (0.5.114) -------------------------------------------------------------------
+// "ota url", "ota status", "ota abort", "stm url", "stm status" and "get rx_stm32_version" work on USB and over the
+// radio command link (CMD frame, Wi-Fi or ESP-NOW). The radio ACK text is the line that USB prints.
+//
+// "stm url <http://a.b.c.d[:port]/path> <size> <sha256>": an Rx STM32 update from one file on an HTTP server: the 52 B
+// commit header, then the encrypted image (chunk count x 1040 B), as tools/signing/encrypt_image.py writes them.
+//   1 Download into the "tlog" partition (usb_ota::fetch_start, in update mode), SHA-256 of the bytes in flash, and
+//     the header's chunk count against the size.
+//   2 With Rx STM32 frames: the command 41 sequence with the first 1092 B of the file, read from flash ("stm restart").
+//     With no frames and a boot checker that answers HELLO (no app): straight to step 3.
+//   3 The ESP32 feeds the boot checker from flash: boot-status frame (or HELLO), BEGIN_UPDATE, CHUNK 0 to N-1,
+//     FINALIZE, BOOT, one frame at a time, each after the reply to the one before. loop() runs only the feed, USB and the
+//     radio commands (no drive, telemetry or log service): a gap of 50 ms inside a frame counts against the update.
+//     A chunk with no reply goes once more; a reply 0x07 to it then means "arrived, go on". Any other break: 10 single
+//     bytes 60 ms apart (the boot checker leaves an update after 10 cut frames), HELLO, again from chunk 0. 3 tries.
+//   4 BOOT accepted: the Rx STM32 link starts again as after the USB bridge; "done" when its frames come (5 s).
+// Nothing is kept across an ESP32 restart: after a failure the same command starts again from step 1.
+#define SU_HDR_LEN 52
+#define SU_CHUNK_LEN 1040
+#define SU_MAX_CHUNKS 112  // boot checker: image_size 1 to 114688 B, 1024 B a chunk
+#define SU_TRIES 3
+#define SF_GAP_MS 60       // more than the boot checker's 50 ms frame gap
+enum : uint8_t { SU_IDLE, SU_DOWNLOAD, SU_FEED, SU_DONE, SU_FAILED };  // "stm status" state
+// Feed steps. SF_RESTART: the command 41 sequence in the normal loop; SF_START: BOOT accepted, frames awaited.
+enum : uint8_t { SF_RESTART, SF_SETTLE, SF_STATUS, SF_PROBE, SF_ABORT, SF_HELLO, SF_BEGIN, SF_CHUNK, SF_FINAL, SF_BOOT, SF_START };
+const char* const SF_NAMES[] = {"restart", "settle", "status", "probe", "abort", "hello", "begin", "chunks", "finalize",
+                                "boot", "start"};
+uint8_t su_state = SU_IDLE, sf_step = SF_RESTART, sf_try = 1, sf_count = 0;
+bool sf_on = false;      // loop() runs the feed branch
+bool sf_resent = false;  // the chunk in hand went twice
+uint16_t su_chunks = 0, sf_chunk = 0;
+uint32_t su_size = 0, su_got = 0, su_t0 = 0, su_print_ms = 0, sf_ms = 0, sf_timeout = 0, sf_resend_at = 0, sf_step_ms = 0;
+const esp_partition_t* su_part = nullptr;
+uint8_t su_hdr[SU_HDR_LEN];
+uint8_t* sf_frame = nullptr;            // one CHUNK frame, 6 + 1042 B, held for the feed only
+uint8_t sf_rx[32], sf_rx_n = 0;         // the reply frame in hand
+uint8_t sf_pl[16], sf_plen = 0;         // the last complete reply: payload
+uint16_t sf_cid = 0;
+char su_err[112] = "";
+
+bool stmUrlBusy(){ return su_state == SU_DOWNLOAD || su_state == SU_FEED; }
+
+// The Rx STM32 link learns its version again (the app may be new or gone), as at the end of the USB bridge.
+void stmLinkRelearn(){
+  stm_link_ver = 0;
+  stm_v2_cfg_sent = false;
+  stmDec.reset();
+  serial1Drain();
+  data_ready = 0;
+  stm_v2_resync = true;
+  stm_last_packet_ms = millis();  // the silence recovery counts from here
+}
+
+void sfEnd(){
+  free(sf_frame);
+  sf_frame = nullptr;
+  sf_on = false;
+}
+
+void stmUrlFail(const char* fmt, ...){
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(su_err, sizeof(su_err), fmt, ap);
+  va_end(ap);
+  const bool restarted = su_state == SU_FEED && sf_step != SF_RESTART;  // the Rx STM32 left its app
+  su_state = SU_FAILED;
+  sfEnd();
+  if (restarted) stmLinkRelearn();  // a running app comes back; a boot checker gets HELLO/BOOT from the silence recovery
+  usbOut.printf("STM url failed: %s (%lu ms)\n", su_err, (unsigned long)(millis() - su_t0));
+  telemetryEvent(rec::EV_STM32, 0, 44, (String("stm url failed: ") + su_err).c_str());
+}
+
+// One reply frame from the boot checker, read a byte at a time (FINALIZE sends two frames back to back).
+// 1: complete and valid (sf_cid, sf_pl, sf_plen); 0: not yet; -1: bad length or CRC (dropped).
+int sfRead(){
+  while (Serial1.available()) {
+    if (sf_rx_n >= sizeof(sf_rx)) { sf_rx_n = 0; return -1; }
+    sf_rx[sf_rx_n++] = (uint8_t)Serial1.read();
+    if (sf_rx_n < 4) continue;
+    const uint16_t len = sf_rx[0] | (uint16_t)sf_rx[1] << 8;
+    if (len < 6 || len > sizeof(sf_rx) || len - 6 > (int)sizeof(sf_pl)) { sf_rx_n = 0; return -1; }
+    if (sf_rx_n < len) continue;
+    sf_rx_n = 0;
+    if (crc16_ibm(sf_rx, len - 2) != (uint16_t)(sf_rx[len - 2] | sf_rx[len - 1] << 8)) return -1;
+    sf_cid = sf_rx[2] | (uint16_t)sf_rx[3] << 8;
+    sf_plen = (uint8_t)(len - 6);
+    memcpy(sf_pl, sf_rx + 4, sf_plen);
+    return 1;
+  }
+  return 0;
+}
+
+// One frame to the boot checker; its payload is in sf_frame + 4 (n bytes). Old input is dropped first.
+void sfSend(uint16_t cid, uint16_t n, uint32_t timeout_ms){
+  uint8_t* f = sf_frame;
+  f[0] = (uint8_t)(n + 6); f[1] = (uint8_t)((n + 6) >> 8);
+  f[2] = (uint8_t)cid; f[3] = (uint8_t)(cid >> 8);
+  const uint16_t crc = crc16_ibm(f, 4 + n);
+  f[4 + n] = (uint8_t)crc; f[5 + n] = (uint8_t)(crc >> 8);
+  serial1Drain();
+  sf_rx_n = 0;
+  Serial1.write(f, 6 + n);  // the whole frame in one write: no gap inside it
+  sf_ms = millis();
+  sf_timeout = timeout_ms;
+}
+
+void sfStep(uint8_t s){ sf_step = s; sf_ms = sf_step_ms = millis(); sf_count = 0; }
+
+void sfSendChunk(){
+  uint8_t* p = sf_frame + 4;
+  p[0] = (uint8_t)sf_chunk; p[1] = (uint8_t)(sf_chunk >> 8);
+  if (esp_partition_read(su_part, SU_HDR_LEN + (uint32_t)SU_CHUNK_LEN * sf_chunk, p + 2, SU_CHUNK_LEN) != ESP_OK) {
+    stmUrlFail("flash read at chunk %u", (unsigned)sf_chunk);
+    return;
+  }
+  sfSend(0x0003, 2 + SU_CHUNK_LEN, sf_chunk == 0 ? 5000 : 1000);  // chunk 0: the app erase, about 1.3 s
+  sf_resend_at = 0;
+}
+
+void sfChunks(uint16_t from){
+  sf_step = SF_CHUNK;
+  sf_chunk = from;
+  sf_resent = false;
+  sfSendChunk();
+}
+
+void sfBegin(){
+  memcpy(sf_frame + 4, su_hdr, SU_HDR_LEN);
+  sf_step = SF_BEGIN;
+  sfSend(0x0002, SU_HDR_LEN, 2000);
+}
+
+void sfHello(){
+  sf_step = SF_HELLO;
+  sfSend(0x0001, 0, 300);
+}
+
+// A break: again from chunk 0 (10 cut frames first, HELLO after), up to SU_TRIES tries.
+void sfBreak(const char* fmt, ...){
+  char why[80];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(why, sizeof(why), fmt, ap);
+  va_end(ap);
+  if (sf_try >= SU_TRIES) { stmUrlFail("%s (try %u of %u)", why, (unsigned)sf_try, SU_TRIES); return; }
+  usbOut.printf("STM feed break: %s (try %u of %u); again from chunk 0\n", why, (unsigned)sf_try, SU_TRIES);
+  sf_try++;
+  sf_chunk = 0;
+  sfStep(SF_ABORT);
+}
+
+void sfService(){
+  const uint32_t now = millis();
+  const int r = (sf_step >= SF_STATUS && sf_step != SF_ABORT && sf_step != SF_PROBE) ? sfRead() : 0;
+  const bool late = now - sf_ms >= sf_timeout;
+  switch (sf_step) {
+    case SF_SETTLE:  // after the command 41 pass: the app's last bytes go, the boot checker starts
+      if (now - sf_ms < SF_GAP_MS) return;
+      serial1Drain();
+      sf_rx_n = 0;
+      sfStep(SF_STATUS);
+      sf_timeout = 1000;
+      return;
+    case SF_STATUS:  // the boot checker's start frame (CID 1, 7 B); else HELLO
+      if (r == 1 && sf_cid == 0x0001 && sf_plen == 7) { sfBegin(); return; }
+      if (late) sfHello();
+      return;
+    case SF_PROBE:  // no Rx STM32 frames: a boot checker is silent, a running app is not
+      if (now - sf_ms < SF_GAP_MS) return;
+      if (Serial1.available()) { stmUrlFail("the Rx STM32 sends, but not on the v2 link: no update"); return; }
+      sf_count = 0;
+      sfHello();
+      return;
+    case SF_ABORT:  // one byte, then more than 50 ms of silence: a cut frame; 10 of them end an update in progress
+      if (now - sf_ms < SF_GAP_MS) return;
+      if (sf_count < 10) { const uint8_t b = 0; Serial1.write(&b, 1); sf_count++; sf_ms = now; return; }
+      serial1Drain();
+      sf_count = 0;
+      sfHello();
+      return;
+    case SF_HELLO:
+      if (r == 1 && sf_cid == 0x0001 && sf_plen == 7) { sfBegin(); return; }  // idle: a new update from the header
+      if (r == 1 && sf_cid == 0x0001 && sf_plen == 4 && sf_pl[0] == 0x09) { sfChunks(0); return; }  // waits for chunk 0
+      if (!late) return;
+      if (++sf_count < 3) { sfHello(); return; }  // sfHello keeps the count
+      sfBreak("no boot checker answer to HELLO");
+      return;
+    case SF_BEGIN:
+      if (r == 1 && sf_cid == 0x0002 && sf_plen == 4) {
+        if (sf_pl[0] == 0) sfChunks(0);
+        else sfBreak("BEGIN_UPDATE reply 0x%02x", sf_pl[0]);
+        return;
+      }
+      if (late) sfBreak("no BEGIN_UPDATE reply");
+      return;
+    case SF_CHUNK:
+      if (r == 1 && sf_cid == 0x0003 && sf_plen == 4) {
+        const uint16_t idx = sf_pl[0] | (uint16_t)sf_pl[1] << 8;
+        const uint8_t why = sf_pl[2];
+        const bool ok = idx == sf_chunk && (why == 0 || (sf_resent && why == 0x07));
+        // the reply to the last chunk was lost and the boot checker is FINALIZED: a resend gets [09 00 00 00]
+        const bool last_in = sf_resent && sf_chunk == su_chunks - 1 && sf_pl[0] == 0x09 && sf_pl[1] == 0 && why == 0;
+        if (!ok && !last_in) { sfBreak("chunk %u reply index %u reason 0x%02x", (unsigned)sf_chunk, (unsigned)idx, why); return; }
+        if (!last_in && ++sf_chunk < su_chunks) { sf_resent = false; sfSendChunk(); return; }
+        sf_chunk = su_chunks;
+        sf_step = SF_FINAL;
+        sfSend(0x0004, 0, 3000);
+        return;
+      }
+      if (sf_resend_at) {
+        if ((int32_t)(now - sf_resend_at) >= 0) { sfSendChunk(); sf_resent = true; }
+        return;
+      }
+      if (!late) return;
+      if (sf_resent) { sfBreak("no reply to chunk %u", (unsigned)sf_chunk); return; }
+      sf_resend_at = now + SF_GAP_MS;  // silence first: the boot checker drops a cut frame
+      return;
+    case SF_FINAL:  // two frames on success: boot-status (CID 1), then the reply (CID 4)
+      if (r == 1 && sf_cid == 0x0004 && sf_plen == 4) {
+        if (sf_pl[0] != 0) { sfBreak("FINALIZE reply 0x%02x", sf_pl[0]); return; }
+        sf_step = SF_BOOT;
+        sfSend(0x0005, 0, 2000);
+        return;
+      }
+      if (late) { sf_step = SF_BOOT; sfSend(0x0005, 0, 2000); }  // reply lost: BOOT tells whether the image is in
+      return;
+    case SF_BOOT:
+      if (r == 1 && sf_cid == 0x0005 && sf_plen == 4) {
+        if (sf_pl[0] != 0) { sfBreak("BOOT reply 0x%02x", sf_pl[0]); return; }
+        sfEnd();
+        stmLinkRelearn();
+        sfStep(SF_START);
+        usbOut.printf("STM url: BOOT accepted after %u chunks (try %u); waiting for Rx STM32 frames\n", (unsigned)su_chunks,
+                      (unsigned)sf_try);
+        return;
+      }
+      if (late) sfBreak("no BOOT reply");
+      return;
+    default:
+      return;
+  }
+}
+
+// Feed start: after the command 41 pass (SF_SETTLE), or with no Rx STM32 frames (SF_PROBE).
+void sfOpen(uint8_t first){
+  sf_frame = (uint8_t*)malloc(6 + 2 + SU_CHUNK_LEN);
+  if (!sf_frame) { stmUrlFail("no memory for the feed (%u B)", 6 + 2 + SU_CHUNK_LEN); return; }
+  if (stm_cal_valid) stmCalSetPending(true);  // an update erases the Rx STM32 settings: the next v2 start writes the copy
+  serial1Drain();
+  data_ready = 0;
+  sf_chunk = 0;
+  sf_on = true;
+  sfStep(first);
+}
+
+// From stmRestartEnter(): true when the command 41 pass belongs to "stm url" (the ESP32 feeds; no USB bridge).
+bool stmUrlOn41Pass(){
+  if (su_state != SU_FEED || sf_step != SF_RESTART) return false;
+  stm_rs_phase = RS_IDLE;
+  stm_rs_n = 0;
+  usbOut.printf("STM url: command 41 passed in %lu ms; the ESP32 feeds the boot checker\n", (unsigned long)(millis() - sf_step_ms));
+  telemetryEvent(rec::EV_STM32, 1, STM_RS_CID, "stm url: Rx STM32 restart command passed");
+  sfOpen(SF_SETTLE);
+  return true;
+}
+
+// From stmRestartFail().
+void stmUrlOn41Fail(const char* why, long a, long b){
+  if (su_state == SU_FEED && sf_step == SF_RESTART) stmUrlFail("command 41: %s (%ld, %ld)", why, a, b);
+}
+
+// The chunk count for a file size: 52 + 1040 x count, 1 to 112 chunks; 0 for any other size.
+uint16_t stmUrlChunks(unsigned long size){
+  const unsigned long n = size > SU_HDR_LEN ? (size - SU_HDR_LEN) / SU_CHUNK_LEN : 0;
+  return n == 0 || n > SU_MAX_CHUNKS || size != SU_HDR_LEN + SU_CHUNK_LEN * n ? 0 : (uint16_t)n;
+}
+const char SU_SIZE_ERR[] = "size must be 52 + 1040 x chunk count (1 to 112 chunks)";
+
+static uint32_t rd32(const uint8_t* p){ return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
+
+void stmUrlDownloaded(){
+  if (su_chunks == 0) {  // an upload from the update page: the size is known only now
+    su_size = su_got;
+    su_chunks = stmUrlChunks(su_size);
+    if (!su_chunks) { stmUrlFail("%s; the file is %lu B", SU_SIZE_ERR, (unsigned long)su_size); return; }
+  }
+  if (esp_partition_read(su_part, 0, su_hdr, SU_HDR_LEN) != ESP_OK) { stmUrlFail("flash read of the header"); return; }
+  // The boot checker's own first checks (BEGIN_UPDATE), here before command 41: a file that is not an Rx STM32 update
+  // file leaves the Rx STM32 app untouched.
+  if (memcmp(su_hdr, "SIAP", 4) || rd32(su_hdr + 4) != 0x46544352 || (su_hdr[16] | su_hdr[17] << 8) != 1024
+      || rec::crc32(su_hdr, 48) != rd32(su_hdr + 48)) {
+    stmUrlFail("not an Rx STM32 update file (header magic, product or CRC-32)");
+    return;
+  }
+  const uint16_t n = su_hdr[18] | (uint16_t)su_hdr[19] << 8;
+  if (n != su_chunks) { stmUrlFail("header chunk count %u, the size gives %u", (unsigned)n, (unsigned)su_chunks); return; }
+  usbOut.printf("STM url: file in flash, SHA-256 equal (%lu B, %u chunks, %lu ms)\n", (unsigned long)su_size,
+                (unsigned)su_chunks, (unsigned long)(millis() - su_t0));
+  su_state = SU_FEED;
+  sf_chunk = 0;
+  sf_try = 1;
+  if (esp_partition_read(su_part, 0, stm_rs_buf, STM_RS_LEN) != ESP_OK) { stmUrlFail("flash read of the first 1092 B"); return; }
+  stm_rs_n = STM_RS_LEN;
+  if (stm_link_ver != 2) {
+    // 0.6.0: frame edges but no frame this ESP32 reads (an app with another frame format, or failing frames): command
+    // 41 goes with no answer awaited, then the feed as after a normal pass. No edges: a boot checker waits (HELLO).
+    if ((uint32_t)((uint32_t)esp_timer_get_time() - stm_edge_us) < 200000u) {
+      usbOut.println("STM url: Rx STM32 frames not read: command 41 with no answer awaited");
+      sfStep(SF_RESTART);
+      stm_rs_t0 = millis();
+      if (stmRestartBlind()) { stmRestartEnter(); return; }
+    }
+    usbOut.println("STM url: no Rx STM32 frames: HELLO to the boot checker");
+    sfOpen(SF_PROBE);
+    return;
+  }
+  sfStep(SF_RESTART);
+  if (const char* e = stmRestartGo()) { stmUrlFail("command 41 refused: %s", e); return; }
+  usbOut.println("STM url: calibration copy, then idle mode and command 41");
+}
+
+// The refusals before an Rx STM32 download or upload, in this order (size 0: not known yet). nullptr: none.
+const char* stmStartRefusal(unsigned long size){
+  if (stmUrlBusy()) return "an Rx STM32 update runs";
+  if (usb_ota::busy()) return "an ESP32 update runs (ota abort stops it)";
+  if (stm_bridge || raw_mode || stm_raw || stm_rs_phase != RS_IDLE || stm_cal_phase != CAL_IDLE) return "the Rx STM32 link is busy";
+  if (size && !stmUrlChunks(size)) return SU_SIZE_ERR;
+  su_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, (esp_partition_subtype_t)0x40, "tlog");
+  if (!su_part) return "no tlog partition";
+  return nullptr;
+}
+
+// The download or upload runs: "stm url" state from step 1 (chunks 0: not known until the end of an upload).
+void stmDownloadArmed(unsigned long size, uint16_t chunks){
+  su_state = SU_DOWNLOAD;
+  su_size = size;
+  su_chunks = chunks;
+  su_got = 0;
+  su_t0 = su_print_ms = millis();
+  su_err[0] = 0;
+  sf_try = 1;
+  sf_chunk = 0;
+}
+
+void stmUrlCommand(const char* arg, String& out){
+  char url[160], hex[72];
+  unsigned long size = 0;
+  if (sscanf(arg, "%159s %lu %71s", url, &size, hex) != 3) { out = "STM error usage: stm url http://a.b.c.d[:port]/path <size> <sha256>"; return; }
+  if (const char* e = stmStartRefusal(size)) { out = String("STM error ") + e; return; }
+  const uint16_t n = stmUrlChunks(size);
+  char err[96];
+  if (!usb_ota::fetch_start(url, size, hex, su_part, err, sizeof(err))) { out = String("STM error ") + err; return; }
+  stmDownloadArmed(size, n);
+  out = String("STM url started size=") + size + " chunks=" + n;
+}
+
+// For the update page (src/web_update.cpp): the "stm url" result, and its reason.
+int stmUrlOutcome(){ return su_state == SU_DONE ? 1 : su_state == SU_FAILED ? -1 : stmUrlBusy() ? 0 : -2; }
+const char* stmUrlError(){ return su_err; }
+
+// The update page asks to start an upload (src/web_update.cpp); this runs in loop() context. kind 1: ESP32 image, the
+// checks of "ota url"; kind 2: Rx STM32 file, the checks of "stm url". size 0: not known (a form post). The reasons
+// are the command texts. True: the upload runs (update mode on, as for the commands).
+bool webUpdateGrant(uint8_t kind, unsigned long size, const char* sha, char* err, size_t cap){
+  extern uint32_t web_upload_quiet_ms;
+  web_upload_quiet_ms = millis() | 1;  // 0.6.15: telemetry datagrams pause for the upload (wifiTelemetrySend)
+  if (kind == 1) {
+    if (stmUrlBusy()) { snprintf(err, cap, "an Rx STM32 update runs"); return false; }
+    if (!usb_ota::push_begin(nullptr, size, sha, err, cap)) return false;
+    usbOut.printf("OTA upload started from the update page (size=%lu)\n", size);
+    return true;
+  }
+  if (const char* e = stmStartRefusal(size)) { snprintf(err, cap, "%s", e); return false; }
+  if (!usb_ota::push_begin(su_part, size, sha, err, cap)) return false;
+  stmDownloadArmed(size, stmUrlChunks(size));
+  usbOut.printf("STM upload started from the update page (size=%lu)\n", size);
+  return true;
+}
+
+// After a failed ESP32 upload from the update page: update mode ends at once (after "ota url" it holds 120 s).
+void webUpdateModeEnd(){
+  if (!update_mode || usb_ota::busy() || stmUrlBusy()) return;
+  update_mode = false;
+  enableLoopWDT();
+  usbOut.println("UPDATE mode off: the upload from the update page ended; loop watchdog on");
+}
+
+void stmStatusLine(String& out){
+  char t[200];
+  if (su_state == SU_DOWNLOAD)
+    snprintf(t, sizeof(t), "STM status state=download got=%lu size=%lu", (unsigned long)su_got, (unsigned long)su_size);
+  else if (su_state == SU_FEED)
+    snprintf(t, sizeof(t), "STM status state=feed chunk %u of %u step=%s try=%u", (unsigned)sf_chunk, (unsigned)su_chunks,
+             SF_NAMES[sf_step], (unsigned)sf_try);
+  else if (su_state == SU_DONE)
+    snprintf(t, sizeof(t), "STM status state=done chunks=%u tries=%u", (unsigned)su_chunks, (unsigned)sf_try);
+  else if (su_state == SU_FAILED)
+    snprintf(t, sizeof(t), "STM status state=failed error=\"%s\"", su_err);
+  else
+    snprintf(t, sizeof(t), "STM status state=idle");
+  out = t;
+}
+
+// Each loop() pass: the download result, the time limits outside the feed branch, one progress line a second.
+void stmUrlService(){
+  if (su_state != SU_DOWNLOAD && su_state != SU_FEED) return;
+  const uint32_t now = millis();
+  if (su_state == SU_DOWNLOAD) {
+    uint32_t got = 0;
+    const char* why = "";
+    const usb_ota::FetchResult fr = usb_ota::fetch_poll(&got, &why);
+    su_got = got;
+    if (fr == usb_ota::FETCH_OK || fr == usb_ota::FETCH_FAILED) {
+      update_mode = false;  // the download held update mode; the Rx STM32 link comes back for the next step
+      enableLoopWDT();
+      usbOut.println("UPDATE mode off: the Rx STM32 download ended; loop watchdog on");
+      serial1Drain();
+      data_ready = 0;
+      stm_v2_resync = true;
+      stm_last_packet_ms = now;
+      if (fr == usb_ota::FETCH_FAILED) stmUrlFail("download: %s", why);
+      else stmUrlDownloaded();
+      return;
+    }
+  } else if (sf_step == SF_RESTART && now - sf_step_ms > 30000) {  // e.g. no Rx STM32 frames: the sequence never runs
+    stm_cal_then_restart = false;
+    stmRestartFail("no progress in 30 s", stm_rs_phase, stm_rs_i);  // run mode again; "stm url" fails through the hook
+    return;
+  } else if (sf_step == SF_START) {
+    if (stm_link_ver == 2) {
+      su_state = SU_DONE;
+      usbOut.printf("STM url done: Rx STM32 updated and started (%u chunks, try %u, %lu ms)\n", (unsigned)su_chunks,
+                    (unsigned)sf_try, (unsigned long)(now - su_t0));
+      telemetryEvent(rec::EV_STM32, 1, 44, "stm url done: Rx STM32 updated and started");
+      return;
+    }
+    if (now - sf_step_ms > 5000) { stmUrlFail("BOOT accepted, but no Rx STM32 frames in 5 s"); return; }
+  }
+  if (now - su_print_ms < 1000) return;
+  su_print_ms = now;
+  if (su_state == SU_DOWNLOAD)
+    usbOut.printf("STM progress download %lu/%lu heap=%lu\n", (unsigned long)su_got, (unsigned long)su_size, (unsigned long)ESP.getFreeHeap());
+  else if (sf_step == SF_RESTART)
+    usbOut.printf("STM progress feed chunk 0 of %u step=restart word %u of %u\n", (unsigned)su_chunks, (unsigned)stm_rs_i, STM_RS_LEN / 4);
+  else
+    usbOut.printf("STM progress feed chunk %u of %u step=%s try=%u\n", (unsigned)sf_chunk, (unsigned)su_chunks, SF_NAMES[sf_step], (unsigned)sf_try);
+}
+
+// The version of the Rx STM32 app from its own answer to a read of CID 30 (bytes: major, minor, patch, link protocol),
+// read once 2 s after each v2 link start.
+uint32_t rx_stm32_ver = 0, rx_stm32_ver_link_ms = 0, rx_stm32_ver_ask_ms = 0;
+bool rx_stm32_ver_ok = false;
+void stmVersionService(uint32_t now){
+  if (rx_stm32_ver_ok || stm_rs_phase != RS_IDLE || stm_cal_phase != CAL_IDLE || stmLink.busy()) return;
+  if (now - rx_stm32_ver_link_ms < 2000 || now - rx_stm32_ver_ask_ms < 2000) return;
+  rx_stm32_ver_ask_ms = now;
+  stmLink.push(30, 0, 0);
+}
+String rxStm32Version(){
+  if (!rx_stm32_ver_ok || stm_link_ver != 2) return "unknown";
+  return String(rx_stm32_ver & 0xFF) + "." + ((rx_stm32_ver >> 8) & 0xFF) + "." + ((rx_stm32_ver >> 16) & 0xFF);
+}
+
+// Keeps the first line printed through it (the radio answer) and passes every byte on to USB.
+class LineCapture : public Print {
+ public:
+  size_t write(uint8_t c) override { return write(&c, 1); }
+  size_t write(const uint8_t* b, size_t n) override {
+    usbOut.write(b, n);
+    for (size_t i = 0; i < n && !done_; i++) {
+      if (b[i] == '\n' || b[i] == '\r') done_ = len_ > 0;
+      else if (len_ < sizeof(buf_) - 1) buf_[len_++] = (char)b[i];
+    }
+    buf_[len_] = 0;
+    return n;
+  }
+  void reset() { len_ = 0; done_ = false; buf_[0] = 0; }
+  const char* line() const { return buf_; }
+ private:
+  char buf_[248] = "";
+  size_t len_ = 0;
+  bool done_ = false;
+};
+LineCapture line_cap;
+
+// Commands that run while an update holds loop() (update mode, "stm url"); the others are refused.
+bool updateAllowed(const char* t){
+  return !strncmp(t, "ota ", 4) || !strncmp(t, "stm url", 7) || !strcmp(t, "stm status") || !strncmp(t, "get ", 4)
+         || !strcmp(t, "restart");
+}
+
+// One update command from USB or the radio. True: handled; line: the answer, printed on USB here.
+bool updateCommand(const char* t, bool radio, String& line){
+  if (!strncmp(t, "ota ", 4)) {
+    const char* a = t + 4;
+    const bool url = !strncmp(a, "url ", 4);
+    if (url && stmUrlBusy()) line = "OTA error an Rx STM32 update runs";
+    else if (!radio) return false;  // USB: every ota command as before (usb_ota prints its line)
+    else if (!url && strcmp(a, "status") && strcmp(a, "abort")) line = "OTA error USB only";
+    else {
+      update_last_ms = millis();
+      line_cap.reset();
+      Print* old = usb_ota::set_out(&line_cap);
+      usb_ota::command(a);
+      usb_ota::set_out(old);
+      line = line_cap.line();  // on USB already
+      return true;
+    }
+  } else if (!strncmp(t, "stm url ", 8) || !strcmp(t, "stm url")) {
+    stmUrlCommand(t + 7, line);
+  } else if (!strcmp(t, "stm status")) {
+    stmStatusLine(line);
+  } else if (!strcmp(t, "get rx_stm32_version")) {
+    line = String("CFG 0 rx_stm32_version=") + rxStm32Version();
+  } else {
+    return false;
+  }
+  usbOut.println(line);
+  return true;
+}
+uint8_t updateResult(const String& line){ return line.startsWith("OTA error") || line.startsWith("STM error") ? 4 : 0; }
+
+// Update mode and the feed: radio commands go on (CMD frames from the server over Wi-Fi, or ESP-NOW).
+void updateRadioService(){
+  if (radio_wifi) wifilink::pollRx(millis());
+  espnowCommands();
+}
+
+// The feed branch of loop(): the feed, USB commands and the radio commands, nothing else.
+void stmFeedLoop(){
+  sfService();
+  if (!sf_on) return;
+  benchSerial();
+  updateRadioService();
+}
+
 // An STM32 that restarts alone stays in its boot checker: IAP 0.1.0 (TrailTracer-Rx-STM32
 // iap_fsm.c) sends one HELLO frame at its start and then waits for BOOT, so no packet comes and
 // the STM32 settings are lost. After STM_RECOVER_GAP_MS with no valid packet (packets seen earlier
@@ -2394,11 +3905,13 @@ void stmRestartEnter(){
 // drive outputs stopped already, 250 ms after the last packet (ODRIVE_OUTPUT_TIMEOUT_MS).
 #define STM_RECOVER_GAP_MS 1000
 void stmRecoveryService(){
-  if (stm_raw || stm_rom_used || imu_halt || update_mode || !stm_packet_seen) return;
+  if (stm_raw || stm_rom_used || imu_halt || update_mode || !stm_packet_seen || raw_mode || raw_stm_state) return;  // never during a raw stream
   const uint32_t now = millis();
   if (now - stm_last_packet_ms < STM_RECOVER_GAP_MS) { stm_recover_tries = 0; return; }
-  if (stm_recover_tries >= 3 || (stm_recover_tries > 0 && now - stm_recover_ms < 5000)) return;
-  stm_recover_tries++;
+  // 0.5.110: 3 tries 5 s apart, then one every 30 s for as long as the Rx STM32 stays silent (it gave up after 3). An
+  // Rx STM32 window watchdog reset (2.0.63+) leaves it in its boot checker, which waits for this BOOT.
+  if (stm_recover_tries > 0 && now - stm_recover_ms < (stm_recover_tries < 3 ? 5000u : 30000u)) return;
+  if (stm_recover_tries < 250) stm_recover_tries++;
   stm_recover_ms = now;
   const int pending = Serial1.available();  // the boot checker's own HELLO frame at its start: 13 bytes
   serial1Drain();
@@ -2687,6 +4200,34 @@ void odrive_outputUpdate(bool frame_now) {
 }
 
 // Nonblocking alarm; start immediately on a fault and repeat every two seconds.
+// Drive output (0.5.69). Servos: the steering and throttle pulses on their outputs, as V1.0 does; stopped:
+// both centres. Motor controllers over CAN: as before (odrive_setDriveOutput). drive_output auto: CAN once a
+// motor controller heartbeat arrived in this boot, servos until then.
+bool driveUsesCan(){
+  if (drive_output == 1) return false;
+  if (drive_output == 2) return true;
+  static bool seen = false;
+  for (int n = 0; n < ODRIVE_NODE_COUNT && !seen; n++) seen = odrive_heartbeat_received[n];
+  return seen;
+}
+void servoIdle(){
+  for (uint8_t ch = 1; ch <= 4; ch++)
+    writePwmMicros(ch, ch == steer_output ? PWM_OUT_1_DEFAULT : ch == throttle_output ? PWM_OUT_2_DEFAULT : 1500);
+}
+void driveOutput(double throttle_us, double steering_us, bool enabled){
+  if (driveUsesCan()) {
+    odrive_setDriveOutput(throttle_us, steering_us, enabled);
+    servoIdle();
+    return;
+  }
+  odrive_setDriveOutput(PWM_OUT_2_DEFAULT, PWM_OUT_1_DEFAULT, false);  // motor controllers idle
+  servoIdle();
+  if (enabled) {
+    writePwmMicros(steer_output, (uint32_t)lround(steering_us));
+    writePwmMicros(throttle_output, (uint32_t)lround(throttle_us));
+  }
+}
+
 void odrive_updateBuzzer() {
   static bool fault_was_present = false;
   static uint32_t pulse_started_ms = 0;
@@ -2878,6 +4419,7 @@ void setup() {
   Serial.flush();
 #endif
   cpuprof::begin();  // CPU profiler: loopTask is the task that runs setup()
+  loop_task_handle = xTaskGetCurrentTaskHandle();  // 0.5.98: the frame edge wakes loop()
   const bool monitor_boot = monitor_once == MONITOR_ONCE_MAGIC && esp_reset_reason() == ESP_RST_SW;
   monitor_once = 0;  // never sticky
   {
@@ -2900,10 +4442,14 @@ void setup() {
     monitor_role_on = true;
     last_state.magic = 0;  // the monitor role keeps no vehicle state
     monitor_role::setup(ROVER_FW_VERSION);
+    rtcWdtStart();  // 0.6.7: the Monitor Rx too (fed at the top of loop()); a stop wedged it until a power cycle
     return;
   }
   TRACE(2);
   applyDeviceConfig(g_deviceConfig);
+  radio_wifi = g_deviceConfig.radio_mode == RADIO_MODE_WIFI;  // fixed for this boot: ESP-NOW or Wi-Fi, never both
+  wifilink::attach(wifilink::Hooks{&usbOut, wifiEvent, wifiFrame});  // no radio action
+  webcfg::begin();  // the settings page on the web server (Wi-Fi mode)
   if (!safe_mode) telemetryBegin();  // boot_id, the log rings (kept over a warm reset), the boot event
 
   // Start Serial
@@ -2921,9 +4467,12 @@ void setup() {
              prev_state.section < SEC_N ? SEC_NAMES[prev_state.section] : "?", prev_state.drive_mode, prev_state.ap_state,
              (unsigned long)prev_state.heap_min, (unsigned long)crash_count);
     usbOut.printf("PREV reset=%d uptime_ms=%lu %s\n", (int)esp_reset_reason(), (unsigned long)prev_state.uptime_ms, t);
+    if (panicRecordTake(panic_line, sizeof(panic_line))) usbOut.printf("%s\n", panic_line);  // also on USB "boot"
     if (!safe_mode) telemetryEvent(rec::EV_PREV_BOOT, (int32_t)esp_reset_reason(), (int32_t)prev_state.uptime_ms, t);
   }
-  usb_ota::begin(usb_ota::Hooks{&usbOut, otaMayStart, restartApp});
+  usb_ota::begin(usb_ota::Hooks{&usbOut, otaMayStart, restartApp, otaNetReady});
+  webupd::setup();  // the update page joins the web server (it starts in Wi-Fi mode once the station is connected)
+  webtlm::begin();  // the telemetry page joins the web server
 #ifdef BENCH_DRILL_PANIC
   // Bench drill 1: a new OTA image that crashes at boot. Expect the bootloader to start the
   // previous image. The drill panics once only: if this image starts again (no rollback), it runs
@@ -2952,6 +4501,12 @@ void setup() {
   // Configure pins
   pinMode(nLED, OUTPUT);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+#if 0
+#else
+  erase_window = esp_reset_reason() == ESP_RST_POWERON || esp_reset_reason() == ESP_RST_BROWNOUT ||
+                 (btn_window_once == BTN_WINDOW_MAGIC && esp_reset_reason() == ESP_RST_SW);
+  btn_window_once = 0;
+#endif
   pinMode(MOTOR_ARM_SWITCH_PIN, INPUT_PULLUP);
   digitalWrite(BUZZER_PIN, LOW);
   pinMode(BUZZER_PIN, OUTPUT);
@@ -2979,10 +4534,7 @@ void setup() {
   ledcAttachPin(PWM_OUT_2, 2);
   ledcAttachPin(PWM_OUT_3, 3);
   ledcAttachPin(PWM_OUT_4, 4);
-  writePwmMicros(1, PWM_OUT_1_DEFAULT);
-  writePwmMicros(2, PWM_OUT_2_DEFAULT);
-  writePwmMicros(3, PWM_OUT_3_DEFAULT);
-  writePwmMicros(4, PWM_OUT_4_DEFAULT);
+  servoIdle();
 
   TRACE(5);
   // MPU6050: the main-branch serviceMpu() (top of this file) owns it: init, calibration, one sample per
@@ -3006,8 +4558,7 @@ void setup() {
   steeringPID.SetMode(AUTOMATIC);  // Turn on the control loop
 
   // PID low pass setup
-  low_pass_alpha = pow(2.71828183, (-1.0 / (100 * 1/(low_pass_cutoff * 6.2831))));
-  low_pass_beta = 1 - low_pass_alpha;
+  // PID low pass: alpha from the frame period, in loop() (0.5.69; was a fixed 100 Hz here)
 
   // Attach falling edge interrupt to STM_nDATA_READY pin
   TRACE(8);
@@ -3024,34 +4575,147 @@ void setup() {
   // Set up charge port
   espPacketFifo_addCmdFloat(6 | 0x80000000, CHARGE_VBATT_STOP);  // Set voltage stop
   espPacketFifo_addCmdFloat(7 | 0x80000000, CHARGE_MAX_CURRENT);  // Set overcurrent
-  espPacketFifo_addCmdInt32(8 | 0x80000000, (CHARGE_MAX_SECONDS * 2));  // Set charge time limit
+  espPacketFifo_addCmdInt32(8 | 0x80000000, CHARGE_MAX_SECONDS);  // Set charge time limit, s (0.5.69: as it is)
 
   //RX channel setup
   espPacketFifo_addCmdInt32(1 | 0x80000000, (rx_channel - 1));  // write Rx channel
   espPacketFifo_addCmdInt32(2 | 0x80000000, enable_sensor_2 ? 0x00 : 0x80);  // Enable/disable sensor 2
-  espPacketFifo_addCmdInt32(3 | 0x80000000, 0);  // Save new channel value
+  // No CID 3 save here (0.5.82): the channel is not in the Rx STM32 calibration block, and a save at each boot
+  // was a repeating Rx STM32 flash write. Saves: the centre calibration (button) and the restore after an update.
   }  // !imu_halt
 
   if (espnowWanted()) {
     TRACE(10);
     espnowStart();  // ESP-NOW Setup
   }
+  if (wifiWanted()) wifiStart();  // radio_mode "wifi": station start; association runs on in the Wi-Fi task
   TRACE(11);
   enableLoopWDT();  // loop() must run at least each 5 s (task watchdog, panic restart), as in the monitor role
+  // 0.5.94: the RTC watchdog too. The task watchdog needs interrupts; a board that stops with interrupts off (or a
+  // task above loop() that never yields) made no restart at all (no USB, no radio until a power
+  // cycle). The RTC watchdog resets the system (not the RTC memory, so PREV and PANIC survive) if loop() is not
+  // fed for 8 s. Fed at the top of each loop() pass.
+  rtcWdtStart();
   boot_setup_ms = millis();
   usbOut.printf("SETUP ms=%lu\n", (unsigned long)boot_setup_ms);  // startup time: nothing above waits for a peer
 }
 
+// 0.5.94: the RTC watchdog resets the system (not the RTC memory, so PREV, PANIC and the Monitor Rx record survive) if
+// loop() is not fed for 8 s, also with interrupts off or a task above loop() that never yields. 0.6.7: both roles.
+void rtcWdtStart() {
+  rtc_wdt_protect_off();
+  rtc_wdt_disable();
+  rtc_wdt_set_length_of_reset_signal(RTC_WDT_SYS_RESET_SIG, RTC_WDT_LENGTH_3_2us);
+  rtc_wdt_set_stage(RTC_WDT_STAGE0, RTC_WDT_STAGE_ACTION_RESET_SYSTEM);
+  rtc_wdt_set_time(RTC_WDT_STAGE0, 8000);
+  rtc_wdt_enable();
+  rtc_wdt_protect_on();
+}
+
+// 0.6.11: the dual tone polarity items of the Rx STM32 extension slot (2.1.134+) into the telemetry table: id 9 the sign
+// (+1, -1, 0 none yet), id 10 the spread of the sign angle (deg x 10), per sensor (index bit 4) and Tx channel (bits 0-3,
+// 0-4). An item older than 1 s, or never seen, gives no value.
+void dtTelemetry() {
+  static const tlm_id SIGN[2][5] = {
+    {TLM_dt_sign_s1_ch1, TLM_dt_sign_s1_ch2, TLM_dt_sign_s1_ch3, TLM_dt_sign_s1_ch4, TLM_dt_sign_s1_ch5},
+    {TLM_dt_sign_s2_ch1, TLM_dt_sign_s2_ch2, TLM_dt_sign_s2_ch3, TLM_dt_sign_s2_ch4, TLM_dt_sign_s2_ch5}};
+  static const tlm_id SPREAD[2][5] = {
+    {TLM_dt_spread_s1_ch1, TLM_dt_spread_s1_ch2, TLM_dt_spread_s1_ch3, TLM_dt_spread_s1_ch4, TLM_dt_spread_s1_ch5},
+    {TLM_dt_spread_s2_ch1, TLM_dt_spread_s2_ch2, TLM_dt_spread_s2_ch3, TLM_dt_spread_s2_ch4, TLM_dt_spread_s2_ch5}};
+  const uint16_t now10 = (uint16_t)(millis() / 10u);
+  for (unsigned s = 0; s < 2; s++)
+    for (unsigned c = 0; c < 5; c++) {
+      const unsigned sl = s * 8u + c;
+      const uint16_t ts = stmDec.ext_t10[8][sl], tp = stmDec.ext_t10[9][sl];
+      const bool sign_ok = ts && (uint16_t)(now10 - ts) <= 100u, spread_ok = tp && (uint16_t)(now10 - tp) <= 100u;
+      tlm_set(SIGN[s][c], sign_ok ? (float)stmDec.ext_val[8][sl] : NAN);
+      tlm_set(SPREAD[s][c], spread_ok ? stmDec.ext_val[9][sl] * 0.1f : NAN);
+    }
+  tlm_set(TLM_dt_decoded, (dt_decoded >= 0 && millis() - dt_decoded_ms < 5000) ? (float)(dt_decoded & 0xFF) : NAN);
+
+  // 0.6.13: the direction round the perimeter in follow mode (drive mode 2), seen from above: +1 clockwise, -1
+  // counterclockwise, 0 not known; no value outside follow mode. Inputs: the item 9 sign of the followed Tx channel
+  // (rx_channel) at the sensor nearest the wire, and the user setting "Side A of Tx channel N" (1 inside, 2 outside).
+  // Over the wire the sign flips when the vehicle turns round (from the sensor geometry), so it says on which
+  // side of the vehicle Side A lies. Inside to the vehicle's left = counterclockwise. A sign of 0 holds the last value.
+  static int8_t follow_dir_held = 0;
+  if (drive_mode_status != 2) {
+    follow_dir_held = 0;
+    tlm_set(TLM_follow_dir, NAN);
+  } else {
+    const int c = (int)rx_channel - 1;
+    const uint8_t sides[5] = {g_deviceConfig.dt_side_a_ch1, g_deviceConfig.dt_side_a_ch2, g_deviceConfig.dt_side_a_ch3,
+                              g_deviceConfig.dt_side_a_ch4, g_deviceConfig.dt_side_a_ch5};
+    const uint8_t side_a = (c >= 0 && c < 5) ? sides[c] : 0;
+    const float r1 = stmPacket.items.s1_radius, r2 = stmPacket.items.s2_radius;
+    const unsigned s = (r2 > 0.0f && (r1 <= 0.0f || r2 < r1)) ? 1u : 0u;  // the sensor nearest the wire
+    int sign = 0;
+    if (c >= 0 && c < 5) {
+      const unsigned sl = s * 8u + (unsigned)c;
+      const uint16_t ts = stmDec.ext_t10[8][sl];
+      if (ts && (uint16_t)(now10 - ts) <= 100u) sign = stmDec.ext_val[8][sl];
+    }
+    if (side_a != 1 && side_a != 2) {
+      follow_dir_held = 0;
+    } else if (sign != 0) {
+      const bool a_left = (sign > 0) == (DT_SIGN_PLUS_IS_LEFT != 0);
+      const bool inside_left = a_left == (side_a == 1);
+      follow_dir_held = inside_left ? -1 : 1;
+    }
+    tlm_set(TLM_follow_dir, (float)follow_dir_held);
+  }
+}
+
+// 0.6.12: the Tx channels the Rx STM32 decodes now (CID 50 read, index 0): each 1 s while it answers, else each 10 s
+// (an app before 2.1.134 refuses the read, so it costs one refused command each 10 s).
+void dtPollService() {
+  static uint32_t last = 0;
+  if (stm_link_ver != 2) return;
+  const uint32_t now = millis();
+  const bool answers = dt_decoded_ms && now - dt_decoded_ms < 5000;
+  if (now - last < (answers ? 1000u : 10000u)) return;
+  last = now;
+  stmLink.push(50, 0, 0);
+}
+
 // Main Loop ---------------------------------------------------------------------------------------------------------------
 void loop() {
+  if (!rtc_wdt_test) rtc_wdt_feed();  // 0.5.94: the RTC watchdog (setup); bench "rtcwdt test" stops the feed
   if (monitor_role_on) { mark(SEC_MONITOR); monitor_role::loop(); return; }
+#ifdef OTA_TEST_CRASH
+  // OTA test image (env ota_test_crash): a new image that panics 2 s after start in the vehicle boot. It panics only
+  // while it runs "pending verify": if the bootloader did not roll back, it runs on normally and the next update works.
+  {
+    static int8_t crash_armed = -1;
+    if (crash_armed < 0) {
+      esp_ota_img_states_t st;
+      crash_armed = esp_ota_get_state_partition(esp_ota_get_running_partition(), &st) == ESP_OK && st == ESP_OTA_IMG_PENDING_VERIFY;
+      usbOut.printf("OTA test crash image: %s\n", crash_armed ? "panic at 2 s" : "not pending verify, no panic");
+    }
+    if (crash_armed && millis() >= 2000) {
+      usbOut.println("OTA test crash image: abort() now");
+      usbOut.drain(200);
+      abort();
+    }
+  }
+#endif
   stage(ST_USB);
   mark(SEC_USB);
-  usbOut.service();  // queued USB text, never blocking
-  stmCaptureService();  // bench: captured STM32 frames, printed at the USB pace
-  usb_guard::service(millis(), vehicleStationary());  // USB output stop: a USB reconnect, no restart (lib/usb_guard)
-  usbLoadService();  // bench: paced USB output
+  // 0.5.101: the service parts run at set rates, not on every pass (cpu part shares, 2026-10-13: usb 5 %, log 4 %,
+  // stmcmd 3 %, msc 1 %, bench 1.5 % of the CPU at 2.35 ms frames). Raw stream, bridge and update keep their own pace.
+  static uint32_t usb_last_us = 0, svc_last_us = 0, bench_last_us = 0;
+  const bool svc_due = due(svc_last_us, SERVICE_PERIOD_US);
+  if (due(usb_last_us, USB_PERIOD_US) || raw_mode || stm_bridge || update_mode || stm_rs_phase == RS_RESTART || sf_on) {
+    usbOut.service();  // queued USB text, never blocking
+    stmCaptureService();  // bench: captured STM32 frames, printed at the USB pace
+    usb_guard::service(millis(), vehicleStationary());  // USB output stop: a USB reconnect, no restart (lib/usb_guard)
+    usbLoadService();  // bench: paced USB output
+  }
+  stmUrlService();  // "stm url": download result, time limits, progress lines
+  webupd::loopService();  // the update page: an upload start, granted in loop() context
   if (stm_rs_phase == RS_RESTART) { mark(SEC_BRIDGE); stmRestartEnter(); return; }  // command 41 passed: bridge to the boot checker
+  if (sf_on) { mark(SEC_BRIDGE); stmFeedLoop(); return; }  // "stm url": the ESP32 feeds the boot checker; nothing else runs
+  if (raw_mode) { mark(SEC_BRIDGE); rawService(); return; }  // raw stream pass-through or rate test: nothing else runs
   if (stm_bridge) { mark(SEC_BRIDGE); stmBridgeService(); return; }  // STM32 app update through the boot checker: nothing else runs
   if (update_mode) {
     stage(ST_UPDATE);
@@ -3060,14 +4724,30 @@ void loop() {
     // no telemetry, no radio, no flash log, no autopilot: a busy loop and a full output path made
     // the upload fail and the host lose the board (bench test). Ends with the restart into
     // the new image, or 120 s after the last "ota" line.
-    if (millis() - update_last_ms < 120000) {
+    if (millis() - update_last_ms < 120000 || usb_ota::busy()) {  // "ota url": update mode holds while the download runs
+      // 0.6.17: during an "ota url" download (the app update) the web server and mDNS stop until the restart: their
+      // memory goes to the Wi-Fi receive path. The largest free block fell to 2.3 KB and a download stalled at 517 of
+      // 1100 KB. Not during a page upload: the web server carries that one.
+      if (usb_ota::busy()) {
+        if (web::running()) { web::stop(); usbOut.println("UPDATE web server stopped for the download"); }
+        wifilink::mdnsStop();
+      }
       usb_ota::service();
       benchSerial();
-      static uint32_t update_hb_ms = 0;
+      static uint32_t update_hb_ms = 0, drained = 0;
+      // Radio commands go on ("ota status" during "ota url"); every datagram is read, as a held one holds a Wi-Fi
+      // receive buffer (bench 2026-10-16: "ota url" stopped at 10.7 KB free heap).
+      if (radio_wifi) drained += wifilink::pollRx(millis());
+      espnowCommands();
       if (millis() - update_hb_ms >= 1000) {
         update_hb_ms = millis();
-        usbOut.printf("HB ms=%lu update=1\n", (unsigned long)millis());
+        usbOut.printf("HB ms=%lu update=1 drained=%lu heap=%lu\n", (unsigned long)millis(), (unsigned long)drained,
+                      (unsigned long)ESP.getFreeHeap());
       }
+      // 0.6.15: a wait every pass, not only while "ota url" downloads. The update page's upload runs in the web server
+      // task, below loop(): with no wait it got no CPU, the ESP32 image stalled at 0 bytes after the Rx STM32 part and
+      // the browser gave up. The download task (loop() priority) also gets the CPU here.
+      delay(1);
       return;
     }
     update_mode = false;
@@ -3090,9 +4770,17 @@ void loop() {
 
   // Check if USB MSC host has finished editing config.json (3 s idle window).
   mark(SEC_MSC);
-  if (msc_fat_loop(&g_deviceConfig)) {
+  if (svc_due && msc_fat_loop(&g_deviceConfig)) {
     applyDeviceConfig(g_deviceConfig);
     config_saved_led_until_ms = millis() + 1500;  // Signal config saved to user via LED
+  }
+  if (svc_due) {  // a value from config.json or NVS that took its default: one USB line and one event each
+    char bad[96];
+    int src;
+    while (msc_fat_bad_value_pop(bad, sizeof(bad), &src)) {
+      usbOut.printf("SETTING bad value %s\n", bad);
+      if (src != 2) telemetryEvent(rec::EV_SETTING, 2, 2, (String("bad value ") + bad).c_str());
+    }
   }
 
   static uint32_t loop_min_us = 0xFFFFFFFF;
@@ -3104,13 +4792,13 @@ void loop() {
   last_state.drive_mode = (uint8_t)drive_mode_status;
   last_state.ap_state = telemetryApByte();
   if (stm_raw) stmRawService();  // bench: STM32 ROM loader link, no packets
-  else if (stm_link_ver == 2 && stm_v2_resync && data_ready && Serial1.available() != (int)STM_FRAME_LEN) {
+  else if (stm_link_ver == 2 && stm_v2_resync && data_ready && Serial1.available() != stm_v2_len) {
     serial1Drain();  // resync: wait for an edge with exactly one frame waiting
     data_ready = 0;
     rtprof::resync();
     uart_overrun_count++;
   }
-  else if((stm_link_ver == 2 && Serial1.available() >= (int)STM_FRAME_LEN && (!stm_v2_resync || data_ready)) ||
+  else if((stm_link_ver == 2 && Serial1.available() >= stm_v2_len && (!stm_v2_resync || data_ready)) ||
           (stm_link_ver != 2 && data_ready && (data_ready > 1 || Serial1.available() >= stmFrameLen()))){
     uint32_t loop_start_us = micros();
     // Overrun detection (v1 and unknown link): ISR fired more than once, or extra bytes are buffered from a
@@ -3128,9 +4816,31 @@ void loop() {
       // Fall through to the rest of loop() without touching stmPacket.
     } else {
     // Normal path: exactly one interrupt fired and one full packet is ready.
-    if(!stmReadFrame()){
+    // Layout 2: when older frames wait (the loop fell behind, as at 2.35 ms frames, where one pass with control takes
+    // about 3 ms), each older frame is read and decoded here without the control step, so the receive buffer never
+    // overflows and no frame is lost; the control step then runs once, on the newest frame (0.5.85).
+    if (stm_link_ver == 2 && !stm_v2_resync) {
+      for (int k = 0; k < 16 && Serial1.available() >= 2 * stm_v2_len && !raw_mode && stm_rs_phase != RS_RESTART; k++) {
+        if (!stmReadFrame()) break;
+        stm_catchup_frames++;
+        uart_skip_catchup++;
+      }
+    }
+    // 0.5.96: control at most at CONTROL_PERIOD_US (100 Hz). At shorter reading times the frames between are decoded
+    // only (no frame is lost; the log and the sweep record get every frame), so the drive part costs the same at every
+    // reading time (2.35 ms frames: control on about every 4th frame).
+    const bool decode_only = stm_link_ver == 2 && stmFramePeriodS() < CONTROL_PERIOD_US * 0.9e-6 &&
+                             (uint32_t)(micros() - control_last_us) < CONTROL_PERIOD_US - 500;
+    if (decode_only) {
+      if (Serial1.available() >= stm_v2_len && stmReadFrame()) { stm_catchup_frames++; stmTxBlockOnly(); }
+    } else if((stm_link_ver == 2 && Serial1.available() < stm_v2_len) || !stmReadFrame()){
       // a bad frame: counted in stmReadFrame (crc_error_count)
     } else {
+    control_last_us = micros();
+    // 0.5.122: the frame to the Rx STM32 goes right after the frame read, before the control step. The Rx STM32 reads
+    // its receive ring at each frame tick; sent at the end of the control step (up to about 2.5 ms later), a 16 B frame
+    // could cross the next tick and arrive in two windows (bad CRC and length counts).
+    espPacketFifo_sendCmd();  // one Rx UART frame: control block and up to one command
 
     // update the double X position from the float in the latest STM32 packet
     static bool first_packet = true;
@@ -3180,6 +4890,10 @@ void loop() {
         PWM_OUT_1_MIN - PWM_OUT_1_DEFAULT, PWM_OUT_1_MAX - PWM_OUT_1_DEFAULT, stmFramePeriodS());  // was steeringPID.Compute()
 
     // apply low pass to PID output (mostly to reduce jitter due to kd term)
+    if(low_pass_compute && low_pass_enable){  // 0.5.69: steer_lpf_hz at the real frame period
+      low_pass_alpha = expf(-6.2831853f * low_pass_cutoff * (float)stmFramePeriodS());
+      low_pass_beta = 1 - low_pass_alpha;
+    }
     if(low_pass_compute && low_pass_enable && (!low_pass_first_cycle)){
       pid_output = pid_output * low_pass_beta + low_pass_last_val_1 * low_pass_alpha;  // Compute first low-pass
       low_pass_last_val_1 = pid_output;  // save intermediate value
@@ -3334,16 +5048,14 @@ void loop() {
       || WFRX_STATUS_GET_BIT(stmPacket.items.status_bits, WFRX_STATUS_VDD_FAULT)  // STM32 VDD fault bit
       || (stmPacket.items.temperature > 100)  // STM32 internal temp in °C
       ){
-        odrive_setDriveOutput(PWM_OUT_2_DEFAULT, PWM_OUT_1_DEFAULT, false);
-        writePwmMicros(3, PWM_OUT_3_DEFAULT);  // write default value to output 3
-        writePwmMicros(4, PWM_OUT_4_DEFAULT);
+        driveOutput(PWM_OUT_2_DEFAULT, PWM_OUT_1_DEFAULT, false);
 
      }else if(((drive_mode_status == 1 || drive_mode_status == 2)
           && !rover_active && stuckDetector.GetStatus())  // Stop wire-follow modes when stuck (the rover is off the wire most of the time).
           || (charge_status > 0)  // vehicle charge in progress
           || (rover_active && roverAp.state == rover::HALTED)  // rover lost the wire too long
           ){
-        odrive_setDriveOutput(PWM_OUT_2_DEFAULT, PWM_OUT_1_DEFAULT, false);
+        driveOutput(PWM_OUT_2_DEFAULT, PWM_OUT_1_DEFAULT, false);
         sine_wave_force_disabled = true; sine_wave_blend = 0.0; target_x_pos = 0.0;
         vehicleStatus = 2; //set status to 'charging' for telemetry purposes
         if (charge_status == 0) { // If there is a fault other than charging
@@ -3351,7 +5063,7 @@ void loop() {
          }
 
      }else{
-       odrive_setDriveOutput(throttle, steering_output, true);
+       driveOutput(throttle, steering_output, true);
        sine_wave_force_disabled = false;
        vehicleStatus = 1; //set status to driving for telemetry purposes
      }
@@ -3375,9 +5087,15 @@ void loop() {
   mainLoopCounter();  // increment data loop counter
   mark(SEC_SAMPLE);
   telemetrySample();  // one 100 Hz sample of this packet and the outputs it gave
+  dtTelemetry();  // 0.6.11: dual tone polarity items 9 and 10 into the telemetry table
+#ifdef TELEMETRY_NEWVALUE
+  // The example lines of include/user_telemetry.h: one tlm_set per value, here once per control pass
+  tlm_set(TLM_test_frames, (float)(stmDec.st.frames & 0xFFFFu));
+  tlm_set(TLM_test_r1_mm, stmPacket.items.s1_radius);
+  tlm_set(TLM_test_drive, odrive_drive_command);
+#endif
   mark(SEC_STMCMD);
   chargeControl();  // monitor and control charge port
-  espPacketFifo_sendCmd();  // Send one STM32 UART command from the command queue
 
   }  // end else (CRC pass)
   }  // end else (normal packet path)
@@ -3388,10 +5106,20 @@ void loop() {
     loop_exec_count++;
   }  // end if(data_ready)
   mark(SEC_STMCMD);
-  stmRecoveryService();  // STM32 silent after packets: HELLO/BOOT again
-  stmLinkEvents();       // STM32 command failures, read-back differences, packet gaps: event 18 and USB
+  periodAckService();  // 0.5.104: the "set dsp_frame_period_us" answer after the Rx STM32 answer
+  binPollService();    // 0.5.104: the bin frequency in effect after "bin"
+  dtPollService();     // 0.6.12: the Tx channels the Rx STM32 decodes now (CID 50 read)
+  if (svc_due) {
+    stmRecoveryService();  // STM32 silent after packets: HELLO/BOOT again
+    stmLinkEvents();       // STM32 command failures, read-back differences, packet gaps: event 18 and USB
+  }
   mark(SEC_RADIO);
-  if (espnowWanted() && radioSlotOpen()) {
+  // 0.5.100: the radio part at most every RADIO_PERIOD_US (250 Hz). It cost 0.48-0.65 ms a pass, run on every pass
+  // (about 27 % of the CPU at 2.35 ms frames). 250 Hz covers every send rate (telemetry, sweep records, answers).
+  static uint32_t radio_last_us = 0;
+  const bool radio_due = (uint32_t)(micros() - radio_last_us) >= RADIO_PERIOD_US;
+  if (radio_due) radio_last_us = micros();
+  if (radio_due && espnowWanted() && radioSlotOpen()) {
     espnowStart();  // no-op once started; starts it after a config.json change
     broadcastTelemetry();  // Queue telemetry message if needed
     telemetryFifo_sendMessage();  // Send one telemetry message from queue (throttled to 100ms)
@@ -3401,17 +5129,59 @@ void loop() {
     monitorLinkService();  // MON frames: "monitor heard" and PC time events
     if (espnow_started) telemlog_poll(millis(), telemetrySend);  // live log frames, INFO, backfill
   }
+  if (radio_due && wifiWanted() && radioSlotOpen()) {  // radio_mode "wifi": the same frames as UDP; nothing here waits for the network
+    wifiStart();  // no-op once started; starts it after a config.json change
+    stage(ST_RADIO);
+    wifilink::service(millis());  // association watch, reconnect, server beacon, mDNS answer, scan lines
+    web::service(millis());  // starts the page server once the station is connected
+    broadcastTelemetry();  // Queue telemetry message if needed
+    wifiTelemetryFifoSend();  // ... and send one from the queue over UDP (throttled to 100ms)
+    espnowCommands();  // config commands (CMD/ACK), STOP and restarts from the server, as over ESP-NOW
+    webcfg::service(millis());  // a settings page request (src/web_settings.cpp)
+    webtlm::service(millis());  // a telemetry page request: a copy of the newest values (src/web_telemetry.cpp)
+    // Log frames only while a send can reach the server. telemlog moves its live position on a failed send, so a
+    // poll before the server is known lost the first records of each start (event 19 "associated") and every record
+    // of an association loss. Held back, the SLOW stream (events, status) goes out in order once the server is
+    // known, as far as its RAM ring reaches (TELEMLOG_SLOW_SLOTS); the FAST stream skips to its newest frames.
+    if (wifilink::ready()) telemlog_poll(millis(), wifiTelemetrySend);  // live log frames, INFO, backfill
+  } else if (!radio_wifi) {
+    wifilink::scanService();  // espnow mode: the lines of a "wifi scan"
+  }
   stage(ST_LOG);
   mark(SEC_LOG);
-  if (!safe_mode) {
+  if (!safe_mode && svc_due) {
     telemetryService();  // 1 s status record, events, USB log dump
     flashTestService();  // bench: flash erase/write stall measurement
   }
   if (crash_count && millis() > 60000) crash_count = 0;  // 60 s without a crash: not a crash loop
-  usb_ota::service();  // a new OTA image: valid after 30 s, or after "ota confirm" (rollback at 120 s)
+  if (svc_due) usb_ota::service();  // a new OTA image: valid after 30 s, or after "ota confirm" (rollback at 120 s)
   stage(ST_BENCH);
   mark(SEC_BENCH);
-  benchSerial();  // USB serial commands for the bench tests
+  if (Serial.available() || due(bench_last_us, SERVICE_PERIOD_US)) benchSerial();  // USB serial commands for the bench tests
+  // 0.5.104: USB link state changes as events (EV_USB), so a USB stop shows over the radio log (
+  // USB silent both ways for 3 min, the radio and loop() on; nothing on the radio said why).
+  {
+    static uint32_t usb_ev_ms = 0, st0 = 0, re0 = 0, tx0 = 0, rx_quiet_n = 0;
+    static int dtr0 = -1;
+    static bool rx_quiet = false;
+    const uint32_t rx_ms = usb_rx_ms;
+    if (millis() - usb_ev_ms >= 1000) {
+      usb_ev_ms = millis();
+      const uint32_t st = usb_guard::stalls(), re = usb_guard::restarts(), tx = usb_guard::tx_events();
+      const int dtr = tud_cdc_connected() ? 1 : 0;
+      char t[80];  // an event body holds 73 B of text
+      snprintf(t, sizeof(t), "stalls=%lu reconn=%lu tx/s=%lu q=%u drop=%lu dtr=%d rx_age=%lus",
+               (unsigned long)st, (unsigned long)re, (unsigned long)(tx - tx0), (unsigned)usbOut.queued(),
+               (unsigned long)usbOut.dropped, dtr, (unsigned long)((millis() - rx_ms) / 1000));
+      if (st != st0) telemetryEvent(rec::EV_USB, 1, (int32_t)st, t);
+      if (re != re0) telemetryEvent(rec::EV_USB, 2, (int32_t)re, t);
+      if (dtr0 >= 0 && dtr != dtr0) telemetryEvent(rec::EV_USB, dtr ? 3 : 4, 0, t);
+      const bool quiet = dtr && millis() - rx_ms >= 60000;
+      if (quiet && !rx_quiet) telemetryEvent(rec::EV_USB, 5, (int32_t)++rx_quiet_n, t);
+      rx_quiet = quiet;
+      st0 = st; re0 = re; tx0 = tx; dtr0 = dtr;
+    }
+  }
   static uint32_t bench_print_ms = 0;
   if (millis() - bench_print_ms >= 1000) {
     bench_print_ms = millis();
@@ -3426,10 +5196,16 @@ void loop() {
       static uint32_t hb_last_packets = 0;
       if (safe_mode) usbOut.printf("SAFE MODE after %lu crash resets: no telemetry, no ESP-NOW\n", (unsigned long)crash_count);
       if (imu_halt) usbOut.println("IMU HALT: no drive (MPU6050 failed at start-up, imu_required=true)");
-      usbOut.printf("HB ms=%lu packets=%lu mode=%d espnow=%d gyro=%d heap=%lu maxblk=%lu psram=%lu dtr=%d\n", (unsigned long)millis(),
+      // 0.5.97: packets = good Rx STM32 frames this second (was control passes; control runs at most 100 Hz now),
+      // control = control passes; cpu, loop, drive = CPU load % of the last second (lib/cpu_prof load()).
+      cpuprof::load((1u << SEC_DRIVE) | (1u << SEC_PACKET) | (1u << SEC_ROVER) | (1u << SEC_MPU), &cpu_busy_pct, &cpu_loop_pct, &cpu_drive_pct);
+      static uint32_t hb_last_frames = 0;
+      usbOut.printf("HB ms=%lu packets=%lu control=%lu mode=%d espnow=%d gyro=%d heap=%lu maxblk=%lu psram=%lu dtr=%d cpu=%u loop=%u drive=%u\n",
+        (unsigned long)millis(), (unsigned long)(stmDec.st.frames - hb_last_frames),
         (unsigned long)((main_loop_counter - hb_last_packets + MAIN_LOOP_PERIOD) % MAIN_LOOP_PERIOD), (int)drive_mode_status, (int)espnow_started, (int)mpu_ok,
         (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMaxAllocHeap(), (unsigned long)ESP.getPsramSize(),
-        (int)tud_cdc_connected());
+        (int)tud_cdc_connected(), (unsigned)cpu_busy_pct, (unsigned)cpu_loop_pct, (unsigned)cpu_drive_pct);
+      hb_last_frames = stmDec.st.frames;
       if (usb_verbose && (usbOut.dropped || usb_guard::restarts() || usb_guard::full_resets()))
         usbOut.printf("USB dropped=%lu guard_reconnects=%lu full_resets=%lu stalls=%lu\n", (unsigned long)usbOut.dropped,
                       (unsigned long)usb_guard::restarts(), (unsigned long)usb_guard::full_resets(),
@@ -3553,6 +5329,14 @@ void loop() {
   monLedService();  // green LED: 100 ms inversion per MON frame
   // Process STM32 packets first, then do at most one sensor sample.
   serviceMpu();
+  // 0.5.98: wait for the next frame edge, at most LOOP_WAIT_MS (0.5.99: 5 ms; with 1 ms the loop woke about 580 times
+  // a second at 10 ms frames and spent about 1.4 ms of service polling each time), when nothing waits (no frame edge, no whole frame, no USB
+  // input). loop() polled without a pause before, so the idle task never ran and the CPU load read 100 %; now the
+  // load is the real work. Raw stream, bridge and monitor modes return earlier and keep polling.
+  if (data_ready == 0 && Serial1.available() < stm_v2_len && !Serial.available()) {
+    loop_waits++;
+    ulTaskNotifyTake(pdTRUE, LOOP_WAIT_MS);
+  }
 } // End of main loop -------------------------------------------------------------------------
 
 // STM32 UART ISR, triggered by falling edge of nDATA_READY after each full packet
@@ -3560,6 +5344,31 @@ void IRAM_ATTR receiveStmUart(){
   data_ready++;
   stm_edge_us = (uint32_t)esp_timer_get_time();
   rtprof::edgeIsr();
+  BaseType_t woken = pdFALSE;
+  uart_edge_seq++;
+  // 0.5.128: the Rx UART frame goes now: the command frame once, else the newest block. The live flags are read here too:
+  // a raw stream, a restart or "uart off|pause" starts in loop() between two builds.
+  const uint32_t isr_ms = (uint32_t)(esp_timer_get_time() / 1000);  // millis() base
+  // ... and Rx STM32 frames still run: a boot checker makes edges too, with no frame (no byte may go to it)
+  if (uart_isr_go && (uint32_t)(isr_ms - uart_last_good_ms) < 100 && !raw_mode && !raw_stm_state && !stm_dup_step &&
+      stm_rs_phase != RS_RESTART && !uart_force_old && !(uart_pause_until && (int32_t)(isr_ms - uart_pause_until) < 0)) {
+    if (uart_ll_get_txfifo_len(UART_LL_GET_HW(1)) < ESP_UART_FRAME_LEN) {
+      uart_isr_fifo++;
+    } else if (uart_cmd_ready) {
+      uart_ll_write_txfifo(UART_LL_GET_HW(1), uart_cmdf, ESP_UART_FRAME_LEN);
+      uart_cmd_ready = false;
+      uart_frames++;
+    } else if (uart_blk_ok) {
+      if (uart_blk_sent) uart_isr_repeat++;
+      uart_ll_write_txfifo(UART_LL_GET_HW(1), uart_blk[uart_blk_i], ESP_UART_FRAME_LEN);
+      uart_blk_sent = true;
+      uart_frames++;
+    } else {
+      uart_isr_none++;
+    }
+  }
+  if (loop_task_handle) vTaskNotifyGiveFromISR(loop_task_handle, &woken);  // 0.5.98: wake loop() at once
+  if (woken) portYIELD_FROM_ISR();
 }
 
 void flushSerial1RxBounded(){
@@ -3587,7 +5396,9 @@ static uint16_t crc16_ibm(const uint8_t *data, size_t len){
 }
 
 // write a PWM output channel's on-time in microseconds
+uint32_t pwm_test_us = 0;  // 0.5.104: bench "pwm <us>": OUT1 held at this width while not driving (0 = off)
 void writePwmMicros(uint8_t ch, uint32_t micros){
+  if (pwm_test_us && ch == 1 && drive_mode_status != 2) micros = pwm_test_us;
   uint16_t duty_cycle = (int32_t)((float)micros * 1e-6 * (float)(PWM_OUT_FREQUENCY * ((1 << PWM_OUT_RESOLUTION_BITS) - 1)));
   ledcWrite(ch, duty_cycle);
 }
@@ -3741,6 +5552,33 @@ uint16_t driveMode(){
 void buttonLogic(){
 
   uint8_t gpio_state = !digitalRead(BUTTON_PIN);
+  if (btn0_sim) gpio_state = 1;  // bench: USB "btn0 down"
+  // Erase gesture: a press that starts in the first 3 s after power-on
+  if (!erase_hold && erase_window && gpio_state && millis() < 3000) {
+    erase_hold = true;
+    erase_hold_ms = millis();
+    usbOut.printf("BUTTON erase gesture: hold 5 s to erase every setting and the Wi-Fi details\n");
+  }
+  if (erase_window && millis() >= 3000 && !erase_hold) erase_window = false;
+  if (erase_hold) {
+    if (!gpio_state) {  // released before 5 s: nothing happens, and the press makes no click or calibration
+      erase_hold = false;
+      erase_window = false;
+      bttn_state = 0; bttn_counter = 0; bttn_click_counter = 0; bttn_long_counter = 0; bttn_3s_armed = 0; bttn_6s_state = 0;
+      usbOut.printf("BUTTON erase gesture: released after %lu ms, nothing erased\n", (unsigned long)(millis() - erase_hold_ms));
+      return;
+    }
+    digitalWrite(nLED, (millis() / 50) & 1);  // 10 Hz flash during the hold
+    if (millis() - erase_hold_ms >= 5000) {
+      usbOut.drain(100);
+      const bool ok = msc_fat_erase(&g_deviceConfig, true, false);
+      usbOut.printf("BUTTON erase: every setting and the Wi-Fi details at defaults%s; restart\n",
+                    ok ? "" : " (config.json write failed)");
+      usbOut.drain(200);
+      restartApp();
+    }
+    return;  // the gesture owns the button: no click, no calibration, no 6 s action
+  }
 
   // regular press logic
 	if(!bttn_state && gpio_state)  // button was not pressed & is currently pressed
@@ -3841,6 +5679,201 @@ void espPacketFifo_addCmdFloat(uint32_t cid, float cmd){
   stmLink.pushFloat(cid, cmd);
 }
 
+// The answer in a v2 frame (0.5.97: called for every decoded frame from stmReadFrame, catch-up and decode-only frames
+// included; up to 0.5.96 only the frame that ran control had its answer read, and the others were lost:
+// "STMCMD no answer" at 2.35 ms frames).
+void stmV2Answer(){
+  const uint32_t now = millis();
+  if (stmAns.present && (int32_t)(stm_ans_print_until - now) > 0)
+    usbOut.printf("STM ans seq=%u cid=%u%s index=%u status=%u value=%ld (0x%08lx)\n", (unsigned)stmAns.seq, (unsigned)(stmAns.cid & 0x7F),
+                  (stmAns.cid & 0x80) ? "w" : "r", (unsigned)stmAns.index, (unsigned)stmAns.status, (long)(int32_t)stmAns.value,
+                  (unsigned long)stmAns.value);
+  if (stm_rtt_wait && stmAns.present && stmAns.seq == stm_rtt_cmd_seq) {
+    const uint8_t d = (uint8_t)(stmDec.lastSeq() - stm_rtt_frame_seq);
+    stm_rtt_hist[d < 15 ? d : 15]++;
+    stm_rtt_wait = false;
+  }
+  stmCalOnAnswer(stmAns);
+  stmRestartOnAnswer(stmAns);
+  stmRawStreamOnAnswer(stmAns);
+  dspOnAnswer(stmAns);
+  if (stmAns.present && stmAns.cid == 30 && (stmAns.status == RSP_OK || stmAns.status == RSP_OK_CLAMPED)) {
+    rx_stm32_ver = stmAns.value;  // app major, minor, patch, link protocol (bytes 0-3)
+    rx_stm32_ver_ok = true;
+  }
+  if (stmAns.present && (stmAns.cid & 0x7F) == 20 && stmAns.index < WFRX_BINS && (stmAns.status == RSP_OK || stmAns.status == RSP_OK_CLAMPED))
+    memcpy(&stm_bin_hz[stmAns.index], &stmAns.value, 4);  // the bin frequency in effect, for STMCOIL8
+  stmLink.onAnswerV2(now, stmDec.status_bits, stmAns.present, stmAns.seq, stmAns.cid, stmAns.index, stmAns.status, stmAns.value);
+}
+
+// Rx UART frame (Rx STM32 app with status bit 27): every frame carries the control block (version, angle = vehicle
+// roll, flags: bit 0 charge enable) and one optional command, with one CRC. Until the app sets bit 27 the ESP32 sends
+// the 10 B command frame only when it has a command (older apps). Bench "uart": status, roll source, bad blocks, pause.
+uint8_t uart_roll_src = 0;       // 0 IMU (accelerometer roll; 0 with no IMU), 1 fixed, 2 sweep (one turn in 10 s)
+int16_t uart_roll_fixed = 0;     // fixed roll, 65 536 = one turn
+bool uart_charge = false;        // flag bit 0: the charge state machine's CID 9 value
+bool uart_force_old = false;     // bench "uart off": the 10 B command frame even with bit 27
+uint8_t uart_bad_kind = 0;       // bench: 1 bad CRC, 2 wrong version (block-only frames; command frames stay valid)
+int16_t uart_bad_angle = 0;      // bench: the angle the bad frames carry (a kept bad block would show it in CID 53)
+int8_t uart_charge_force = -1;   // bench "uart charge on|off|auto": -1 the charge state machine, 0 or 1 forced
+uint32_t uart_pause_t0 = 0;      // millis() at the last "uart pause"
+int32_t uart_cp_off_ms = -1;     // ms from the last pause start to the charge enable status bit (13) falling; -1 none
+uint32_t uart_bad_left = 0;      // frames still to send bad
+uint32_t uart_pause_until = 0;   // bench "uart pause <s>": millis() until frames go again
+uint32_t uart_frames = 0, uart_frames_cmd = 0, uart_frames_bad = 0, uart_frames_old = 0;
+int16_t uart_last_angle = 0;
+uint8_t uart_last_blk[ESP_UART_FRAME_LEN], uart_last_cmd[ESP_UART_FRAME_LEN];  // the last block-only and command frames sent
+bool uart_have_blk = false, uart_have_cmd = false;
+bool uartFramePaused() { return uart_pause_until && (int32_t)(millis() - uart_pause_until) < 0; }
+// During "uart pause" no control block goes (no valid 16 B frame); commands go as 10 B frames, so reads still work.
+bool uartFrameOn() { return !uart_force_old && !uartFramePaused() && (stmDec.status_bits & WFRX_STATUS_UART_FRAME) != 0; }
+int16_t uartRoll() {
+  if (uart_roll_src == 1) return uart_roll_fixed;
+  if (uart_roll_src == 2) return (int16_t)(uint16_t)((millis() % 10000u) * 65536u / 10000u);
+  return imu_roll16;
+}
+// 0.5.128: the Rx UART frame goes from the frame edge interrupt (receiveStmUart) straight into the UART transmit FIFO.
+// loop() builds the frames after each good Rx STM32 frame (uartRefresh): the block alone in a double buffer, and a
+// command frame when a command waits. The interrupt sends the command frame once, else the newest block (again, if
+// loop() built none since). 0.5.125-0.5.127 used a task for the build; its 3 KB stack cost the page update its heap.
+portMUX_TYPE uart_mux = portMUX_INITIALIZER_UNLOCKED;
+bool uart_pend_on = false;        // a command waits for the next frame build
+uint8_t uart_pend_seq = 0, uart_pend_cid = 0, uart_pend_idx = 0;
+uint32_t uart_pend_raw = 0;
+uint32_t uart_pend_busy = 0;      // commands offered while one still waited (dropped: the command link retries it)
+uint32_t uart_task_wait = 0;      // builds with the frame mode not allowed (no frame run, raw stream, restart, pause)
+DRAM_ATTR uint8_t uart_blk[2][ESP_UART_FRAME_LEN];  // block-only frames: the interrupt sends uart_blk[uart_blk_i]
+DRAM_ATTR uint8_t uart_cmdf[ESP_UART_FRAME_LEN];    // the command frame
+volatile uint8_t uart_blk_i = 0;
+volatile bool uart_blk_ok = false;      // a block frame is built and the mode runs
+volatile bool uart_cmd_ready = false;   // the command frame waits for the next edge
+volatile bool uart_isr_go = false;      // the Rx UART frame mode runs and frames may go
+volatile uint32_t uart_isr_none = 0;    // edges with the mode on and no frame built yet
+volatile uint32_t uart_isr_fifo = 0;    // edges with the transmit FIFO too full (another writer)
+volatile uint32_t uart_isr_repeat = 0;  // edges that sent the same block again (loop() built none since)
+volatile uint32_t uart_edge_seq = 0;    // +1 at each frame edge
+volatile bool uart_blk_sent = false;    // the newest block has gone at least once
+uint32_t uart_jitter_us = 0, uart_jit_busy = 0;  // 0.5.127 bench test, not in this build (kept for the "uart" line)
+// The frames go only while Rx STM32 frames run (a boot checker also makes edges, with no frame), and never in a raw
+// stream (any byte ends it), the duplicate bench test or a restart into the boot checker.
+bool uartTaskMaySend() {
+  return uartFrameOn() && stm_link_ver == 2 && !raw_mode && !raw_stm_state && !stm_dup_step && stm_rs_phase != RS_RESTART &&
+         (uint32_t)(millis() - uart_last_good_ms) < 100;
+}
+// Build one Rx UART frame into out.
+void uartBuild(uint8_t* out, uint8_t seq, uint8_t cid8, uint8_t idx, uint32_t raw) {
+  uint8_t ver = ESP_UART_FRAME_VERSION;
+  uint16_t crc_xor = 0;
+  int16_t angle = uartRoll();
+  if (uart_bad_left && cid8 == 0) {  // a bad block-only frame: the commands keep passing in the valid frames
+    uart_bad_left--;
+    uart_frames_bad++;
+    if (uart_bad_kind == 1) crc_xor = 0x5A5A; else ver = ESP_UART_FRAME_VERSION + 1;
+    angle = uart_bad_angle;
+  } else {
+    uart_last_angle = angle;
+  }
+  const bool charge = uart_charge_force >= 0 ? uart_charge_force == 1 : uart_charge;
+  stmv2::encodeUartFrame(ver, angle, charge ? ESP_UART_FLAG_CHARGE : 0u, seq, cid8, idx, raw, out, crc_xor);
+  if (cid8) { uart_frames_cmd++; memcpy(uart_last_cmd, out, ESP_UART_FRAME_LEN); uart_have_cmd = true; }
+  else { memcpy(uart_last_blk, out, ESP_UART_FRAME_LEN); uart_have_blk = true; }
+}
+// After each good Rx STM32 frame (stmReadFrame): the next block, and the command frame when one waits.
+void uartRefresh() {
+  const bool go = uartTaskMaySend();
+  uart_isr_go = go;
+  if (!go) { uart_blk_ok = false; uart_cmd_ready = false; uart_task_wait++; return; }
+  const uint8_t n = uart_blk_i ^ 1u;
+  uartBuild(uart_blk[n], 0, 0, 0, 0);
+  uart_blk_i = n;  // the interrupt now sends the new block
+  uart_blk_sent = false;
+  uart_blk_ok = true;
+  if (!uart_cmd_ready) {
+    portENTER_CRITICAL(&uart_mux);
+    const bool have = uart_pend_on;
+    const uint8_t s = uart_pend_seq, c = uart_pend_cid, i = uart_pend_idx;
+    const uint32_t r = uart_pend_raw;
+    uart_pend_on = false;
+    portEXIT_CRITICAL(&uart_mux);
+    if (have) { uartBuild(uart_cmdf, s, c, i, r); uart_cmd_ready = true; }
+  }
+}
+// One command to the Rx STM32: with the Rx UART frame it waits in the pending slot for the next frame build; else the
+// 10 B command frame goes now (older apps, "uart off", "uart pause").
+void stmTx(uint8_t seq, uint8_t cid8, uint8_t idx, uint32_t raw) {
+  if (!uartFrameOn()) {
+    uint8_t f[ESP_FRAME_LEN];
+    stmv2::encodeCmd(seq, cid8, idx, raw, f);
+    Serial1.write(f, ESP_FRAME_LEN);
+    uart_frames_old++;
+    return;
+  }
+  portENTER_CRITICAL(&uart_mux);
+  if (uart_pend_on) {
+    uart_pend_busy++;
+  } else {
+    uart_pend_seq = seq; uart_pend_cid = cid8; uart_pend_idx = idx; uart_pend_raw = raw;
+    uart_pend_on = true;
+  }
+  portEXIT_CRITICAL(&uart_mux);
+}
+// The block alone: the edge interrupt sends a frame at each edge, so loop() sends nothing here (kept for the call sites).
+void stmTxIdle() {}
+void stmTxBlockOnly() {}
+// Bench "uart [roll imu|sweep|<deg> | bad crc|ver <frames> [deg] | pause <s> | charge on|off|auto | off | on]": the Rx
+// UART frame state and tests. "pause": no control block for <s> seconds; commands go as 10 B frames meanwhile.
+void uartCommand(const char* a) {
+  char w[8] = {0};
+  float v = 0;
+  unsigned long n = 0;
+  if (!strncmp(a, "roll ", 5)) {
+    const char* r = a + 5;
+    if (!strcmp(r, "imu")) uart_roll_src = 0;
+    else if (!strcmp(r, "sweep")) uart_roll_src = 2;
+    else if (sscanf(r, "%f", &v) == 1 && v >= -180 && v < 180) { uart_roll_src = 1; uart_roll_fixed = (int16_t)lroundf(v * 65536.0f / 360.0f); }
+    else { usbOut.println("UART usage: uart roll imu|sweep|<deg -180..179.99>"); return; }
+  } else if (sscanf(a, "bad %7s %lu %f", w, &n, &v) >= 2 && (!strcmp(w, "crc") || !strcmp(w, "ver")) && n >= 1 && n <= 100000 &&
+             v >= -180 && v < 180) {
+    uart_bad_kind = !strcmp(w, "crc") ? 1 : 2;
+    uart_bad_angle = (int16_t)lroundf(v * 65536.0f / 360.0f);
+    uart_bad_left = n;
+  } else if (sscanf(a, "pause %lu", &n) == 1 && n >= 1 && n <= 120) {
+    uart_pause_until = millis() + n * 1000;
+    uart_pause_t0 = millis();
+    uart_cp_off_ms = -1;
+  } else if (!strncmp(a, "charge ", 7) && (!strcmp(a + 7, "on") || !strcmp(a + 7, "off") || !strcmp(a + 7, "auto"))) {
+    uart_charge_force = !strcmp(a + 7, "on") ? 1 : !strcmp(a + 7, "off") ? 0 : -1;
+  } else if (sscanf(a, "jitter %lu", &n) == 1) {  // the 0.5.127 proof test is not in this build
+    usbOut.println("UART jitter: not in this build (0.5.127 only)");
+    return;
+  } else if (!strcmp(a, "last")) {  // the last frames sent, as bytes
+    char h[2 * ESP_UART_FRAME_LEN + 1];
+    for (int k = 0; k < 2; k++) {
+      const uint8_t* f = k ? uart_last_cmd : uart_last_blk;
+      for (unsigned i = 0; i < ESP_UART_FRAME_LEN; i++) snprintf(h + 2 * i, 3, "%02x", f[i]);
+      usbOut.printf("UART last %s %s\n", k ? "command" : "block", (k ? uart_have_cmd : uart_have_blk) ? h : "none");
+    }
+    return;
+  } else if (!strcmp(a, "off") || !strcmp(a, "on")) {
+    uart_force_old = !strcmp(a, "off");
+  } else if (*a) {
+    usbOut.println("UART usage: uart | uart roll imu|sweep|<deg> | uart bad crc|ver <frames> [deg] | uart pause <s> | uart charge on|off|auto | uart jitter <max_us 0..3000> | uart last | uart off|on");
+    return;
+  }
+  static const char* const src[] = {"imu", "fixed", "sweep"};
+  usbOut.printf("UART frame=%s bit27=%d forced_old=%d frames=%lu cmd=%lu bad=%lu old=%lu bad_left=%lu roll=%s angle=%d (%.2f deg) charge=%d force=%d cp_enable=%d paused=%d cp_off_ms=%ld good_frames=%lu\n",
+                uartFrameOn() ? "on" : "off", (int)((stmDec.status_bits & WFRX_STATUS_UART_FRAME) != 0), (int)uart_force_old,
+                (unsigned long)uart_frames, (unsigned long)uart_frames_cmd, (unsigned long)uart_frames_bad, (unsigned long)uart_frames_old,
+                (unsigned long)uart_bad_left, src[uart_roll_src], (int)uart_last_angle, uart_last_angle * 360.0f / 65536.0f,
+                (int)uart_charge, (int)uart_charge_force, (int)((stmDec.status_bits >> 13) & 1u), (int)uartFramePaused(), (long)uart_cp_off_ms,
+                (unsigned long)stmDec.st.frames);
+  usbOut.printf("UART edge none=%lu fifo=%lu repeat=%lu wait=%lu pend_busy=%lu edges=%lu | from Rx STM32: crc_err=%lu ver_err=%lu seq_lost=%lu\n",
+                (unsigned long)uart_isr_none, (unsigned long)uart_isr_fifo, (unsigned long)uart_isr_repeat, (unsigned long)uart_task_wait,
+                (unsigned long)uart_pend_busy, (unsigned long)uart_edge_seq, (unsigned long)stmDec.st.crc_err, (unsigned long)stmDec.st.ver_err,
+                (unsigned long)stmDec.st.seq_lost);
+}
+
+
 void espPacketFifo_sendCmd(){
   const uint32_t now = millis();
   stm_last_packet_ms = now;
@@ -3850,33 +5883,22 @@ void espPacketFifo_sendCmd(){
   if (v2) {
     if (!stm_v2_cfg_sent) {  // v2 only: lanes and the values the decoder needs (a v1 STM32 knows none of them)
       stm_v2_cfg_sent = true;
+      rx_stm32_ver_ok = false;  // a link start: the app may be new; its version is read again 2 s later
+      rx_stm32_ver_link_ms = now;
       stmV2Config();
     }
-    if (stmAns.present && (int32_t)(stm_ans_print_until - now) > 0)
-      usbOut.printf("STM ans seq=%u cid=%u%s index=%u status=%u value=%ld (0x%08lx)\n", (unsigned)stmAns.seq, (unsigned)(stmAns.cid & 0x7F),
-                    (stmAns.cid & 0x80) ? "w" : "r", (unsigned)stmAns.index, (unsigned)stmAns.status, (long)(int32_t)stmAns.value,
-                    (unsigned long)stmAns.value);
-    if (stm_rtt_wait && stmAns.present && stmAns.seq == stm_rtt_cmd_seq) {
-      const uint8_t d = (uint8_t)(stmDec.lastSeq() - stm_rtt_frame_seq);
-      stm_rtt_hist[d < 15 ? d : 15]++;
-      stm_rtt_wait = false;
-    }
-    stmCalOnAnswer(stmAns);
-    stmRestartOnAnswer(stmAns);
-    dspOnAnswer(stmAns);
-    if (stmAns.present && (stmAns.cid & 0x7F) == 20 && stmAns.index < WFRX_BINS && (stmAns.status == RSP_OK || stmAns.status == RSP_OK_CLAMPED))
-      memcpy(&stm_bin_hz[stmAns.index], &stmAns.value, 4);  // the bin frequency in effect, for STMCOIL8
-    stmLink.onAnswerV2(now, stmDec.status_bits, stmAns.present, stmAns.seq, stmAns.cid, stmAns.index, stmAns.status, stmAns.value);
     // run after the configuration: at start (stmV2Config) and after each STM32 reset (bit 21 rises: the link
     // queued the settings again just now, so run goes after them). Not on status bit 24: app 2.0.6 does not
     // set it (bench test 2026-10-11), and each run command restarts the STM32 tracking state and PGA steps.
     static bool reset_prev = false;
     const bool reset_now = (stmDec.status_bits & WFRX_STATUS_STM_RESET) != 0;
-    if (reset_now && !reset_prev && stm_v2_autorun && now - stm_v2_run_ms >= 1000) dspApply();  // DSP settings, then run
+    if (reset_now && !reset_prev && stm_v2_autorun && now - stm_v2_run_ms >= 1000) { dsp_apply_reason = "Rx STM32 reset bit"; dspApply(); }  // DSP settings, then run
     reset_prev = reset_now;
     stmCalService(now);
     stmRestartService(now);
     if (stm_rs_phase == RS_RESTART) return;  // the Rx STM32 restarts after this frame: nothing more to it
+    if (raw_mode) return;  // a raw stream started on this answer: any byte to the Rx STM32 would stop it
+    stmVersionService(now);  // "get rx_stm32_version": CID 30 once per link start
   } else {
     stmLink.onPacket(now, stmPacket.items.status_bits, stmPacket.items.rid, (uint32_t)stmPacket.items.response.int32);
   }
@@ -3885,9 +5907,9 @@ void espPacketFifo_sendCmd(){
     stm_dup_step = stm_dup_step == 4 ? 0 : stm_dup_step + 1;
     return;  // no link command in these frames: one frame per window
   }
-  if (v2 && stm_v2_backlog) return;  // frames wait: this one is old; the command goes with the newest frame
+  if (v2 && stm_v2_backlog) { uart_skip_backlog++; return; }  // frames wait: this one is old; the command goes with the newest frame
   uint32_t cid, raw;
-  if (!stmLink.next(now, &cid, &raw)) return;
+  if (!stmLink.next(now, &cid, &raw)) { if (v2) stmTxIdle(); return; }
   if (!v2) {
     EspTxPacket p;
     p.items.cid = cid;
@@ -3899,9 +5921,7 @@ void espPacketFifo_sendCmd(){
   const bool w = (cid & stmset::WRITE) != 0;
   if (id == STM_RUN_CMD) {  // the run command goes as CID 1 (layout 2 meaning)
     stmLink.rewrite(1 | stmset::WRITE, raw, 0);
-    uint8_t f[ESP_FRAME_LEN];
-    stmv2::encodeCmd(stmLink.seq(), 1 | ESP_CID_WRITE, 0, raw, f);
-    Serial1.write(f, ESP_FRAME_LEN);
+    stmTx(stmLink.seq(), 1 | ESP_CID_WRITE, 0, raw);
     return;
   }
   // Layout 2: the wire channel is a bin choice on the ESP32 (bins = Tx CH 1..5); the v1 detail formats
@@ -3912,13 +5932,22 @@ void espPacketFifo_sendCmd(){
       stmDec.setWireBin((int)id - 1, (raw & 0x80u) ? -1 : (int)(raw & 0x7Fu));
     }
     stmLink.doneLocal();
+    stmTxIdle();
     return;
   }
-  if (id == 11 || id == 12 || (id == 3 && !stm_v2_save_ok)) { stmLink.doneLocal(); return; }
-  if (id == 3) stm_v2_save_ok = false;
+  // Rx UART frame: the charge enable is flag bit 0 of the control block, in every frame; CID 9 does not go.
+  if (id == 9 && w && uartFrameOn()) {
+    uart_charge = raw != 0;
+    stmLink.doneLocal();
+    stmTxIdle();
+    return;
+  }
+  // CID 3: a write (save) goes only after a centre calibration or a calibration restore; a read (2.0.52: flash state) goes as it is
+  if (id == 11 || id == 12 || (id == 3 && w && !stm_v2_save_ok)) { stmLink.doneLocal(); stmTxIdle(); return; }
+  if (id == 3 && w) stm_v2_save_ok = false;
   if ((id == 4 || id == 5) && w) {
     float phi;
-    if (!stmDec.centreAngle((int)id - 4, &phi)) { stmLink.doneLocal(); return; }
+    if (!stmDec.centreAngle((int)id - 4, &phi)) { stmLink.doneLocal(); stmTxIdle(); return; }
     uint32_t pr;
     memcpy(&pr, &phi, 4);
     stmLink.rewrite(28 | stmset::WRITE, pr, (uint8_t)(id - 4));
@@ -3926,10 +5955,9 @@ void espPacketFifo_sendCmd(){
     cid = 28 | stmset::WRITE;
     raw = pr;
   }
-  uint8_t f[ESP_FRAME_LEN];
-  stmv2::encodeCmd(stmLink.seq(), (uint8_t)((cid & 0x7F) | (w ? ESP_CID_WRITE : 0)), stmLink.idx(), raw, f);
-  Serial1.write(f, ESP_FRAME_LEN);
-  if (!stm_rtt_wait || stm_rtt_cmd_seq != f[0]) { stm_rtt_wait = true; stm_rtt_cmd_seq = f[0]; stm_rtt_frame_seq = stmDec.lastSeq(); }
+  const uint8_t seq = stmLink.seq();
+  stmTx(seq, (uint8_t)((cid & 0x7F) | (w ? ESP_CID_WRITE : 0)), stmLink.idx(), raw);
+  if (!stm_rtt_wait || stm_rtt_cmd_seq != seq) { stm_rtt_wait = true; stm_rtt_cmd_seq = seq; stm_rtt_frame_seq = stmDec.lastSeq(); }
 }
 
 // Bench: print the captured frames while the USB queue has room (one frame = about 270 characters).
@@ -3961,6 +5989,137 @@ void stmCaptureService(){
 // takes 38 and 39 only while idle, so: run 0, sensors (38), slow ADC (39), period (18; 39 changes its step),
 // bins (20), lanes (13), PGA (29), xy mask (25), run 1 (TrailTracer-Rx-STM32 rctf_wfrx_comms_v2.h). The
 // answers fill g_dsp_eff (dspOnAnswer): the values in effect, shown as the read-only <key>_eff settings.
+
+// Bin sweep record (body 0x33, 0.5.103; Rx STM32 2.0.51+ page, docs/espnow_protocol.md). Each frame's sweep bins go
+// to the log as they come: the frame seq, the page tag and previous-frame tag on a page frame, and the bin values. The
+// PC places each reading on the grid (system split: the Rx measures, the PC analyses; the grid rule changed in Rx
+// STM32 2.0.57 and needs no ESP32 change). Up to 0.5.102 the ESP32 placed the readings itself (body 0x32).
+uint8_t sweep_body[TELEMLOG_FAST_BODY_MAX];
+int sweep_body_n = 0, sweep_body_updates = 0;
+uint32_t sweep_body_ms = 0;
+uint32_t sweep_updates = 0, sweep_sent = 0, sweep_dropped = 0;
+int32_t sweep_sent_bins = -1;  // the last CID 43 index 0 value sent (dspApply or "sweep 0 <n>")
+static uint32_t sweepF0(const PageSweep& p){ return p.f0_dhz[0] | (p.f0_dhz[1] << 8) | ((uint32_t)p.f0_dhz[2] << 16); }
+void sweepFlush(){
+  if (sweep_body_updates) telemlog_add(TELEMLOG_FAST, sweep_body_ms, sweep_body, (size_t)sweep_body_n);
+  sweep_body_n = sweep_body_updates = 0;
+}
+// The 4 int24 values of each sweep bin of this frame (sensor 1 coil 1, coil 2, sensor 2 coil 1, coil 2; as body 0x2E).
+void sweepValues(uint8_t out[WFRX_BINS][12], uint8_t mask){
+  int i = 0;
+  for (unsigned bn = 0; bn < WFRX_BINS; bn++) {
+    if (!((mask >> bn) & 1u)) continue;
+    int32_t v[4] = {rec::BINS_NONE, rec::BINS_NONE, rec::BINS_NONE, rec::BINS_NONE};
+    bool seen[2] = {false, false};
+    for (unsigned k = 0; k < WFRX_RESULTS; k++) {
+      const unsigned sn = (stmDec.lanes >> k) & 1u;
+      if (seen[sn]) continue;
+      seen[sn] = true;
+      v[sn * 2] = wfrx_int24_get(stmDec.coil[k][bn].v1);
+      v[sn * 2 + 1] = wfrx_int24_get(stmDec.coil[k][bn].v2);
+    }
+    for (int c = 0; c < 4; c++) wfrx_int24_put(out[i] + 3 * c, v[c]);
+    i++;
+  }
+}
+// One frame into the record: seq, flags, tag, previous-frame tag, then n sweep bins of 12 B values.
+void sweepAdd(uint8_t seq, uint8_t flags, uint16_t tag, uint16_t tag_prev, const uint8_t vals[WFRX_BINS][12]){
+  const PageSweep& p = stmDec.sweep;
+  sweep_updates++;
+  int n = 0;
+  for (unsigned b = 0; b < WFRX_BINS; b++) n += (p.mask >> b) & 1u;
+  if (!n || !p.positions) return;
+  const int need = rec::SWEEP_ENTRY_HDR + 12 * n;
+  // a new table or bin set starts a new record (the header holds them)
+  if (sweep_body_updates && (sweep_body[1] != p.table_id || sweep_body[10] != p.mask)) sweepFlush();
+  // 0.5.96: a fixed record cap: Wi-Fi 40 records a second, ESP-NOW 4. The cost per datagram, not per byte, limits the
+  // board (Wi-Fi test 2026-10-13); frames that find no open record and the cap reached are dropped (sweep_dropped);
+  // the PC fills the trace over more sweeps.
+  // 0.6.16: on Wi-Fi a record that closed full lets the next one open after 15 ms, not 25: at 10 ms frames with 7 sweep
+  // bins a record holds 2 frames (20 ms), so every frame now gets in (it was 80 of 100, 560 of 700 values a second).
+  static bool last_full = false;
+  const uint32_t min_ms = radio_wifi ? (last_full ? 15 : 25) : 250;
+  static uint32_t last_flush_ms = 0;
+  if (sweep_body_updates == 0 && millis() - last_flush_ms < min_ms) { sweep_dropped++; return; }
+  if (sweep_body_updates == 0) last_full = false;
+  if (sweep_body_updates == 0) last_flush_ms = millis();
+  if (sweep_body_updates && sweep_body_n + need > (int)sizeof(sweep_body)) sweepFlush();
+  if (!sweep_body_updates) {
+    const uint32_t f0 = sweepF0(p);
+    uint8_t* o = sweep_body;
+    o[0] = rec::BODY_SWEEP_RAW;
+    o[1] = p.table_id;
+    o[2] = (uint8_t)f0; o[3] = (uint8_t)(f0 >> 8); o[4] = (uint8_t)(f0 >> 16);
+    o[5] = (uint8_t)p.step_dhz; o[6] = (uint8_t)(p.step_dhz >> 8);
+    o[7] = (uint8_t)p.positions; o[8] = (uint8_t)(p.positions >> 8);
+    o[9] = (uint8_t)n;
+    o[10] = p.mask;
+    o[11] = 0;  // frames in this body
+    sweep_body_n = rec::SWEEP_RAW_HDR;
+    sweep_body_ms = millis();
+  }
+  uint8_t* e = sweep_body + sweep_body_n;
+  e[0] = seq; e[1] = flags;
+  e[2] = (uint8_t)tag; e[3] = (uint8_t)(tag >> 8);
+  e[4] = (uint8_t)tag_prev; e[5] = (uint8_t)(tag_prev >> 8);
+  sweep_body_n += rec::SWEEP_ENTRY_HDR;
+  for (int i = 0; i < n; i++) { memcpy(sweep_body + sweep_body_n, vals[i], 12); sweep_body_n += 12; }
+  sweep_body_updates++;
+  sweep_body[11] = (uint8_t)sweep_body_updates;
+  sweep_sent++;
+  if (sweep_body_n + need > (int)sizeof(sweep_body)) { last_full = true; sweepFlush(); }
+}
+// Each good frame (stmReadFrame), the catch-up frames included.
+void sweepFrame(){
+  if (!stmDec.sweep_on) return;
+  const PageSweep& p = stmDec.sweep;  // the newest sweep page: bin set, grid and state
+  if (p.state != 2 || !p.positions || !p.mask) return;  // no sweep runs
+  uint8_t vals[WFRX_BINS][12];
+  sweepValues(vals, p.mask);
+  const bool page = stmDec.page_sweep;
+  const uint8_t flags = (page ? 1 : 0) | ((stmDec.status_bits & WFRX_STATUS_FRAME_OVERRUN) ? 2 : 0);
+  sweepAdd(stmDec.lastSeq(), flags, page ? p.tag : 0xFFFF, page ? p.tag_prev : 0xFFFF, vals);
+  if (sweep_body_updates && millis() - sweep_body_ms >= (radio_wifi ? 25u : 250u)) sweepFlush();  // a record waits one cap period at most
+}
+// Polarity detector record (body 0x37, Rx STM32 2.0.67+ with status bit 26). Each frame's detector block goes to the
+// log as it comes: the frame seq, then the block's 8 B header and its n samples (4 B each). The PC decoder (and the
+// ESP32 decoder) reads every sample; the time base comes from the block header. Wi-Fi: a record at most every 20 ms
+// (about 31 records a second carry the 978 samples a second); ESP-NOW: every 250 ms, the rest dropped (polar_dropped).
+uint8_t polar_body[TELEMLOG_FAST_BODY_MAX];
+int polar_body_n = 0, polar_body_frames = 0;
+uint32_t polar_body_ms = 0, polar_last_start_ms = 0;
+uint32_t polar_frames = 0, polar_samples = 0, polar_sent = 0, polar_dropped = 0, polar_lost_flags = 0;
+void polarFlush(){
+  if (polar_body_frames) telemlog_add(TELEMLOG_FAST, polar_body_ms, polar_body, (size_t)polar_body_n);
+  polar_body_n = polar_body_frames = 0;
+}
+void polarFrame(){
+  if (!stmDec.polar_on) { if (polar_body_frames) polarFlush(); return; }
+  const uint8_t* blk = stmDec.polar;
+  const int n = blk[0] > 10 ? 10 : blk[0];
+  polar_frames++;
+  polar_samples += n;
+  if (blk[1] & 0x80) polar_lost_flags++;
+  const int need = 1 + 8 + 4 * n;
+  const uint32_t now = millis(), min_ms = radio_wifi ? 20u : 250u;
+  if (polar_body_frames && polar_body_n + need > (int)sizeof(polar_body)) polarFlush();
+  if (!polar_body_frames) {
+    if (now - polar_last_start_ms < min_ms) { polar_dropped++; return; }
+    polar_last_start_ms = now;
+    polar_body[0] = rec::BODY_POLAR;
+    polar_body[1] = 0;  // frames in this body
+    polar_body_n = rec::POLAR_HDR;
+    polar_body_ms = now;
+  }
+  uint8_t* e = polar_body + polar_body_n;
+  e[0] = stmDec.lastSeq();
+  memcpy(e + 1, blk, (size_t)(8 + 4 * n));
+  polar_body_n += need;
+  polar_body[1] = (uint8_t)++polar_body_frames;
+  polar_sent++;
+  if (polar_body_n + 1 + 8 + 40 > (int)sizeof(polar_body) || now - polar_body_ms >= min_ms) polarFlush();
+}
+const char* dsp_apply_reason = "boot";
 void dspApply(){
   if (stm_link_ver != 2) return;
   const DeviceConfig& c = g_deviceConfig;
@@ -3968,12 +6127,28 @@ void dspApply(){
   stmLink.pushInt(STM_RUN_CMD | 0x80000000, 0);
   stmLink.pushInt(38 | 0x80000000, c.dsp_sensors);
   stmLink.pushInt(39 | 0x80000000, c.dsp_slow_adc);
-  stmLink.pushInt(18 | 0x80000000, safe_mode ? 10000 : c.dsp_frame_period_us);  // safe mode: the default period
+  int period_us = safe_mode ? 10000 : c.dsp_frame_period_us;  // safe mode: the default period
+  const int link_m = linkModeOf(c, radio_wifi);
+  if (period_us < periodFloorUs(link_m, c)) {  // 0.5.103: a config.json edit or a radio change: the minimum of the link mode
+    usbOut.printf("STM DSP update period %d us too short for %s: %d us sent\n", period_us, linkModeName(link_m), periodFloorUs(link_m, c));
+    period_us = periodFloorUs(link_m, c);
+  }
+  stmLink.pushInt(18 | 0x80000000, period_us);
   for (int b = 0; b < 8; b++) stmLink.pushFloat(20 | 0x80000000, (float)c.dsp_bin_hz[b], (uint8_t)b);
   stm_v2_lanes = (uint8_t)c.dsp_lanes;
   stmLink.pushInt(13 | 0x80000000, c.dsp_lanes);
   stmLink.pushInt(29 | 0x80000000, c.dsp_pga);
   stmLink.pushInt(25 | 0x80000000, c.dsp_xy_mask);
+  // Bin sweep (CID 43 index 0, Rx STM32 2.0.51+; an older app answers unknown CID and sends no sweep page). Sent at
+  // each DSP set: the Rx STM32 starts with the sweep on, so "off" must be sent too. Its OK answer sets the page layout
+  // (stmDec.sweep_on). The range (index 1, 2) stays as the PC set it ("sweep 1 <Hz>", "sweep 2 <Hz>").
+  sweep_sent_bins = c.dsp_sweep_bins;
+  stmLink.pushInt(43 | 0x80000000, c.dsp_sweep_bins);
+  // 0.6.11: the decoded Tx channels for polarity detection (CID 50 index 0; Rx STM32 2.1.134+). The Rx STM32 does not
+  // store it: it goes at each DSP set. An older app refuses the unknown command once; the link moves on.
+  stmLink.pushInt(50 | 0x80000000, c.dt_channels);
+  static uint32_t dsp_sets = 0;
+  usbOut.printf("STM DSP set %lu (%s)\n", (unsigned long)++dsp_sets, dsp_apply_reason);  // bench: the rate of full DSP sets
   if (stm_v2_autorun) { stmLink.pushInt(STM_RUN_CMD | 0x80000000, 1); stm_v2_run_ms = millis(); }  // app 2.0.6: boots idle
 }
 
@@ -3986,16 +6161,22 @@ double stmFramePeriodS(){
 
 // One v2 answer to a DSP write: the value in effect (the period in effect for 18, the bin frequency for 20).
 void dspOnAnswer(const stmv2::Answer& a){
-  if (!a.present || !(a.cid & 0x80) || (a.status != RSP_OK && a.status != RSP_OK_CLAMPED)) return;
+  // writes, and from 0.5.104 CID 20 reads: Rx STM32 2.0.58 answers the bin frequency in effect, which follows a write
+  // about 10 frames later (binPollService)
+  if (!a.present || (!(a.cid & 0x80) && (a.cid & 0x7F) != 20 && (a.cid & 0x7F) != 50) || (a.status != RSP_OK && a.status != RSP_OK_CLAMPED)) return;
   const int32_t v = (int32_t)a.value;
   switch (a.cid & 0x7F) {
-    case 18: g_dsp_eff[DSP_EFF_PERIOD] = v; break;
+    case 18: g_dsp_eff[DSP_EFF_PERIOD] = v; dsp_period_answers++; break;
     case 38: g_dsp_eff[DSP_EFF_SENSORS] = v; break;
     case 39: g_dsp_eff[DSP_EFF_SLOW] = v; break;
     case 13: g_dsp_eff[DSP_EFF_LANES] = v; break;
     case 29: g_dsp_eff[DSP_EFF_PGA] = v; break;
     case 25: g_dsp_eff[DSP_EFF_XY] = v; break;
     case 20: if (a.index < 8) { float f; memcpy(&f, &a.value, 4); g_dsp_eff[DSP_EFF_BIN0 + a.index] = f; } break;
+    case 50: if (!(a.cid & 0x80) && a.index == 0) { dt_decoded = v; dt_decoded_ms = millis(); } break;  // 0.6.12: read: the channels decoded now
+    case 43:  // index 0: the bin sweep is on or off, so the page layout (stm_v2.h)
+      if (a.index == 0) stmDec.sweep_on = sweep_sent_bins != 0;
+      break;
   }
 }
 
@@ -4003,6 +6184,7 @@ void stmV2Config(){
   stmDec.setWireBin(0, (int)rx_channel - 1);
   stmDec.setWireBin(1, enable_sensor_2 ? 0 : -1);
   for (int sn = 0; sn < 2; sn++) { stmLink.push(27, 0, (uint8_t)sn); stmLink.push(28, 0, (uint8_t)sn); }
+  dsp_apply_reason = "Rx STM32 start";
   dspApply();  // lanes, the DSP settings, then run
   if (stm_cal_valid && stm_cal_phase == CAL_IDLE && stmCalPending()) {  // an IAP update ran: the calibration copy goes back
     usbOut.println("STM cal restore: started");
@@ -4010,7 +6192,7 @@ void stmV2Config(){
   }
 }
 
-int stmFrameLen(){ return stm_link_ver == 2 ? (int)STM_FRAME_LEN : (int)sizeof(stmPacket.uart_data); }
+int stmFrameLen(){ return stm_link_ver == 2 ? stm_v2_len : (int)sizeof(stmPacket.uart_data); }
 
 bool stmReadFrame(){
   rtprof::frameRead();
@@ -4025,14 +6207,30 @@ bool stmReadFrame(){
     ok = computed_crc == stmPacket.items.crc;
     rtprof::frameDecoded();
     if (ok && stm_link_ver == 0) { stm_link_ver = 1; usbOut.println("STM link v1: 122 B packets"); }
-  } else if (stm_link_ver == 2 || (stm_link_ver == 0 && n == (int)STM_FRAME_LEN)) {
-    uint8_t f[STM_FRAME_LEN];
+  } else if (stm_link_ver == 2 || (stm_link_ver == 0 && (n == (int)STM_FRAME_LEN || n == (int)STM_FRAME_LEN_V3))) {
+    // 0.6.0: an unknown link learns layout 2 from a whole frame of 128 B (version 2) or 144 B (version 3); 0.5.128
+    // took 128 B only, so a restart into a version 3 app (2.0.81) left the link unknown and every frame unread
+    uint8_t f[STM_FRAME_MAX];
     const bool known = stm_link_ver == 2;
     const uint32_t c0 = ESP.getCycleCount();
     Serial1.readBytes(f, STM_FRAME_LEN);
+    // 0.5.128: version 3 (Rx STM32 2.0.81+) is 144 B: the 16 B after the first 128 follow within 80 us at 2 Mbaud
+    int len = (int)STM_FRAME_LEN;
+    if (f[0] == WFRX_PROTO_VER3) {
+      const uint32_t t0 = micros();
+      while (Serial1.available() < (int)(STM_FRAME_LEN_V3 - STM_FRAME_LEN) && micros() - t0 < 1000) {}
+      if (Serial1.available() >= (int)(STM_FRAME_LEN_V3 - STM_FRAME_LEN)) {
+        Serial1.readBytes(f + STM_FRAME_LEN, STM_FRAME_LEN_V3 - STM_FRAME_LEN);
+        len = (int)STM_FRAME_LEN_V3;
+      }
+    }
     const uint32_t c1 = ESP.getCycleCount();
-    ok = stmDec.decode(f, stmPacket.items, stmAns);
+    ok = stmDec.decode(f, stmPacket.items, stmAns, len, millis());
+    if (ok) stm_v2_len = len;  // the next frames: the same length
+    const uint32_t c1a = ESP.getCycleCount();
+    if (ok && known) stmV2Answer();  // every frame's answer (0.5.97)
     const uint32_t c2 = ESP.getCycleCount();
+    rt_ans_cyc += c2 - c1a;
     rtprof::frameDecoded();
     rt_read_cyc += c1 - c0; rt_dec_cyc += c2 - c1; rt_bench_n++;
     if (c1 - c0 > rt_read_max) rt_read_max = c1 - c0;
@@ -4046,7 +6244,7 @@ bool stmReadFrame(){
       } else if (ok) stmStreamFrame(f);
     }
     if (known) {  // layout 2: frames that wait stay in the buffer for the next passes
-      stm_v2_backlog = Serial1.available() >= (int)STM_FRAME_LEN;
+      stm_v2_backlog = Serial1.available() >= stm_v2_len;
       if (stm_v2_backlog) stm_backlog_frames++;
       if (data_ready) data_ready--;
       stm_v2_resync = !ok;
@@ -4055,9 +6253,23 @@ bool stmReadFrame(){
     if (ok && stm_cap && stm_cap_n < stm_cap_want) memcpy(stm_cap + (size_t)STM_FRAME_LEN * stm_cap_n++, f, STM_FRAME_LEN);
     if (ok && stm_acc_want) stmAccFrame();
     if (ok && stm_coil_ms) stmCoilFrame();
-    if (ok) telemetryBins();
+    // 0.5.102: the bin record takes 100 Hz input (rec::DECIM_IN_HZ): one frame each 10 ms. Up to 0.5.101 it took every
+    // frame, so at 2.35 ms frames its records came 4.25 times too often, with the wrong time step, at 4.25 times the
+    // cost (about 280 us a frame).
+    static uint32_t bins_last_us = 0;
+    if (ok && (uint32_t)(micros() - bins_last_us) >= 10000) {
+      bins_last_us += 10000;
+      if ((uint32_t)(micros() - bins_last_us) >= 10000) bins_last_us = micros();  // a gap: start the grid again
+      telemetryBins();
+    }
+    if (ok) sweepFrame();
+    if (ok) polarFrame();
+    if (ok) uart_last_good_ms = millis();
+    if (ok) uartRefresh();  // 0.5.128: the next Rx UART frame (sent by the next frame edge)
+    if (ok && uart_pause_t0 && uart_cp_off_ms < 0 && !((stmDec.status_bits >> 13) & 1u)) uart_cp_off_ms = (int32_t)(millis() - uart_pause_t0);
     if (ok && scan_on) scanFrame();
-    if (ok && stm_link_ver == 0) { stm_link_ver = 2; stm_v2_resync = false; usbOut.println("STM link v2.0 layout 2: 128 B frames"); }
+    rt_post_cyc += ESP.getCycleCount() - c2;  // 0.5.101: read, decode, answer and the rest apart (rt bench)
+    if (ok && stm_link_ver == 0) { stm_link_ver = 2; stm_v2_resync = false; usbOut.printf("STM link v2.0 layout 2: %d B frames\n", stm_v2_len); }
     if (known) {
       if (ok) { stm_bad_frames_run = 0; return true; }
       crc_error_count++;
@@ -4130,6 +6342,17 @@ void stmLinkEvents(){
 }
 
 void chargeControl(){
+  // 0.5.110: the charge enable is a lease (Rx STM32 2.0.63+ drops it 1 s after the last CID 9 enable write): while
+  // charging is wanted (enable sent, or charging), the enable goes again every 250 ms. A hung or restarting ESP32 so
+  // leaves the charge port off within 1 s.
+  // 0.5.111: every 250 ms or every second frame, whichever is longer (one command goes per frame; Rx STM32 2.0.65 holds
+  // the lease 1 s or 4 update periods, whichever is longer), so a long update period does not fill the command queue.
+  static uint32_t lease_ms = 0;
+  const uint32_t lease_every_ms = max<uint32_t>(250, (uint32_t)(2000.0 * stmFramePeriodS()));
+  if (CHARGE_AUTO_ENABLE && (charge_status == 2 || charge_status == 3) && millis() - lease_ms >= lease_every_ms) {
+    lease_ms = millis();
+    espPacketFifo_addCmdInt32(9 | 0x80000000, 1);
+  }
   if(CHARGE_AUTO_ENABLE){
     switch (charge_status){
       case 0:  // Idle, waiting for input power
@@ -4143,6 +6366,7 @@ void chargeControl(){
       case 1:  // Input power present, waiting to request charge
         if((millis() - charge_start_millis) > 1000 && !WFRX_STATUS_GET_BIT(stmPacket.items.status_bits, WFRX_STATUS_CP_COOLDOWN)){
           espPacketFifo_addCmdInt32(9 | 0x80000000, 1);
+          lease_ms = millis();
           charge_start_millis = millis();
           charge_status = 2;
         }
@@ -4290,14 +6514,25 @@ void applyDeviceConfig(const DeviceConfig& cfg)
   const bool dsp_changed = !dsp_known || dsp_last.dsp_frame_period_us != cfg.dsp_frame_period_us
       || dsp_last.dsp_sensors != cfg.dsp_sensors || memcmp(dsp_last.dsp_bin_hz, cfg.dsp_bin_hz, sizeof(cfg.dsp_bin_hz))
       || dsp_last.dsp_xy_mask != cfg.dsp_xy_mask || dsp_last.dsp_slow_adc != cfg.dsp_slow_adc
-      || dsp_last.dsp_pga != cfg.dsp_pga || dsp_last.dsp_lanes != cfg.dsp_lanes;
-  if (dsp_known && dsp_changed) dspApply();  // the first call (boot) leaves it to stmV2Config
+      || dsp_last.dsp_pga != cfg.dsp_pga || dsp_last.dsp_lanes != cfg.dsp_lanes
+      || dsp_last.dsp_sweep_bins != cfg.dsp_sweep_bins || dsp_last.dt_channels != cfg.dt_channels;
+  if (dsp_known && dsp_changed) { dsp_apply_reason = "setting change"; dspApply(); }  // the first call (boot) leaves it to stmV2Config
   dsp_last = cfg;
   dsp_known = true;
 
   // Identification
   vehicleID           = cfg.vehicleID;
   rx_channel          = cfg.rx_channel;
+
+  // Drive output and the servo map (0.5.69)
+  drive_output        = cfg.drive_output;
+  steer_output        = cfg.steer_output;
+  throttle_output     = cfg.throttle_output;
+
+  // Steering PID low-pass (0.5.69 steer_lpf_hz; 0 = off)
+  if ((cfg.steer_lpf_hz > 0) != low_pass_enable) low_pass_first_cycle = true;
+  low_pass_enable     = cfg.steer_lpf_hz > 0;
+  low_pass_cutoff     = (float)cfg.steer_lpf_hz;
 
   // Drive parameters
   CRUISE_THROTTLE     = cfg.CRUISE_THROTTLE;
@@ -4366,13 +6601,12 @@ void applyDeviceConfig(const DeviceConfig& cfg)
   if (stm_first || CHARGE_VBATT_STOP != last_vstop || CHARGE_MAX_CURRENT != last_imax || CHARGE_MAX_SECONDS != last_tmax) {
     espPacketFifo_addCmdFloat(6 | 0x80000000, (float)CHARGE_VBATT_STOP);
     espPacketFifo_addCmdFloat(7 | 0x80000000, (float)CHARGE_MAX_CURRENT);
-    espPacketFifo_addCmdInt32(8 | 0x80000000, CHARGE_MAX_SECONDS * 2);  // the STM32 limit is 2 x the setting, as on shipped units
+    espPacketFifo_addCmdInt32(8 | 0x80000000, CHARGE_MAX_SECONDS);  // s; up to 0.5.68 2 x the setting
   }
 
   // RX channel
   if (stm_first || rx_channel != last_ch) {
     espPacketFifo_addCmdInt32(1 | 0x80000000, (int32_t)(rx_channel - 1));
-    espPacketFifo_addCmdInt32(3 | 0x80000000, 0);  // save calibration, as before (the channel is not in the STM32 calibration block)
   }
   // Sensor 2: setup() sends it at start-up (after this first call); from 0.5.25 also on a change,
   // so the STM32 holds the value of config.json with no restart.
@@ -4515,25 +6749,12 @@ uint32_t telem_boot_id = 0;
 rec::Block telem_block;
 rec::Decimator* telem_decim = nullptr;  // from the heap in telemetryBegin()
 
-// SLOW flash ring (telemlog): the "tlog" partition, 512 KB. Reads go through a memory map, because
-// esp_partition_read() turns the cache off as an erase or a write does. Erases only while the
-// rover stands still (telemetryEraseAllowed()); page programs (256 B, about every 3 s) at any time.
-const esp_partition_t* tlog_part = nullptr;
-const uint8_t* tlog_map = nullptr;
-spi_flash_mmap_handle_t tlog_map_handle;
-bool tlogErase(uint32_t sector){ return esp_partition_erase_range(tlog_part, sector * 4096u, 4096) == ESP_OK; }
-bool tlogWrite(uint32_t off, const void* p, size_t n){ return esp_partition_write(tlog_part, off, p, n) == ESP_OK; }
-bool tlogRead(uint32_t off, void* p, size_t n){
-  if (off + n > tlog_part->size) return false;
-  memcpy(p, tlog_map + off, n);
-  return true;
-}
-telemlog_flash_t tlog_flash = {tlogErase, tlogWrite, tlogRead, 0};
 
 // An erase stops the CPU for about 45 ms (the STM32 packets of that time are lost). Allowed only
 // when nothing drives: docked, the wheels known to stand still, or no ODrive on the bus (bench).
 bool telemetryEraseAllowed();
-bool vehicleStationary(){ return telemetryEraseAllowed(); }
+bool bench_moving = false;  // bench USB "moving on": the vehicle counts as moving (RAM only, off at each start)
+bool vehicleStationary(){ return !bench_moving && telemetryEraseAllowed(); }
 bool telemetryEraseAllowed(){
   if (charge_status > 0) return true;
   const uint32_t now = millis();
@@ -4574,32 +6795,24 @@ void telemetryEvent(uint16_t code, int32_t a, int32_t b, const char* text){
 }
 
 void telemetryBegin(){
-  Preferences p;
-  p.begin("telem", false);
-  telem_boot_id = p.getUInt("boot", 0) + 1;
-  p.putUInt("boot", telem_boot_id);
-  p.end();
+  // boot_id: random, not a counter in flash (0.5.82: no repeating flash writes). It tells boots apart; the
+  // previous boot after a warm reset is the RAM ring's previous segment (INFO prev_boot_id).
+  do telem_boot_id = esp_random(); while (telem_boot_id == 0 || telem_boot_id == TELEMLOG_NO_SEQ);
   const esp_reset_reason_t rr = esp_reset_reason();
   const bool warm = rr != ESP_RST_POWERON && rr != ESP_RST_BROWNOUT && rr != ESP_RST_UNKNOWN;
   telemlog_init(telem_boot_id, warm);
   telem_decim = new rec::Decimator();  // about 400 B; heap, because static RAM is full
   telem_decim->setRate(g_deviceConfig.telemetry_rate_hz);
-  tlog_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, (esp_partition_subtype_t)0x40, "tlog");
-  if (tlog_part && esp_partition_mmap(tlog_part, 0, tlog_part->size, SPI_FLASH_MMAP_DATA,
-                                      (const void**)&tlog_map, &tlog_map_handle) == ESP_OK) {
-    tlog_flash.sectors = tlog_part->size / 4096u - FLASHTEST_SECTORS;  // the last 16 sectors belong to flashtest
-    telemlog_flash_attach(&tlog_flash);  // the index scan runs later, one sector per service call
-  } else {
-    usbOut.println("tlog partition missing or not mapped: SLOW records in RAM only");
-    tlog_part = nullptr;
-  }
+  tlm::init(telemlog_add);  // table values: "no value" until set; record buffers on the heap for each rate in use
   // Settings hash: CRC-32 over the "key=value" lines, as the "list" command prints them.
   uint32_t crc = 0;
   String kv;
   for (int i = 0; msc_fat_key_at(&g_deviceConfig, i, &kv); i++) crc = rec::crc32((const uint8_t*)kv.c_str(), kv.length(), crc);
   char text[64];
   snprintf(text, sizeof(text), "fw=%s cfg=%08lx", ROVER_FW_VERSION, (unsigned long)crc);
-  telemetryEvent(rec::EV_BOOT, (int32_t)rr, (int32_t)(telem_boot_id - 1), text);  // b: previous boot_id (NVS)
+  telemlog_info_t li;
+  telemlog_info(&li);
+  telemetryEvent(rec::EV_BOOT, (int32_t)rr, (int32_t)li.prev_boot_id, text);  // b: previous boot_id (warm reset), else 0
 }
 
 void telemetrySample(){
@@ -4642,15 +6855,16 @@ void telemetrySample(){
   s.btx1_mm = stmPacket.items.s1_btx_radius[0];
   s.btx2_mm = stmPacket.items.s1_btx_radius[1];
   if (stm_link_ver == 2) {
-    // Layout 2 (0.5.45+): the coil fields carry magnitudes, sensor 1 coil 1, sensor 1 coil 2, sensor 2 coil 1,
-    // sensor 2 coil 2, at the wire bin of each sensor (bin 0 if the sensor has none), magnitude = |v| x 2^-24.
-    // rover_log.py gives them as "coil_mag" when the status record shows firmware 0.5.45+ and status bit 24.
+    // Layout 2 (0.5.45+): the coil fields carry the coil values, sensor 1 coil 1, sensor 1 coil 2, sensor 2 coil 1,
+    // sensor 2 coil 2, at the wire bin of each sensor (bin 0 if the sensor has none), value = v x 2^-24. From 0.5.72
+    // signed (the Rx STM32 sign, the field side of the coil axis); up to 0.5.71 |v|. Below 100 Hz the log filter
+    // averages the signed value. rover_log.py gives them as "coil_mag" (firmware 0.5.45+ and status bit 24).
     for (int sn = 0; sn < 2; sn++) {
       const int lane = ((stmDec.lanes >> 1) & 1) == sn ? 1 : 0;  // lane 2 if it reads this sensor, else lane 1
       const int bn = stmDec.wireBin(sn) < 0 ? 0 : stmDec.wireBin(sn);
       const int32_t v1 = wfrx_int24_get(stmDec.coil[lane][bn].v1), v2 = wfrx_int24_get(stmDec.coil[lane][bn].v2);
-      s.coil[2 * sn] = (float)(v1 < 0 ? -v1 : v1) * (1.0f / 16777216.0f);
-      s.coil[2 * sn + 1] = (float)(v2 < 0 ? -v2 : v2) * (1.0f / 16777216.0f);
+      s.coil[2 * sn] = (float)v1 * (1.0f / 16777216.0f);
+      s.coil[2 * sn + 1] = (float)v2 * (1.0f / 16777216.0f);
     }
   } else {
     for (int i = 0; i < 4; i++) s.coil[i] = stmPacket.items.coil_data[0][i];
@@ -4713,6 +6927,8 @@ void telemetryStatus(){
     unsigned a = 0, b = 0, c = 0;
     sscanf(ROVER_FW_VERSION, "%u.%u.%u", &a, &b, &c);
     st.fw_ver[0] = (uint8_t)a; st.fw_ver[1] = (uint8_t)b; st.fw_ver[2] = (uint8_t)c;
+  st.cpu_busy = cpu_busy_pct; st.cpu_loop = cpu_loop_pct; st.cpu_drive = cpu_drive_pct;  // 0.5.97
+  st.dsp_period_us = (stm_link_ver == 2 && isfinite(g_dsp_eff[DSP_EFF_PERIOD]) && g_dsp_eff[DSP_EFF_PERIOD] > 0) ? (uint32_t)g_dsp_eff[DSP_EFF_PERIOD] : 0;  // 0.5.104
   }
   st.flags = (rover_need_charge ? rec::S_GO_HOME : 0) | imu_flags | (can_init_ok ? rec::S_CAN : 0)
            | (vehicleStationary() ? 0 : rec::S_MOVING)
@@ -4743,11 +6959,23 @@ void telemetryStatus(){
   st.xf_m = roverAp.rd.Xf;
   st.dist_m = roverAp.rd.df;
   st.angle_deg = roverAp.rd.psif * 57.29578f;
+#ifdef TELEMETRY_NEWVALUE
+  tlm_set(TLM_test_heap_kb, (float)st.free_heap / 1024.0f);  // example line, 1 Hz
+#endif
   uint8_t body[rec::STATUS_BYTES];
   rec::packStatus(body, st);
   telemlog_add(TELEMLOG_SLOW, now, body, sizeof(body));
   telem_packets = 0;
   telem_loop_max_us = 0;
+}
+
+// The telemetry page (src/web_telemetry.cpp), from loop() on request: the newest status record (the SLOW ring of the
+// log), the newest sample (the open sample record) and the table values. Nothing in the frame path.
+void webTelemetryCopy(tlmpage::Snapshot* s){
+  s->now_ms = millis();
+  tlmpage::take_status_log(s);
+  tlmpage::take_sample(s, telem_block.body(), telem_block.ms());
+  tlmpage::take_values(s);
 }
 
 void telemetryEvents(){
@@ -4800,14 +7028,8 @@ void telemetryUsbCommand(const char* line){
     usbOut.printf("LOG counters live_sent=%lu live_skipped=%lu backfill_sent=%lu send_fail=%lu req=%lu req_dropped=%lu add_refused=%lu prev_kept=%u\n",
       (unsigned long)c.live_sent, (unsigned long)c.live_skipped, (unsigned long)c.backfill_sent, (unsigned long)c.send_fail,
       (unsigned long)c.req_received, (unsigned long)c.req_dropped, (unsigned long)c.add_refused, (unsigned)c.prev_kept);
-    if (tlog_part) {
-      telemlog_flash_counters_t f;
-      telemlog_flash_counters(&f);
-      usbOut.printf("LOG flash pages_written=%lu sectors_erased=%lu entries_skipped=%lu write_fail=%lu erase_fail=%lu used_sectors=%lu erased_sectors=%lu erase_allowed=%d\n",
-        (unsigned long)f.pages_written, (unsigned long)f.sectors_erased, (unsigned long)f.entries_skipped,
-        (unsigned long)f.write_fail, (unsigned long)f.erase_fail, (unsigned long)f.used_sectors,
-        (unsigned long)f.erased_sectors, (int)telemetryEraseAllowed());
-    }
+    usbOut.printf("LOG sweep frames=%lu in_records=%lu dropped=%lu\n", (unsigned long)sweep_updates,
+                  (unsigned long)sweep_sent, (unsigned long)sweep_dropped);  // 0.6.16: the sweep record counters
     return;
   }
   // "log dump <stream> <from_seq> <count>" (this boot) or "log dumpprev <stream> <from> <count>"
@@ -4855,26 +7077,21 @@ void telemetryDumpStep(){
 }
 
 void telemetryService(){
-  // A sector erase turns the flash cache off for tens of ms; the UART interrupt (not in IRAM in
-  // arduino-esp32 2.0.17) cannot empty its 128-byte FIFO, and 3 or 4 STM32 packets are lost
-  // (bench test 2026-10-09: 9 losses in 300 s, every 32 s = one sector of SLOW records). Erases run
-  // only while the vehicle stands still; TELEMLOG_FLASH_ERASED_AHEAD sectors are kept ready for
-  // driving. "erase off" (bench) blocks them, so that a test measures without the erase losses.
-  // At most one erase each 2 s: 48 erases in a row after a boot kept loop() slow for a minute,
-  // and a USB host lost the busy board (bench test).
-  static uint32_t last_erase_ok = 0;
-  const uint32_t now_ms = millis();
-  // 0.5.54 (design choice, 2026-10-12): a flash erase stalls the CPU about 50 ms. It runs only while the motors are
-  // disarmed (ODrive axes not in closed loop) or while charging, never on "stationary" alone: a rover that stops
-  // mid-run stays armed, and the next frames must not meet an erase. The pre-erased sectors cover the run.
-  const bool armed = odrive_rc_active || bench_sim_armed;
-  const bool erase_ok = !bench_erase_block && (charge_status > 0 || !armed) && now_ms - last_erase_ok >= 2000;
-  if (erase_ok) last_erase_ok = now_ms;
-  if (tlog_part) telemlog_flash_service(now_ms, erase_ok);
   telemetryEvents();
+  tlm::service(millis(), rec::rateNearest(g_deviceConfig.telemetry_rate_hz));  // table value records (lib/tlm)
   if (millis() - telem_status_ms >= 1000) {
     telem_status_ms = millis();
     telemetryStatus();
+  }
+  // The vehicle name (body 0x31, 0.5.69): each 10 s, and at once after a change
+  static uint32_t name_ms = 0;
+  static char name_sent[17] = "";
+  if (millis() - name_ms >= 10000 || strcmp(name_sent, g_deviceConfig.vehicle_name)) {
+    name_ms = millis();
+    strcpy(name_sent, g_deviceConfig.vehicle_name);
+    uint8_t body[3 + rec::VEHICLE_NAME_MAX];
+    const int n = rec::packName(body, vehicleID, g_deviceConfig.vehicle_name);
+    telemlog_add(TELEMLOG_SLOW, name_ms, body, (size_t)n);
   }
   telemetryDumpStep();
 }

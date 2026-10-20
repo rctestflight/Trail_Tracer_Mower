@@ -26,8 +26,14 @@
 #include <ArduinoJson.h>
 #include <inttypes.h>
 #include <math.h>
+#include <stddef.h>
+#include <type_traits>
+#include <utility>
+
+#include "nvs.h"
 
 #include "esp_partition.h"
+#include "esp_mac.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -50,6 +56,7 @@ static const char* TAG = "msc_fat";
 #define CONFIG_PATH_SUFFIX        "-config.json"
 #define DEFAULT_CONFIG_PATH       "0:/config.json"
 #define NVS_NAMESPACE             "wfrx_cfg"       // ≤ 15 chars
+#define NVS_WIFI_NAMESPACE        "wfrx_wifi"      // Wi-Fi network: "ssid", "pass" (not in config.json)
 #define MSC_WRITE_STABLE_MS       3000u             // idle window before parse
 
 // PWM safety limits enforced during validation
@@ -73,6 +80,11 @@ static bool              s_cache_dirty  = false;
 
 // FatFS state
 static FATFS s_fatfs;
+// The one file object for config.json (read and write; loop() only, never two at once). With
+// CONFIG_FATFS_PER_FILE_CACHE a FIL holds a 4 KB sector buffer. On the stack it took config_write_json
+// to 4288 B; under "save" from the USB command path (loop, benchSerial, configCommand, msc_fat_save_all)
+// that overflowed the 8 KB loop() stack: a panic restart on 4 of 8 USB saves, 36 B free after a save that passed.
+static FIL s_fil;
 static BYTE  s_pdrv = FF_DRV_NOT_USED;
 
 // USB MSC
@@ -200,86 +212,222 @@ static void cleanup_config_sidecar_files()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helpers: Defaults
+// Settings table (include/settings_table.h): one line per setting drives the defaults, the range check,
+// NVS save and load, config.json write and read, and set, get and list.
 // ─────────────────────────────────────────────────────────────────────────────
-static void populate_defaults(DeviceConfig& c,
-                               const DeviceConfig* seed = nullptr)
+enum : uint8_t { T_TEXT, T_U8, T_I32, T_IBOOL, T_BOOL, T_F32, T_F64, T_LONG, T_CHOICE };
+enum : uint8_t { F_ZERO_OFF = 1, F_LEGACY = 2, F_CHOICE_INT = 4, F_LIVE = 8 };
+#define NOLIM NAN  // no limit on that side
+
+struct SettingDef {
+    const char* name;   // config.json key
+    const char* opts;   // T_CHOICE: "name|name=value"; T_TEXT: the default text
+    const char* nvs;    // NVS key
+    double   def, lo, hi;
+    uint16_t off;       // offset of the DeviceConfig field
+    uint8_t  type, flags;
+};
+
+static const SettingDef SETTINGS[] = {
+#define S(name, field, type, def, lo, hi, opts, nvs, flags, ...) \
+    { #name, opts, nvs, (double)(def), (double)(lo), (double)(hi), (uint16_t)offsetof(DeviceConfig, field), type, flags },
+#define SF(name, ctype, type, def, lo, hi, opts, nvs, flags, ...) \
+    { #name, opts, nvs, (double)(def), (double)(lo), (double)(hi), (uint16_t)offsetof(DeviceConfig, name), type, flags },
+#include "settings_table.h"
+#undef S
+#undef SF
+};
+static constexpr int N_SETTINGS = sizeof(SETTINGS) / sizeof(SETTINGS[0]);
+
+// The words of each line (unit, group, label, help), for the settings page. Empty words: the page takes them from its
+// copy of docs/settings_def.json.
+struct SettingWords { const char *unit, *group, *label, *help; };
+static const SettingWords SETTING_WORDS[] = {
+#define S(name, field, type, def, lo, hi, opts, nvs, flags, unit, group, label, help) { unit, group, label, help },
+#define SF(name, ctype, type, def, lo, hi, opts, nvs, flags, unit, group, label, help) { unit, group, label, help },
+#include "settings_table.h"
+#undef S
+#undef SF
+};
+static_assert(sizeof(SETTING_WORDS) / sizeof(SETTING_WORDS[0]) == N_SETTINGS, "one word entry per table line");
+
+// Compile-time checks: each line's type matches its DeviceConfig field, and each NVS key fits (15 characters).
+template <uint8_t T> struct SettingCType;
+template <> struct SettingCType<T_TEXT>   { typedef char type[17]; };
+template <> struct SettingCType<T_U8>     { typedef uint8_t type; };
+template <> struct SettingCType<T_I32>    { typedef int type; };
+template <> struct SettingCType<T_IBOOL>  { typedef int type; };
+template <> struct SettingCType<T_BOOL>   { typedef bool type; };
+template <> struct SettingCType<T_F32>    { typedef float type; };
+template <> struct SettingCType<T_F64>    { typedef double type; };
+template <> struct SettingCType<T_LONG>   { typedef long type; };
+template <> struct SettingCType<T_CHOICE> { typedef uint8_t type; };
+#define SETTING_CHECKS(name, fieldexpr, ty, nvs)                                                              \
+    static_assert(std::is_same<std::remove_reference<decltype(std::declval<DeviceConfig&>().fieldexpr)>::type, \
+                               SettingCType<ty>::type>::value, #name ": the table type differs from the field"); \
+    static_assert(sizeof(nvs) - 1 <= 15, #name ": NVS key longer than 15 characters");
+#define S(name, field, ty, def, lo, hi, opts, nvs, ...) SETTING_CHECKS(name, field, ty, nvs)
+#define SF(name, ctype, ty, def, lo, hi, opts, nvs, ...) SETTING_CHECKS(name, name, ty, nvs)
+#include "settings_table.h"
+#undef S
+#undef SF
+#undef SETTING_CHECKS
+
+enum : uint8_t { SRC_JSON, SRC_NVS, SRC_SET, SRC_SAVE };
+
+static inline void* fptr(DeviceConfig& c, const SettingDef& e) { return (uint8_t*)&c + e.off; }
+static inline const void* fptr(const DeviceConfig& c, const SettingDef& e) { return (const uint8_t*)&c + e.off; }
+
+static int find_setting(const char* name)
 {
-    // If a seed is supplied (from NVS) use it; otherwise use compiled defaults.
-    if (seed) {
-        c = *seed;
-        return;
+    for (int i = 0; i < N_SETTINGS; i++) if (!strcmp(SETTINGS[i].name, name)) return i;
+    return -1;
+}
+
+// T_CHOICE: the name of a stored value (not 0-terminated: *len), or nullptr; the stored value of a name, or -1.
+static const char* choice_name(const char* opts, int v, size_t* len)
+{
+    int pos = 0;
+    for (const char* s = opts; *s; pos++) {
+        const char* end = strchr(s, '|');
+        if (!end) end = s + strlen(s);
+        const char* eq = (const char*)memchr(s, '=', end - s);
+        if ((eq ? atoi(eq + 1) : pos) == v) { *len = (eq ? eq : end) - s; return s; }
+        s = *end ? end + 1 : end;
     }
-    c.vehicleID             = 1;
-    c.rx_channel            = 1;
-    c.CRUISE_THROTTLE       = 1650;
-    c.CREEP_THROTTLE        = 1620;
-    c.PWM_OUT_1_DEFAULT     = 1500;
-    c.PWM_OUT_1_MIN         = 1000;
-    c.PWM_OUT_1_MAX         = 2000;
-    c.PWM_OUT_2_DEFAULT     = 1500;
-    c.PWM_OUT_2_MIN         = 1000;
-    c.PWM_OUT_2_MAX         = 2000;
-    c.PWM_OUT_3_DEFAULT     = 1500;
-    c.PWM_OUT_3_MIN         = 1000;
-    c.PWM_OUT_3_MAX         = 2000;
-    c.PWM_OUT_4_DEFAULT     = 1500;
-    c.PWM_OUT_4_MIN         = 1000;
-    c.PWM_OUT_4_MAX         = 2000;
-    c.kp                    = 3.0;
-    c.ki                    = 0.0;
-    c.kd                    = 0.0;
-    c.pid_direction         = 0;   
-    c.steering_rate_kp = 0.02;
-    c.steering_rate_ki = 0.01;
-    c.steering_rate_kd = 0.0;
-    c.steering_rate_pid_direction = 0;
-    c.steering_rate_max_dps = 90.0;
-    c.enable_sensor_2       = false;
-    c.stuck_threshold_mm    = 0.1f;
-    c.stuck_timeout_ms      = 20000.0f;
-    c.BTxFollowChannel      = 0;
-    c.BTxThreshold          = 170;
-    c.BTxAccelRate          = 0.5;
-    c.BTxCreepDuration      = 4;
-    c.SineSwerveAmplitude   = 0;
-    c.SineSwerveFrequency   = 15;
-    c.CHARGE_VBATT_STOP     = 11.9;
-    c.CHARGE_MAX_CURRENT    = 6.0;
-    c.CHARGE_MAX_SECONDS    = 180;
-    c.battery_cells         = 2;
-    c.espnow_enabled        = false;
-    c.telemetry_enabled     = true;
-    c.telemetry_rate_hz     = 20;
-    c.telemetry_bins_hz     = 5;
-    c.rover_enabled            = false;
-    c.rover_goal_cw            = true;
-    c.rover_sensor_height_mm   = 150.0;
-    c.rover_full_speed_mps     = 1.0;
-    c.rover_full_yaw_rate_dps  = 115.0;
-    c.rover_seek_vbatt         = 0.0;
-    c.rover_seek_after_s       = 600;
-    c.rover_entry_btx          = 1;
-    c.rover_exit_btx           = 2;
-    c.rover_lost_timeout_s     = 30;
-    c.rover_speed_limit_mps    = 0.5;
-    c.espnow_tx_power_dbm      = 19.5;
-    c.cmd_key                  = 0;
-    c.imu_required             = true;
-    // DSP: the STM32 v2 app defaults (bins 0-4 = Tx CH 1-5, then 62.5 kHz, 46.875 kHz, off)
-    static const double BIN_HZ[8] = {53333.3, 55315.5, 51323.2, 57347.7, 49344.6, 62500.0, 46875.0, 0.0};
-    c.dsp_frame_period_us      = 10000;
-    c.dsp_sensors              = 2;
-    for (int b = 0; b < 8; b++) c.dsp_bin_hz[b] = BIN_HZ[b];
-    c.dsp_xy_mask              = 0;
-    c.dsp_slow_adc             = 1;
-    c.dsp_pga                  = -1;
-    c.dsp_lanes                = 2;
-    c.usb_drive                = true;
+    return nullptr;
+}
+static int choice_value(const char* opts, const char* name)
+{
+    int pos = 0;
+    const size_t n = strlen(name);
+    for (const char* s = opts; *s; pos++) {
+        const char* end = strchr(s, '|');
+        if (!end) end = s + strlen(s);
+        const char* eq = (const char*)memchr(s, '=', end - s);
+        const size_t len = (eq ? eq : end) - s;
+        if (len == n && !strncmp(s, name, n)) return eq ? atoi(eq + 1) : pos;
+        s = *end ? end + 1 : end;
+    }
+    return -1;
+}
+
+static double num_get(const DeviceConfig& c, const SettingDef& e)
+{
+    const void* p = fptr(c, e);
+    switch (e.type) {
+        case T_U8: case T_CHOICE: return *(const uint8_t*)p;
+        case T_I32: case T_IBOOL: return *(const int*)p;
+        case T_BOOL:              return *(const bool*)p;
+        case T_F32:               return *(const float*)p;
+        case T_F64:               return *(const double*)p;
+        case T_LONG:              return *(const long*)p;
+        default:                  return 0;
+    }
+}
+static void num_set(DeviceConfig& c, const SettingDef& e, double v)
+{
+    void* p = fptr(c, e);
+    switch (e.type) {
+        case T_U8: case T_CHOICE: *(uint8_t*)p = (uint8_t)v; break;
+        case T_I32: case T_IBOOL: *(int*)p = (int)v; break;
+        case T_BOOL:              *(bool*)p = v != 0; break;
+        case T_F32:               *(float*)p = (float)v; break;
+        case T_F64:               *(double*)p = v; break;
+        case T_LONG:              *(long*)p = (long)v; break;
+        default: break;
+    }
+}
+static void set_default(DeviceConfig& c, const SettingDef& e)
+{
+    if (e.type == T_TEXT) strcpy((char*)fptr(c, e), e.opts);
+    else num_set(c, e, e.def);
+}
+static bool in_range(const SettingDef& e, double v)
+{
+    if (!isfinite(v)) return false;
+    if (e.type == T_CHOICE) { size_t n; return v >= 0 && v <= 255 && choice_name(e.opts, (int)v, &n); }
+    if ((e.flags & F_ZERO_OFF) && v == 0.0) return true;
+    if (!isnan(e.lo) && v < e.lo) return false;
+    if (!isnan(e.hi) && v > e.hi) return false;
+    return true;
+}
+
+// The value of one key into a JSON variant, with the same C type as before the table (the same JSON text).
+static void put_value(JsonVariant v, const SettingDef& e, const DeviceConfig& c)
+{
+    const void* p = fptr(c, e);
+    switch (e.type) {
+        case T_TEXT:  v.set((const char*)p); break;
+        case T_U8:    v.set(*(const uint8_t*)p); break;
+        case T_I32:   v.set(*(const int*)p); break;
+        case T_IBOOL: v.set((bool)*(const int*)p); break;  // false = NORMAL, true = REVERSE
+        case T_BOOL:  v.set(*(const bool*)p); break;
+        case T_F32:   v.set(*(const float*)p); break;
+        case T_F64:   v.set(*(const double*)p); break;
+        case T_LONG:  v.set(*(const long*)p); break;
+        case T_CHOICE: {
+            size_t n;
+            const char* s = choice_name(e.opts, *(const uint8_t*)p, &n);
+            if (s) v.set(JsonString(s, n));  // a copy: a static JsonString is read up to its 0, not its size
+            else v.set(*(const uint8_t*)p);
+            break;
+        }
+    }
+}
+
+// Values that took their default, for the USB port and the log (msc_fat_bad_value_pop). Oldest dropped when full.
+struct BadNote { uint8_t idx, src; char val[26]; };
+static BadNote s_bad[8];
+static uint8_t s_bad_head = 0, s_bad_n = 0;
+static bool    s_bad_quiet = false;  // a trial set on a copy: no note
+static int     s_bad_count = 0;      // every default taken since the start (the self-check reads it)
+
+static void note_bad(DeviceConfig& c, int idx, const char* val, uint8_t src)
+{
+    set_default(c, SETTINGS[idx]);
+    s_bad_count++;
+    if (s_bad_quiet) return;
+    if (s_bad_n == 8) { s_bad_head = (s_bad_head + 1) % 8; s_bad_n--; }
+    BadNote& b = s_bad[(s_bad_head + s_bad_n) % 8];
+    s_bad_n++;
+    b.idx = (uint8_t)idx;
+    b.src = src;
+    snprintf(b.val, sizeof(b.val), "%s", val);
+}
+
+bool msc_fat_bad_value_pop(char* line, size_t cap, int* source)
+{
+    if (!s_bad_n) return false;
+    const BadNote b = s_bad[s_bad_head];
+    s_bad_head = (s_bad_head + 1) % 8;
+    s_bad_n--;
+    const SettingDef& e = SETTINGS[b.idx];
+    JsonDocument d;  // the default in the form of "get"
+    DeviceConfig* tmp = (DeviceConfig*)calloc(1, sizeof(DeviceConfig));
+    char def[40] = "?";
+    if (tmp) {
+        set_default(*tmp, e);
+        put_value(d.to<JsonVariant>(), e, *tmp);
+        serializeJson(d, def, sizeof(def));
+        free(tmp);
+    }
+    static const char* const SRC[] = {"config.json", "NVS", "set", "save"};
+    snprintf(line, cap, "%s=%s from %s: default %s", e.name, b.val, SRC[b.src & 3], def);
+    *source = b.src;
+    return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helpers: Validation / clamping
+// Helpers: Defaults
+// ─────────────────────────────────────────────────────────────────────────────
+static void populate_defaults(DeviceConfig& c)
+{
+    for (const SettingDef& e : SETTINGS) set_default(c, e);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers: range check, then the special rules
 // ─────────────────────────────────────────────────────────────────────────────
 static inline int clamp_pwm(int v) {
     if (v < PWM_ABS_MIN) v = PWM_ABS_MIN;
@@ -287,239 +435,183 @@ static inline int clamp_pwm(int v) {
     return v;
 }
 
-static void validate_config(DeviceConfig& c)
+// The rules a min and max cannot hold (as up to 0.5.111). They move a value; they never take a default.
+static void settings_special(DeviceConfig& c)
 {
-    // Channel
-    if (c.rx_channel < 1 || c.rx_channel > 5) c.rx_channel = 1;
     c.telemetry_rate_hz = rec::rateNearest(c.telemetry_rate_hz);  // 100/N Hz only
     c.telemetry_bins_hz = c.telemetry_bins_hz <= 0 ? 0 : rec::rateNearest(c.telemetry_bins_hz);  // 0 = off
-    if (c.battery_cells < 1 || c.battery_cells > 12) c.battery_cells = 2;
-
-    // Throttle range sanity
-    c.CRUISE_THROTTLE   = constrain(c.CRUISE_THROTTLE, 1000, 2000);
-    c.CREEP_THROTTLE    = constrain(c.CREEP_THROTTLE,  1000, 2000);
-
-    // PWM output limits – must satisfy MIN > PWM_ABS_MIN, MAX < PWM_ABS_MAX
-    // and DEFAULT must be within [MIN, MAX].
-    auto fix_out = [](int& d, int& lo, int& hi) {
-        lo = constrain(lo, PWM_ABS_MIN, PWM_ABS_MAX);
-        hi = constrain(hi, PWM_ABS_MIN, PWM_ABS_MAX);
-        if (lo > hi) {
-            lo = constrain(hi - 100, PWM_ABS_MIN, PWM_ABS_MAX);
-            hi = constrain(lo + 100, PWM_ABS_MIN, PWM_ABS_MAX);
+    // Vehicle name: 16 characters at most from A-Z a-z 0-9 space _ -; others removed; empty: "Vehicle"
+    {
+        char clean[17]; int n = 0;
+        for (int i = 0; c.vehicle_name[i] && i < 16; i++) {
+            const char ch = c.vehicle_name[i];
+            if (isalnum((unsigned char)ch) || ch == ' ' || ch == '_' || ch == '-') clean[n++] = ch;
         }
-        d  = constrain(d, lo, hi);
+        clean[n] = 0;
+        strcpy(c.vehicle_name, n ? clean : "Vehicle");
+    }
+    if (c.throttle_output == c.steer_output) c.throttle_output = c.steer_output == 2 ? 1 : 2;
+    // Servo outputs: MIN not above MAX, and the centre between them
+    auto fix_out = [](int& d, int& lo, int& hi) {
+        lo = clamp_pwm(lo);
+        hi = clamp_pwm(hi);
+        if (lo > hi) {
+            lo = clamp_pwm(hi - 100);
+            hi = clamp_pwm(lo + 100);
+        }
+        d = constrain(d, lo, hi);
     };
     fix_out(c.PWM_OUT_1_DEFAULT, c.PWM_OUT_1_MIN, c.PWM_OUT_1_MAX);
     fix_out(c.PWM_OUT_2_DEFAULT, c.PWM_OUT_2_MIN, c.PWM_OUT_2_MAX);
     fix_out(c.PWM_OUT_3_DEFAULT, c.PWM_OUT_3_MIN, c.PWM_OUT_3_MAX);
     fix_out(c.PWM_OUT_4_DEFAULT, c.PWM_OUT_4_MIN, c.PWM_OUT_4_MAX);
+    c.espnow_tx_power_dbm = round(c.espnow_tx_power_dbm * 4.0) / 4.0;  // 0.25 dB steps
+}
 
-    // PID
-    if (c.kp < 0.0)  c.kp = 0.0;
-    if (c.ki < 0.0)  c.ki = 0.0;
-    if (c.kd < 0.0)  c.kd = 0.0;
-    if (c.pid_direction < 0 || c.pid_direction > 1) c.pid_direction = 0;
+// The field of one key as text, for a note.
+static void field_text(const DeviceConfig& c, const SettingDef& e, char* out, size_t cap)
+{
+    if (e.type == T_CHOICE) { snprintf(out, cap, "%u", (unsigned)*(const uint8_t*)fptr(c, e)); return; }
+    JsonDocument d;
+    put_value(d.to<JsonVariant>(), e, c);
+    serializeJson(d, out, cap);
+}
 
-    if (!isfinite(c.steering_rate_kp) || c.steering_rate_kp < 0.0) c.steering_rate_kp = 0.02;
-    if (!isfinite(c.steering_rate_ki) || c.steering_rate_ki < 0.0) c.steering_rate_ki = 0.01;
-    if (!isfinite(c.steering_rate_kd) || c.steering_rate_kd < 0.0) c.steering_rate_kd = 0.0;
-    if (c.steering_rate_pid_direction < 0 || c.steering_rate_pid_direction > 1) c.steering_rate_pid_direction = 0;
-    if (!isfinite(c.steering_rate_max_dps) || c.steering_rate_max_dps <= 0.0 || c.steering_rate_max_dps > 500.0) c.steering_rate_max_dps = 90.0;
-
-    // Stuck
-    if (c.stuck_threshold_mm < 1.0f)   c.stuck_threshold_mm = 1.0f;
-    if (c.stuck_timeout_ms   < 1000.0f) c.stuck_timeout_ms  = 1000.0f;
-
-    // BTx
-    if (c.BTxFollowChannel > 2)   c.BTxFollowChannel = 0;
-    c.BTxThreshold = constrain(c.BTxThreshold, 11, 2000);
-    if (c.BTxAccelRate     < 0.3) c.BTxAccelRate     = 0.3;
-    if (c.BTxCreepDuration < 1)   c.BTxCreepDuration = 1;
-
-    // Sine
-    if (c.SineSwerveFrequency < 1) c.SineSwerveFrequency = 1;
-
-    // Charging: the STM32 application limits (TrailTracer-Rx-STM32 rctf_wfrx_dsp.h): stop voltage
-    // 16.0 V, current 6.0 A, charge time 3600 s. The ESP32 sends 2 x CHARGE_MAX_SECONDS (as shipped
-    // units do), so 1800 is the highest setting with an effect. Above a limit the STM32 used the limit.
-    if (c.CHARGE_VBATT_STOP  < 6.0)  c.CHARGE_VBATT_STOP  = 6.0;
-    if (c.CHARGE_VBATT_STOP  > 16.0) c.CHARGE_VBATT_STOP  = 16.0;
-    if (c.CHARGE_MAX_CURRENT < 0.1)  c.CHARGE_MAX_CURRENT = 0.1;
-    if (c.CHARGE_MAX_CURRENT > 6.0) c.CHARGE_MAX_CURRENT = 6.0;
-    if (c.CHARGE_MAX_SECONDS < 5)   c.CHARGE_MAX_SECONDS = 5;
-    if (c.CHARGE_MAX_SECONDS > 1800) c.CHARGE_MAX_SECONDS = 1800;
-
-    // Rover autopilot
-    c.rover_sensor_height_mm  = constrain(c.rover_sensor_height_mm, 30.0, 500.0);
-    c.rover_full_speed_mps    = constrain(c.rover_full_speed_mps, 0.1, 5.0);
-    c.rover_full_yaw_rate_dps = constrain(c.rover_full_yaw_rate_dps, 10.0, 720.0);
-    if (c.rover_seek_vbatt != 0.0) c.rover_seek_vbatt = constrain(c.rover_seek_vbatt, 6.0, 26.0);
-    if (c.rover_seek_after_s < 0)   c.rover_seek_after_s = 0;
-    if (c.rover_entry_btx > 2)      c.rover_entry_btx = 0;
-    if (c.rover_exit_btx > 2)       c.rover_exit_btx = 0;
-    if (c.rover_lost_timeout_s < 0) c.rover_lost_timeout_s = 0;
-    c.rover_speed_limit_mps   = constrain(c.rover_speed_limit_mps, 0.0, 5.0);
-    c.espnow_tx_power_dbm     = round(constrain(c.espnow_tx_power_dbm, 2.0, 19.5) * 4.0) / 4.0;
-
-    // DSP: the widest ranges of the STM32 v2 apps; the STM32 clamps to its own and answers the value in effect
-    c.dsp_frame_period_us = constrain(c.dsp_frame_period_us, DSP_FRAME_PERIOD_MIN_US, 655350);
-    c.dsp_sensors         = constrain(c.dsp_sensors, 1, 2);
-    for (int b = 0; b < 8; b++)
-        if (!isfinite(c.dsp_bin_hz[b]) || c.dsp_bin_hz[b] < 0.0) c.dsp_bin_hz[b] = 0.0;
-        else if (c.dsp_bin_hz[b] != 0.0) c.dsp_bin_hz[b] = constrain(c.dsp_bin_hz[b], 42500.0, 120000.0);
-    c.dsp_xy_mask         = constrain(c.dsp_xy_mask, 0, 255);
-    c.dsp_slow_adc        = constrain(c.dsp_slow_adc, 0, 1);
-    c.dsp_pga             = constrain(c.dsp_pga, -1, 2);
-    c.dsp_lanes           = constrain(c.dsp_lanes, 0, 3);
+// Each key in its range (else its default, with a note), then the special rules.
+static void settings_check(DeviceConfig& c, uint8_t src)
+{
+    for (int i = 0; i < N_SETTINGS; i++) {
+        const SettingDef& e = SETTINGS[i];
+        if (e.type == T_TEXT || e.type == T_BOOL) continue;
+        if (in_range(e, num_get(c, e))) continue;
+        char txt[26];
+        field_text(c, e, txt, sizeof(txt));
+        note_bad(c, i, txt, src);
+    }
+    settings_special(c);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helpers: NVS (Preferences)
+// Helpers: NVS. The same key and the same NVS type per key as up to 0.5.111 (Preferences: putBool = u8,
+// putInt and putLong = i32, putFloat and putDouble = blob, putString = string).
 // ─────────────────────────────────────────────────────────────────────────────
+enum : uint8_t { K_U8, K_I32, K_STR, K_B4, K_B8 };
+static uint8_t nvs_kind(uint8_t type)
+{
+    switch (type) {
+        case T_TEXT: return K_STR;
+        case T_U8: case T_BOOL: case T_CHOICE: return K_U8;
+        case T_I32: case T_IBOOL: case T_LONG: return K_I32;
+        case T_F32: return K_B4;
+        default: return K_B8;
+    }
+}
+
+struct NvsStore {
+    nvs_handle_t h = 0;
+    bool ok = false, rw = false;
+    bool open(bool write)
+    {
+        rw = write;
+        ok = nvs_open(NVS_NAMESPACE, write ? NVS_READWRITE : NVS_READONLY, &h) == ESP_OK;
+        return ok;
+    }
+    void close() { if (ok) { if (rw) nvs_commit(h); nvs_close(h); } ok = false; }
+    bool exists(const char* key)
+    {
+        uint64_t t;
+        size_t len = 0;
+        return nvs_get_i8(h, key, (int8_t*)&t) == ESP_OK || nvs_get_u8(h, key, (uint8_t*)&t) == ESP_OK
+            || nvs_get_i16(h, key, (int16_t*)&t) == ESP_OK || nvs_get_u16(h, key, (uint16_t*)&t) == ESP_OK
+            || nvs_get_i32(h, key, (int32_t*)&t) == ESP_OK || nvs_get_u32(h, key, (uint32_t*)&t) == ESP_OK
+            || nvs_get_i64(h, key, (int64_t*)&t) == ESP_OK || nvs_get_u64(h, key, &t) == ESP_OK
+            || nvs_get_str(h, key, nullptr, &len) == ESP_OK || nvs_get_blob(h, key, nullptr, &len) == ESP_OK;
+    }
+    // 0 read, 1 not stored, 2 stored with another type or size
+    int get(const char* key, uint8_t kind, void* out, size_t cap)
+    {
+        esp_err_t r;
+        size_t n = cap;
+        switch (kind) {
+            case K_U8:  r = nvs_get_u8(h, key, (uint8_t*)out); break;
+            case K_I32: r = nvs_get_i32(h, key, (int32_t*)out); break;
+            case K_STR: r = nvs_get_str(h, key, (char*)out, &n); break;
+            default:
+                r = nvs_get_blob(h, key, out, &n);
+                if (r == ESP_OK && n != cap) return 2;
+                break;
+        }
+        if (r == ESP_OK) return 0;
+        return exists(key) ? 2 : 1;
+    }
+    void put(const char* key, uint8_t kind, const void* v, size_t n)
+    {
+        switch (kind) {
+            case K_U8:  nvs_set_u8(h, key, *(const uint8_t*)v); break;
+            case K_I32: nvs_set_i32(h, key, *(const int32_t*)v); break;
+            case K_STR: nvs_set_str(h, key, (const char*)v); break;
+            default:    nvs_set_blob(h, key, v, n); break;
+        }
+    }
+};
+
+template <class Store>
+static void prefs_save_to(Store& s, const DeviceConfig& c)
+{
+    for (const SettingDef& e : SETTINGS) {
+        const void* p = fptr(c, e);
+        const uint8_t k = nvs_kind(e.type);
+        if (e.type == T_BOOL) { const uint8_t b = *(const bool*)p ? 1 : 0; s.put(e.nvs, K_U8, &b, 1); }
+        else s.put(e.nvs, k, p, k == K_B4 ? 4 : k == K_B8 ? 8 : 0);
+    }
+    const uint8_t one = 1;
+    s.put("chgReal", K_U8, &one, 1);  // CHARGE_MAX_SECONDS holds the real time (0.5.69)
+}
+
+template <class Store>
+static bool prefs_load_from(Store& s, DeviceConfig& c)
+{
+    uint8_t b = 0;
+    if (s.get("vID", K_U8, &b, 1) == 1) return false;  // the namespace is empty
+    for (int i = 0; i < N_SETTINGS; i++) {
+        const SettingDef& e = SETTINGS[i];
+        union { uint8_t u8; int32_t i32; float f; double d; char s[33]; } v;
+        const uint8_t k = nvs_kind(e.type);
+        const int r = s.get(e.nvs, k, &v, k == K_STR ? sizeof(v.s) : k == K_B4 ? 4 : k == K_B8 ? 8 : k == K_U8 ? 1 : 4);
+        if (r == 1) continue;  // not stored (a new setting): keeps its value
+        if (r == 2) { note_bad(c, i, "(another NVS type)", SRC_NVS); continue; }
+        void* p = fptr(c, e);
+        switch (e.type) {
+            case T_TEXT:  strncpy((char*)p, v.s, 16); ((char*)p)[16] = 0; break;
+            case T_BOOL:  *(bool*)p = v.u8 == 1; break;  // as Preferences::getBool
+            case T_U8: case T_CHOICE: *(uint8_t*)p = v.u8; break;
+            case T_F32:   *(float*)p = v.f; break;
+            case T_F64:   *(double*)p = v.d; break;
+            default:      memcpy(p, &v.i32, 4); break;  // T_I32, T_IBOOL, T_LONG
+        }
+    }
+    // A board updated from 0.5.68 or older drove its motor controllers over CAN: keep that, not auto.
+    if (s.get("drvOut", K_U8, &b, 1) == 1) c.drive_output = 2;
+    // Up to 0.5.68 the value was half the charge time (the clamp as up to 0.5.111)
+    if (s.get("chgReal", K_U8, &b, 1) != 0 || b != 1) c.CHARGE_MAX_SECONDS = constrain(c.CHARGE_MAX_SECONDS * 2, 10, 3600);
+    return true;
+}
+
 static void prefs_save(const DeviceConfig& c)
 {
-    Preferences p;
-    p.begin(NVS_NAMESPACE, false);
-    p.putUChar("vID",      c.vehicleID);
-    p.putUChar("rxCh",     c.rx_channel);
-    p.putInt("crsThr",     c.CRUISE_THROTTLE);
-    p.putInt("crpThr",     c.CREEP_THROTTLE);
-    p.putInt("p1Def",      c.PWM_OUT_1_DEFAULT);
-    p.putInt("p1Min",      c.PWM_OUT_1_MIN);
-    p.putInt("p1Max",      c.PWM_OUT_1_MAX);
-    p.putInt("p2Def",      c.PWM_OUT_2_DEFAULT);
-    p.putInt("p2Min",      c.PWM_OUT_2_MIN);
-    p.putInt("p2Max",      c.PWM_OUT_2_MAX);
-    p.putInt("p3Def",      c.PWM_OUT_3_DEFAULT);
-    p.putInt("p3Min",      c.PWM_OUT_3_MIN);
-    p.putInt("p3Max",      c.PWM_OUT_3_MAX);
-    p.putInt("p4Def",      c.PWM_OUT_4_DEFAULT);
-    p.putInt("p4Min",      c.PWM_OUT_4_MIN);
-    p.putInt("p4Max",      c.PWM_OUT_4_MAX);
-    p.putDouble("kp",      c.kp);
-    p.putDouble("ki",      c.ki);
-    p.putDouble("kd",      c.kd);
-    p.putInt("pidDir",     c.pid_direction);
-    p.putDouble("rateKp", c.steering_rate_kp);
-    p.putDouble("rateKi", c.steering_rate_ki);
-    p.putDouble("rateKd", c.steering_rate_kd);
-    p.putInt("rateDir", c.steering_rate_pid_direction);
-    p.putDouble("rateMax", c.steering_rate_max_dps);
-    p.putBool("enS2",      c.enable_sensor_2);
-    p.putFloat("stThresh", c.stuck_threshold_mm);
-    p.putFloat("stTout",   c.stuck_timeout_ms);
-    p.putUChar("btxCh",    c.BTxFollowChannel);
-    p.putInt("btxThr",     c.BTxThreshold);
-    p.putDouble("btxAcc",  c.BTxAccelRate);
-    p.putInt("btxDur",     c.BTxCreepDuration);
-    p.putUChar("sineAmp",  c.SineSwerveAmplitude);
-    p.putUChar("sineFrq",  c.SineSwerveFrequency);
-    p.putDouble("chgVStp", c.CHARGE_VBATT_STOP);
-    p.putDouble("chgIMax", c.CHARGE_MAX_CURRENT);
-    p.putInt("chgTSec",    c.CHARGE_MAX_SECONDS);
-    p.putUChar("batCells", c.battery_cells);
-    p.putBool("espNow",    c.espnow_enabled);
-    p.putBool("telEn",     c.telemetry_enabled);
-    p.putInt("telHz",      c.telemetry_rate_hz);
-    p.putInt("binHz",      c.telemetry_bins_hz);
-    p.putBool("rvEn",      c.rover_enabled);
-    p.putBool("rvCW",      c.rover_goal_cw);
-    p.putDouble("rvH",     c.rover_sensor_height_mm);
-    p.putDouble("rvVmax",  c.rover_full_speed_mps);
-    p.putDouble("rvWmax",  c.rover_full_yaw_rate_dps);
-    p.putDouble("rvSeekV", c.rover_seek_vbatt);
-    p.putInt("rvSeekS",    c.rover_seek_after_s);
-    p.putUChar("rvEntBtx", c.rover_entry_btx);
-    p.putUChar("rvExtBtx", c.rover_exit_btx);
-    p.putInt("rvLostS",    c.rover_lost_timeout_s);
-    p.putDouble("rvVlim",  c.rover_speed_limit_mps);
-    p.putDouble("txDbm",   c.espnow_tx_power_dbm);
-    p.putLong("cmdKey",    c.cmd_key);
-    p.putBool("imuReq",    c.imu_required);
-    p.putInt("dspPer",     c.dsp_frame_period_us);
-    p.putInt("dspSens",    c.dsp_sensors);
-    for (int b = 0; b < 8; b++) { char k[8]; snprintf(k, sizeof(k), "dspBin%d", b); p.putDouble(k, c.dsp_bin_hz[b]); }
-    p.putInt("dspXy",      c.dsp_xy_mask);
-    p.putInt("dspSlow",    c.dsp_slow_adc);
-    p.putInt("dspPga",     c.dsp_pga);
-    p.putInt("dspLanes",   c.dsp_lanes);
-    p.putBool("usbDrive",  c.usb_drive);
-    p.end();
+    NvsStore s;
+    if (!s.open(true)) return;
+    prefs_save_to(s, c);
+    s.close();
 }
 
 static bool prefs_load(DeviceConfig& c)
 {
-    Preferences p;
-    if (!p.begin(NVS_NAMESPACE, true)) return false;
-    if (!p.isKey("vID")) { p.end(); return false; } // namespace is empty
-
-    c.vehicleID             = p.getUChar("vID",      c.vehicleID);
-    c.rx_channel            = p.getUChar("rxCh",     c.rx_channel);
-    c.CRUISE_THROTTLE       = p.getInt("crsThr",     c.CRUISE_THROTTLE);
-    c.CREEP_THROTTLE        = p.getInt("crpThr",     c.CREEP_THROTTLE);
-    c.PWM_OUT_1_DEFAULT     = p.getInt("p1Def",      c.PWM_OUT_1_DEFAULT);
-    c.PWM_OUT_1_MIN         = p.getInt("p1Min",      c.PWM_OUT_1_MIN);
-    c.PWM_OUT_1_MAX         = p.getInt("p1Max",      c.PWM_OUT_1_MAX);
-    c.PWM_OUT_2_DEFAULT     = p.getInt("p2Def",      c.PWM_OUT_2_DEFAULT);
-    c.PWM_OUT_2_MIN         = p.getInt("p2Min",      c.PWM_OUT_2_MIN);
-    c.PWM_OUT_2_MAX         = p.getInt("p2Max",      c.PWM_OUT_2_MAX);
-    c.PWM_OUT_3_DEFAULT     = p.getInt("p3Def",      c.PWM_OUT_3_DEFAULT);
-    c.PWM_OUT_3_MIN         = p.getInt("p3Min",      c.PWM_OUT_3_MIN);
-    c.PWM_OUT_3_MAX         = p.getInt("p3Max",      c.PWM_OUT_3_MAX);
-    c.PWM_OUT_4_DEFAULT     = p.getInt("p4Def",      c.PWM_OUT_4_DEFAULT);
-    c.PWM_OUT_4_MIN         = p.getInt("p4Min",      c.PWM_OUT_4_MIN);
-    c.PWM_OUT_4_MAX         = p.getInt("p4Max",      c.PWM_OUT_4_MAX);
-    c.kp                    = p.getDouble("kp",      c.kp);
-    c.ki                    = p.getDouble("ki",      c.ki);
-    c.kd                    = p.getDouble("kd",      c.kd);
-    c.pid_direction         = p.getInt("pidDir",     c.pid_direction);
-    c.steering_rate_kp = p.getDouble("rateKp", c.steering_rate_kp);
-    c.steering_rate_ki = p.getDouble("rateKi", c.steering_rate_ki);
-    c.steering_rate_kd = p.getDouble("rateKd", c.steering_rate_kd);
-    c.steering_rate_pid_direction = p.getInt("rateDir", c.steering_rate_pid_direction);
-    c.steering_rate_max_dps = p.getDouble("rateMax", c.steering_rate_max_dps);
-    c.enable_sensor_2       = p.getBool("enS2",      c.enable_sensor_2);
-    c.stuck_threshold_mm    = p.getFloat("stThresh", c.stuck_threshold_mm);
-    c.stuck_timeout_ms      = p.getFloat("stTout",   c.stuck_timeout_ms);
-    c.BTxFollowChannel      = p.getUChar("btxCh",    c.BTxFollowChannel);
-    c.BTxThreshold          = p.getInt("btxThr", c.BTxThreshold);
-    c.BTxAccelRate          = p.getDouble("btxAcc",  c.BTxAccelRate);
-    c.BTxCreepDuration      = p.getInt("btxDur",     c.BTxCreepDuration);
-    c.SineSwerveAmplitude   = p.getUChar("sineAmp",  c.SineSwerveAmplitude);
-    c.SineSwerveFrequency   = p.getUChar("sineFrq",  c.SineSwerveFrequency);
-    c.CHARGE_VBATT_STOP     = p.getDouble("chgVStp", c.CHARGE_VBATT_STOP);
-    c.CHARGE_MAX_CURRENT    = p.getDouble("chgIMax", c.CHARGE_MAX_CURRENT);
-    c.CHARGE_MAX_SECONDS    = p.getInt("chgTSec",    c.CHARGE_MAX_SECONDS);
-    c.battery_cells         = p.getUChar("batCells", c.battery_cells);
-    c.espnow_enabled        = p.getBool("espNow",    c.espnow_enabled);
-    c.telemetry_enabled     = p.getBool("telEn",     c.telemetry_enabled);
-    c.telemetry_rate_hz     = p.getInt("telHz",      c.telemetry_rate_hz);
-    c.telemetry_bins_hz     = p.getInt("binHz",      c.telemetry_bins_hz);
-    c.rover_enabled            = p.getBool("rvEn",      c.rover_enabled);
-    c.rover_goal_cw            = p.getBool("rvCW",      c.rover_goal_cw);
-    c.rover_sensor_height_mm   = p.getDouble("rvH",     c.rover_sensor_height_mm);
-    c.rover_full_speed_mps     = p.getDouble("rvVmax",  c.rover_full_speed_mps);
-    c.rover_full_yaw_rate_dps  = p.getDouble("rvWmax",  c.rover_full_yaw_rate_dps);
-    c.rover_seek_vbatt         = p.getDouble("rvSeekV", c.rover_seek_vbatt);
-    c.rover_seek_after_s       = p.getInt("rvSeekS",    c.rover_seek_after_s);
-    c.rover_entry_btx          = p.getUChar("rvEntBtx", c.rover_entry_btx);
-    c.rover_exit_btx           = p.getUChar("rvExtBtx", c.rover_exit_btx);
-    c.rover_lost_timeout_s     = p.getInt("rvLostS",    c.rover_lost_timeout_s);
-    c.rover_speed_limit_mps    = p.getDouble("rvVlim",  c.rover_speed_limit_mps);
-    c.espnow_tx_power_dbm      = p.getDouble("txDbm",   c.espnow_tx_power_dbm);
-    c.cmd_key                  = p.getLong("cmdKey",    c.cmd_key);
-    c.imu_required             = p.getBool("imuReq",    c.imu_required);
-    c.dsp_frame_period_us      = p.getInt("dspPer",     c.dsp_frame_period_us);
-    c.dsp_sensors              = p.getInt("dspSens",    c.dsp_sensors);
-    for (int b = 0; b < 8; b++) { char k[8]; snprintf(k, sizeof(k), "dspBin%d", b); c.dsp_bin_hz[b] = p.getDouble(k, c.dsp_bin_hz[b]); }
-    c.dsp_xy_mask              = p.getInt("dspXy",      c.dsp_xy_mask);
-    c.dsp_slow_adc             = p.getInt("dspSlow",    c.dsp_slow_adc);
-    c.dsp_pga                  = p.getInt("dspPga",     c.dsp_pga);
-    c.dsp_lanes                = p.getInt("dspLanes",   c.dsp_lanes);
-    c.usb_drive                = p.getBool("usbDrive",  c.usb_drive);
-    p.end();
-    return true;
+    NvsStore s;
+    if (!s.open(false)) return false;
+    const bool r = prefs_load_from(s, c);
+    s.close();
+    return r;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -688,6 +780,54 @@ static DRESULT diskio_ioctl_cb(unsigned char pdrv, unsigned char cmd, void* buff
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 0.6.9: one disk identity per board. FatFs f_mkfs leaves the MBR disk signature 0 and takes the volume serial from
+// the clock (not set at the first boot), so every board formatted after an erase showed the PC the same disk.
+// Windows logged "Disk N has the same disk identifiers" (System, disk event 158) with two boards on one PC, then a
+// paging error on that drive and USB losses at the next detach (2026-10-19). Both values now come from
+// the chip MAC. Written only when they differ: once per board (a one-off flash write), never again.
+// ─────────────────────────────────────────────────────────────────────────────
+static uint8_t s_id_sec[STORAGE_SECTOR_SIZE];
+
+static uint32_t le32(const uint8_t* p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
+static void put_le32(uint8_t* p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }
+
+// The volume serial at its boot sector offset (FAT12/16: 39, FAT32: 67); false: not a FAT boot sector.
+static bool vbr_serial_offset(const uint8_t* b, unsigned* off) {
+    if (b[510] != 0x55 || b[511] != 0xAA) return false;
+    if (!memcmp(b + 82, "FAT32", 5)) { *off = 67; return true; }
+    if (!memcmp(b + 54, "FAT", 3)) { *off = 39; return true; }
+    return false;
+}
+
+static void drive_unique_ids() {
+    uint8_t mac[6];
+    if (esp_read_mac(mac, ESP_MAC_WIFI_STA) != ESP_OK) return;
+    uint32_t id = ((uint32_t)mac[2] << 24) | ((uint32_t)mac[3] << 16) | ((uint32_t)mac[4] << 8) | mac[5];
+    id ^= 0x54540000u;  // "TT": never 0 for a real MAC tail
+    if (!id) id = 0x54540001u;
+    if (diskio_read_cb(s_pdrv, s_id_sec, 0, 1) != RES_OK) return;
+    unsigned off = 0;
+    uint32_t vbr_lba = 0;
+    if (!vbr_serial_offset(s_id_sec, &off)) {  // not a boot sector: an MBR with one partition
+        if (s_id_sec[510] != 0x55 || s_id_sec[511] != 0xAA) return;
+        vbr_lba = le32(s_id_sec + 0x1BE + 8);
+        if (le32(s_id_sec + 440) != id) {
+            put_le32(s_id_sec + 440, id);
+            if (diskio_write_cb(s_pdrv, s_id_sec, 0, 1) != RES_OK) return;
+            ESP_LOGI(TAG, "drive: disk signature %08lx", (unsigned long)id);
+        }
+        if (!vbr_lba || vbr_lba >= s_sector_count) return;
+        if (diskio_read_cb(s_pdrv, s_id_sec, vbr_lba, 1) != RES_OK) return;
+        if (!vbr_serial_offset(s_id_sec, &off)) return;
+    }
+    if (le32(s_id_sec + off) != id) {
+        put_le32(s_id_sec + off, id);
+        if (diskio_write_cb(s_pdrv, s_id_sec, vbr_lba, 1) != RES_OK) return;
+        ESP_LOGI(TAG, "drive: volume serial %08lx", (unsigned long)id);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // FatFS mount / unmount
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -698,12 +838,18 @@ static bool fatfs_mount()
 
     ESP_LOGW(TAG, "f_mount failed (%d); formatting...", res);
     // Format the volume (FM_FAT = FAT12/16, au=0 = default cluster size)
-    BYTE work[FF_MAX_SS];
-    res = f_mkfs(FAT_DRIVE, FM_FAT, 0, work, sizeof(work));
+    BYTE* work = (BYTE*)malloc(FF_MAX_SS);  // 4 KB: not on the loop() stack
+    if (!work) {
+        ESP_LOGE(TAG, "f_mkfs work buffer: no memory");
+        return false;
+    }
+    res = f_mkfs(FAT_DRIVE, FM_FAT, 0, work, FF_MAX_SS);
+    free(work);
     if (res != FR_OK) {
         ESP_LOGE(TAG, "f_mkfs failed (%d)", res);
         return false;
     }
+    drive_unique_ids();  // 0.6.9: before the mount, so FatFs reads the final boot sector
     res = f_mount(&s_fatfs, FAT_DRIVE, 1);
     if (res != FR_OK) {
         ESP_LOGE(TAG, "f_mount after mkfs failed (%d)", res);
@@ -739,70 +885,8 @@ static const char* dsp_bin_key(int b)
 // with_eff: also the read-only DSP values in effect (<key>_eff; null = no STM32 answer yet), for get and list.
 static void config_to_doc(const DeviceConfig& c, JsonDocument& doc, bool with_eff = false)
 {
-    doc["vehicleID"]             = c.vehicleID;
-    doc["rx_channel"]            = c.rx_channel;
-    doc["CRUISE_THROTTLE"]       = c.CRUISE_THROTTLE;
-    doc["CREEP_THROTTLE"]        = c.CREEP_THROTTLE;
-    doc["PWM_OUT_1_DEFAULT"]     = c.PWM_OUT_1_DEFAULT;
-    doc["PWM_OUT_1_MIN"]         = c.PWM_OUT_1_MIN;
-    doc["PWM_OUT_1_MAX"]         = c.PWM_OUT_1_MAX;
-    doc["PWM_OUT_2_DEFAULT"]     = c.PWM_OUT_2_DEFAULT;
-    doc["PWM_OUT_2_MIN"]         = c.PWM_OUT_2_MIN;
-    doc["PWM_OUT_2_MAX"]         = c.PWM_OUT_2_MAX;
-    doc["PWM_OUT_3_DEFAULT"]     = c.PWM_OUT_3_DEFAULT;
-    doc["PWM_OUT_3_MIN"]         = c.PWM_OUT_3_MIN;
-    doc["PWM_OUT_3_MAX"]         = c.PWM_OUT_3_MAX;
-    doc["PWM_OUT_4_DEFAULT"]     = c.PWM_OUT_4_DEFAULT;
-    doc["PWM_OUT_4_MIN"]         = c.PWM_OUT_4_MIN;
-    doc["PWM_OUT_4_MAX"]         = c.PWM_OUT_4_MAX;
-    doc["kp"]                    = c.kp;
-    doc["ki"]                    = c.ki;
-    doc["kd"]                    = c.kd;
-    doc["pid_direction"]         = (bool)c.pid_direction;   // false=NORMAL, true=REVERSE
-    doc["steering_rate_kp"] = c.steering_rate_kp;
-    doc["steering_rate_ki"] = c.steering_rate_ki;
-    doc["steering_rate_kd"] = c.steering_rate_kd;
-    doc["steering_rate_pid_direction"] = (bool)c.steering_rate_pid_direction;
-    doc["steering_rate_max_dps"] = c.steering_rate_max_dps;
-    doc["enable_sensor_2"]       = c.enable_sensor_2;
-    doc["stuck_threshold_mm"]    = c.stuck_threshold_mm;
-    doc["stuck_timeout_ms"]      = c.stuck_timeout_ms;
-    doc["BTxFollowChannel"]      = c.BTxFollowChannel;
-    doc["BTxThreshold"]          = c.BTxThreshold;
-    doc["BTxAccelRate"]          = c.BTxAccelRate;
-    doc["BTxCreepDuration"]      = c.BTxCreepDuration;
-    doc["SineSwerveAmplitude"]   = c.SineSwerveAmplitude;
-    doc["SineSwerveFrequency"]   = c.SineSwerveFrequency;
-    doc["CHARGE_VBATT_STOP"]     = c.CHARGE_VBATT_STOP;
-    doc["CHARGE_MAX_CURRENT"]    = c.CHARGE_MAX_CURRENT;
-    doc["CHARGE_MAX_SECONDS"]    = c.CHARGE_MAX_SECONDS;
-    doc["battery_cells"]         = c.battery_cells;
-    doc["espnow_enabled"]        = c.espnow_enabled;
-    doc["telemetry_enabled"]     = c.telemetry_enabled;
-    doc["telemetry_rate_hz"]     = c.telemetry_rate_hz;
-    doc["telemetry_bins_hz"]     = c.telemetry_bins_hz;
-    doc["rover_enabled"]            = c.rover_enabled;
-    doc["rover_goal_cw"]            = c.rover_goal_cw;
-    doc["rover_sensor_height_mm"]   = c.rover_sensor_height_mm;
-    doc["rover_full_speed_mps"]     = c.rover_full_speed_mps;
-    doc["rover_full_yaw_rate_dps"]  = c.rover_full_yaw_rate_dps;
-    doc["rover_seek_vbatt"]         = c.rover_seek_vbatt;
-    doc["rover_seek_after_s"]       = c.rover_seek_after_s;
-    doc["rover_entry_btx"]          = c.rover_entry_btx;
-    doc["rover_exit_btx"]           = c.rover_exit_btx;
-    doc["rover_lost_timeout_s"]     = c.rover_lost_timeout_s;
-    doc["rover_speed_limit_mps"]    = c.rover_speed_limit_mps;
-    doc["espnow_tx_power_dbm"]      = c.espnow_tx_power_dbm;
-    doc["cmd_key"]                  = c.cmd_key;
-    doc["imu_required"]             = c.imu_required;
-    doc["dsp_frame_period_us"]      = c.dsp_frame_period_us;
-    doc["dsp_sensors"]              = c.dsp_sensors;
-    for (int b = 0; b < 8; b++) doc[dsp_bin_key(b)] = c.dsp_bin_hz[b];
-    doc["dsp_xy_mask"]              = c.dsp_xy_mask;
-    doc["dsp_slow_adc"]             = c.dsp_slow_adc;
-    doc["dsp_pga"]                  = c.dsp_pga;
-    doc["dsp_lanes"]                = c.dsp_lanes;
-    doc["usb_drive"]                = c.usb_drive;
+    for (const SettingDef& e : SETTINGS)
+        if (!(e.flags & F_LEGACY)) put_value(doc[JsonString(e.name, true)].to<JsonVariant>(), e, c);
     if (!with_eff) return;
     auto eff = [&](const String& key, int i, bool is_int) {
         if (isnan(g_dsp_eff[i])) doc[key] = nullptr;
@@ -816,6 +900,9 @@ static void config_to_doc(const DeviceConfig& c, JsonDocument& doc, bool with_ef
     eff("dsp_slow_adc_eff", DSP_EFF_SLOW, true);
     eff("dsp_pga_eff", DSP_EFF_PGA, true);
     eff("dsp_lanes_eff", DSP_EFF_LANES, true);
+    // Wi-Fi network (NVS only, not in config.json): the SSID, and whether a password is stored. Never the password.
+    doc["wifi_ssid"]                = msc_fat_wifi_ssid();
+    doc["wifi_password"]            = msc_fat_wifi_has_password() ? "set" : "not set";
 }
 
 static bool config_write_json(const DeviceConfig& c)
@@ -849,7 +936,7 @@ static bool config_write_json(const DeviceConfig& c)
     out_str += json_str;
     out_str += "\n";
 
-    FIL fil;
+    FIL& fil = s_fil;  // not on the stack: a FIL holds a 4 KB sector buffer (see s_fil)
     FRESULT res = f_open(&fil, s_config_path, FA_CREATE_ALWAYS | FA_WRITE);
     if (res != FR_OK) {
         ESP_LOGE(TAG, "f_open write failed (%d)", res);
@@ -870,13 +957,13 @@ static bool config_write_json(const DeviceConfig& c)
 static bool config_from_json_text(DeviceConfig& c, const String& json_no_comments);
 
 // Parse s_config_path on the mounted FAT volume into cfg.
-// Unknown / invalid fields are silently ignored; previously valid fields keep
-// their current (NVS-loaded) value.
+// Unknown keys are ignored; a key that is not there keeps its current (NVS-loaded) value; a value of the
+// wrong type or out of range takes its default (with a note).
 static bool s_rate_config_missing = false;
 
 static bool config_read_json(DeviceConfig& c)
 {
-    FIL fil;
+    FIL& fil = s_fil;  // not on the stack (see s_fil)
     FRESULT res = f_open(&fil, s_config_path, FA_READ);
     if (res != FR_OK) {
         ESP_LOGW(TAG, "config.json not found (%d)", res);
@@ -965,7 +1052,48 @@ static bool config_read_json(DeviceConfig& c)
     return config_from_json_text(c, json_no_comments);
 }
 
-// Apply the keys present in a JSON object to c (config.json content, or one CMD set over ESP-NOW).
+// One value for one table key (config.json, or a set). A value of the wrong type or out of range takes the
+// key's default, with a note. false: a bad value.
+static bool json_read_one(DeviceConfig& c, int i, JsonVariantConst v, uint8_t src)
+{
+    const SettingDef& e = SETTINGS[i];
+    void* p = fptr(c, e);
+    bool num_ok = false;
+    double num = 0;
+    switch (e.type) {
+        case T_TEXT:
+            if (v.is<const char*>()) { strncpy((char*)p, v.as<const char*>(), 16); ((char*)p)[16] = 0; return true; }
+            break;
+        case T_CHOICE:
+            if (v.is<const char*>()) {
+                const int n = choice_value(e.opts, v.as<const char*>());
+                if (n >= 0) { *(uint8_t*)p = (uint8_t)n; return true; }
+            } else if ((e.flags & F_CHOICE_INT) && v.is<int>() && in_range(e, v.as<int>())) {
+                *(uint8_t*)p = (uint8_t)v.as<int>();
+                return true;
+            }
+            break;
+        case T_BOOL: case T_IBOOL:
+            if (v.is<bool>()) { num_set(c, e, v.as<bool>()); return true; }
+            break;
+        case T_U8: case T_I32:
+            if (v.is<int>()) { num = v.as<int>(); num_ok = true; }
+            break;
+        case T_LONG:
+            if (v.is<long>()) { num = v.as<long>(); num_ok = true; }
+            break;
+        default:  // T_F32, T_F64
+            if (v.is<double>() && !v.is<bool>()) { num = v.as<double>(); num_ok = true; }
+            break;
+    }
+    if (num_ok && in_range(e, num)) { num_set(c, e, num); return true; }
+    char txt[26];
+    serializeJson(v, txt, sizeof(txt));
+    note_bad(c, i, txt, src);
+    return false;
+}
+
+// Apply the keys present in a JSON object to c (config.json content). A key that is not there keeps its value.
 static bool config_from_json_text(DeviceConfig& c, const String& json_no_comments)
 {
     JsonDocument doc;
@@ -974,88 +1102,29 @@ static bool config_from_json_text(DeviceConfig& c, const String& json_no_comment
         ESP_LOGE(TAG, "JSON parse error: %s", err.c_str());
         return false;
     }
-
-    // Helper macro: update only if key present and value is the expected type.
-#define JSON_GET_INT(key, field)    if (doc[key].is<int>())    c.field = doc[key].as<int>()
-#define JSON_GET_UINT8(key, field)  if (doc[key].is<int>())    c.field = (uint8_t)constrain(doc[key].as<int>(), 0, 255)
-#define JSON_GET_DBL(key, field)    if (doc[key].is<double>()) c.field = doc[key].as<double>()
-#define JSON_GET_FLT(key, field)    if (doc[key].is<double>()) c.field = (float)doc[key].as<double>()
-#define JSON_GET_BOOL(key, field)   if (doc[key].is<bool>())   c.field = doc[key].as<bool>()
-
-    JSON_GET_UINT8("vehicleID",             vehicleID);
-    JSON_GET_UINT8("rx_channel",            rx_channel);
-    JSON_GET_INT("CRUISE_THROTTLE",         CRUISE_THROTTLE);
-    JSON_GET_INT("CREEP_THROTTLE",          CREEP_THROTTLE);
-    JSON_GET_INT("PWM_OUT_1_DEFAULT",       PWM_OUT_1_DEFAULT);
-    JSON_GET_INT("PWM_OUT_1_MIN",           PWM_OUT_1_MIN);
-    JSON_GET_INT("PWM_OUT_1_MAX",           PWM_OUT_1_MAX);
-    JSON_GET_INT("PWM_OUT_2_DEFAULT",       PWM_OUT_2_DEFAULT);
-    JSON_GET_INT("PWM_OUT_2_MIN",           PWM_OUT_2_MIN);
-    JSON_GET_INT("PWM_OUT_2_MAX",           PWM_OUT_2_MAX);
-    JSON_GET_INT("PWM_OUT_3_DEFAULT",       PWM_OUT_3_DEFAULT);
-    JSON_GET_INT("PWM_OUT_3_MIN",           PWM_OUT_3_MIN);
-    JSON_GET_INT("PWM_OUT_3_MAX",           PWM_OUT_3_MAX);
-    JSON_GET_INT("PWM_OUT_4_DEFAULT",       PWM_OUT_4_DEFAULT);
-    JSON_GET_INT("PWM_OUT_4_MIN",           PWM_OUT_4_MIN);
-    JSON_GET_INT("PWM_OUT_4_MAX",           PWM_OUT_4_MAX);
-    s_rate_config_missing = doc["steering_rate_kp"].isNull() || doc["steering_rate_ki"].isNull() || doc["steering_rate_kd"].isNull() || doc["steering_rate_pid_direction"].isNull() || doc["steering_rate_max_dps"].isNull();
-
-    JSON_GET_DBL("kp",                      kp);
-    JSON_GET_DBL("ki",                      ki);
-    JSON_GET_DBL("kd",                      kd);
-    JSON_GET_BOOL("pid_direction",          pid_direction);
-    JSON_GET_DBL("steering_rate_kp", steering_rate_kp);
-    JSON_GET_DBL("steering_rate_ki", steering_rate_ki);
-    JSON_GET_DBL("steering_rate_kd", steering_rate_kd);
-    JSON_GET_BOOL("steering_rate_pid_direction", steering_rate_pid_direction);
-    JSON_GET_DBL("steering_rate_max_dps", steering_rate_max_dps);
-    JSON_GET_BOOL("enable_sensor_2",        enable_sensor_2);
-    JSON_GET_FLT("stuck_threshold_mm",      stuck_threshold_mm);
-    JSON_GET_FLT("stuck_timeout_ms",        stuck_timeout_ms);
-    JSON_GET_UINT8("BTxFollowChannel",      BTxFollowChannel);
-    JSON_GET_INT("BTxThreshold",            BTxThreshold);
-    JSON_GET_INT("BTxFollowThreshold",      BTxThreshold);
-    JSON_GET_DBL("BTxAccelRate",            BTxAccelRate);
-    JSON_GET_INT("BTxCreepDuration",        BTxCreepDuration);
-    JSON_GET_UINT8("SineSwerveAmplitude",   SineSwerveAmplitude);
-    JSON_GET_UINT8("SineSwerveFrequency",   SineSwerveFrequency);
-    JSON_GET_DBL("CHARGE_VBATT_STOP",       CHARGE_VBATT_STOP);
-    JSON_GET_DBL("CHARGE_MAX_CURRENT",      CHARGE_MAX_CURRENT);
-    JSON_GET_INT("CHARGE_MAX_SECONDS",      CHARGE_MAX_SECONDS);
-    JSON_GET_UINT8("battery_cells",         battery_cells);
-    JSON_GET_BOOL("espnow_enabled",         espnow_enabled);
-    JSON_GET_BOOL("telemetry_enabled",      telemetry_enabled);
-    JSON_GET_INT("telemetry_rate_hz",       telemetry_rate_hz);
-    JSON_GET_INT("telemetry_bins_hz",       telemetry_bins_hz);
-    JSON_GET_BOOL("rover_enabled",           rover_enabled);
-    JSON_GET_BOOL("rover_goal_cw",           rover_goal_cw);
-    JSON_GET_DBL("rover_sensor_height_mm",   rover_sensor_height_mm);
-    JSON_GET_DBL("rover_full_speed_mps",     rover_full_speed_mps);
-    JSON_GET_DBL("rover_full_yaw_rate_dps",  rover_full_yaw_rate_dps);
-    JSON_GET_DBL("rover_seek_vbatt",         rover_seek_vbatt);
-    JSON_GET_INT("rover_seek_after_s",       rover_seek_after_s);
-    JSON_GET_UINT8("rover_entry_btx",        rover_entry_btx);
-    JSON_GET_UINT8("rover_exit_btx",         rover_exit_btx);
-    JSON_GET_INT("rover_lost_timeout_s",     rover_lost_timeout_s);
-    JSON_GET_DBL("rover_speed_limit_mps",    rover_speed_limit_mps);
-    JSON_GET_DBL("espnow_tx_power_dbm",      espnow_tx_power_dbm);
-    if (doc["cmd_key"].is<long>()) c.cmd_key = doc["cmd_key"].as<long>();
-    JSON_GET_BOOL("imu_required",           imu_required);
-    JSON_GET_INT("dsp_frame_period_us",     dsp_frame_period_us);
-    JSON_GET_INT("dsp_sensors",             dsp_sensors);
-    for (int b = 0; b < 8; b++) JSON_GET_DBL(dsp_bin_key(b), dsp_bin_hz[b]);
-    JSON_GET_INT("dsp_xy_mask",             dsp_xy_mask);
-    JSON_GET_INT("dsp_slow_adc",            dsp_slow_adc);
-    JSON_GET_INT("dsp_pga",                 dsp_pga);
-    JSON_GET_INT("dsp_lanes",               dsp_lanes);
-    JSON_GET_BOOL("usb_drive",              usb_drive);
-
-#undef JSON_GET_INT
-#undef JSON_GET_UINT8
-#undef JSON_GET_DBL
-#undef JSON_GET_FLT
-#undef JSON_GET_BOOL
-
+    // 0.5.69 names by function; an older config.json gives PWM_OUT_1_* (steering) and PWM_OUT_2_* (throttle).
+    // The new names win. The six keys follow each other in the table from steer_center_us.
+    static const char* const OLD_PWM[6] = {"PWM_OUT_1_DEFAULT", "PWM_OUT_1_MIN", "PWM_OUT_1_MAX",
+                                           "PWM_OUT_2_DEFAULT", "PWM_OUT_2_MIN", "PWM_OUT_2_MAX"};
+    const int steer_i = find_setting("steer_center_us");
+    for (int k = 0; k < 6; k++) {
+        JsonVariantConst v = doc[OLD_PWM[k]];
+        if (!v.isNull()) json_read_one(c, steer_i + k, v, SRC_JSON);
+    }
+    for (int i = 0; i < N_SETTINGS; i++) {
+        JsonVariantConst v = doc[SETTINGS[i].name];
+        if (!v.isNull()) json_read_one(c, i, v, SRC_JSON);
+    }
+    {   // the old name of BTxThreshold wins over the new one (as up to 0.5.111)
+        JsonVariantConst v = doc["BTxFollowThreshold"];
+        if (!v.isNull()) json_read_one(c, find_setting("BTxThreshold"), v, SRC_JSON);
+    }
+    // A config.json from 0.5.68 or older (PWM_OUT_1_DEFAULT, no steer_center_us): CHARGE_MAX_SECONDS was half the charge
+    // time; the file is written again in the 0.5.69 form after the read (s_rate_config_missing).
+    const bool legacy_file = doc["PWM_OUT_1_DEFAULT"].is<int>() && doc["steer_center_us"].isNull();
+    s_rate_config_missing = doc["steering_rate_kp"].isNull() || doc["steering_rate_ki"].isNull() || doc["steering_rate_kd"].isNull() || doc["steering_rate_pid_direction"].isNull() || doc["steering_rate_max_dps"].isNull() || legacy_file;
+    if (legacy_file && doc["CHARGE_MAX_SECONDS"].is<int>())
+        c.CHARGE_MAX_SECONDS = constrain(doc["CHARGE_MAX_SECONDS"].as<int>() * 2, 10, 3600);  // the clamp as up to 0.5.111
     return true;
 }
 
@@ -1154,7 +1223,7 @@ void msc_fat_init(DeviceConfig* cfg)
         // from defaults + NVS so the firmware can run.
         populate_defaults(*cfg);
         prefs_load(*cfg);
-        validate_config(*cfg);
+        settings_check(*cfg, SRC_NVS);
         return;
     }
 
@@ -1179,9 +1248,10 @@ void msc_fat_init(DeviceConfig* cfg)
     // 4. Start with compiled defaults, then override from NVS.
     populate_defaults(*cfg);
     prefs_load(*cfg);  // no-op if NVS is empty (first boot)
-    validate_config(*cfg);
+    settings_check(*cfg, SRC_NVS);
 
     // 5. Mount FAT, create config file on first boot, read it, unmount.
+    drive_unique_ids();  // 0.6.9: an existing drive gets its board's disk identity (once)
     if (fatfs_mount()) {
         // Search for any file matching *-config.json pattern; if found, use it.
         // Otherwise, s_config_path will remain at default "0:/config.json".
@@ -1201,9 +1271,11 @@ void msc_fat_init(DeviceConfig* cfg)
             ESP_LOGI(TAG, "config.json found; parsing");
             DeviceConfig file_cfg = *cfg;    // start from NVS base
             if (config_read_json(file_cfg)) {
-                validate_config(file_cfg);
+                settings_check(file_cfg, SRC_JSON);
+                // NVS only when config.json differs from it (a user edit): no NVS write at every boot.
+                const bool changed = memcmp(&file_cfg, cfg, sizeof(file_cfg)) != 0;
                 *cfg = file_cfg;
-                prefs_save(*cfg);
+                if (changed) prefs_save(*cfg);
                 if (s_rate_config_missing) config_write_json(*cfg);
             }
         }
@@ -1287,7 +1359,7 @@ bool msc_fat_loop(DeviceConfig* cfg)
     bool ok = config_read_json(new_cfg);
 
     if (ok) {
-        validate_config(new_cfg);
+        settings_check(new_cfg, SRC_JSON);
         record_config_stamp();
         fatfs_unmount();
         *cfg = new_cfg;
@@ -1305,20 +1377,13 @@ void msc_fat_save_nvs(const DeviceConfig* cfg)
 {
     if (!cfg) return;
     DeviceConfig tmp = *cfg;
-    validate_config(tmp);
+    settings_check(tmp, SRC_SAVE);
     prefs_save(tmp);
 }
 
-bool msc_fat_save_all(const DeviceConfig* cfg)
+// config.json from c, with the drive away from the PC during the write
+static bool json_save(const DeviceConfig& c)
 {
-    if (!cfg) return false;
-
-    DeviceConfig tmp = *cfg;
-    validate_config(tmp);
-
-    // Always persist to NVS first so settings survive reboot even if FAT write fails.
-    prefs_save(tmp);
-
     // A PC that has the drive mounted keeps its own copy of the FAT. The drive shows "no medium"
     // during the write and for 2 s after it, so the PC drops that copy and reads the drive again.
     // After msc_fat_eject the medium stays away.
@@ -1329,7 +1394,7 @@ bool msc_fat_save_all(const DeviceConfig* cfg)
         return false;
     }
 
-    bool ok = config_write_json(tmp);
+    bool ok = config_write_json(c);
     if (ok) {
         record_config_stamp();
     } else {
@@ -1337,6 +1402,18 @@ bool msc_fat_save_all(const DeviceConfig* cfg)
     }
     fatfs_unmount();
     return ok;
+}
+
+bool msc_fat_save_all(const DeviceConfig* cfg)
+{
+    if (!cfg) return false;
+
+    DeviceConfig tmp = *cfg;
+    settings_check(tmp, SRC_SAVE);
+
+    // Always persist to NVS first so settings survive reboot even if FAT write fails.
+    prefs_save(tmp);
+    return json_save(tmp);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1356,31 +1433,52 @@ bool msc_fat_get_key(const DeviceConfig* cfg, const char* key, String* value_jso
     return true;
 }
 
-int msc_fat_set_key(DeviceConfig* cfg, const char* key, const char* value_json)
+// The range of a key as the answer to a set out of range
+static String range_text(const SettingDef& e)
+{
+    auto num = [](double v) { char b[24]; snprintf(b, sizeof(b), "%.10g", v); return String(b); };
+    String s = "Range ";
+    if (isnan(e.hi)) s += num(e.lo) + " or more";
+    else if (isnan(e.lo)) s += "up to " + num(e.hi);
+    else s += num(e.lo) + " to " + num(e.hi);
+    if (e.flags & F_ZERO_OFF) s += ", or 0 = off";
+    return s;
+}
+
+int msc_fat_set_key(DeviceConfig* cfg, const char* key, const char* value_json, String* why)
 {
     const size_t n = strlen(key);
     if (n > 4 && !strcmp(key + n - 4, "_eff")) return 4;  // read-only: the value in effect, from the STM32
-    JsonDocument cur;
-    config_to_doc(*cfg, cur);
-    JsonVariant old = cur[key];
-    if (old.isNull()) return 1;                       // unknown key
+    if (!strncmp(key, "wifi_", 5)) return 4;              // read-only: the USB command "wifi set" writes them
+    const int i = find_setting(key);
+    if (i < 0 || (SETTINGS[i].flags & F_LEGACY)) return 1;  // unknown key
+    const SettingDef& e = SETTINGS[i];
+    // A text key takes a JSON string, or a bare word (letters, digits, '_'), as "set radio_mode wifi".
+    String quoted;
+    if ((e.type == T_TEXT || e.type == T_CHOICE) && value_json[0] != '"') {
+        for (const char* q = value_json; *q; q++)
+            if (!isalnum((unsigned char)*q) && *q != '_') return 2;
+        quoted = String("\"") + value_json + "\"";
+        value_json = quoted.c_str();
+    }
     JsonDocument val;
-    if (deserializeJson(val, value_json)) return 2;   // not a JSON literal
-    JsonVariant nv = val.as<JsonVariant>();
-    // The value must have the key's type, or the parse below would ignore it silently.
-    bool type_ok;
-    if (old.is<bool>())      type_ok = nv.is<bool>();
-    else if (old.is<long>()) type_ok = nv.is<long>();
-    else                     type_ok = nv.is<double>() && !nv.is<bool>();
-    if (!type_ok) return 2;
-    String text = "{\"";
-    text += key;
-    text += "\":";
-    text += value_json;
-    text += "}";
+    if (deserializeJson(val, value_json)) return 2;  // not a JSON literal
+    JsonVariantConst nv = val.as<JsonVariantConst>();
     DeviceConfig tmp = *cfg;
-    if (!config_from_json_text(tmp, text)) return 2;
-    validate_config(tmp);                             // the same clamps as a config.json edit
+    const bool quiet0 = s_bad_quiet;
+    s_bad_quiet = true;  // a set is refused, never takes a default: no note
+    const bool good = json_read_one(tmp, i, nv, SRC_SET);
+    if (good) settings_check(tmp, SRC_SET);
+    s_bad_quiet = quiet0;
+    if (!good) {  // refused, no change; a number of the right type is out of range
+        const bool int_type = e.type == T_U8 || e.type == T_I32;
+        const bool type_ok = (int_type && nv.is<int>()) || (e.type == T_LONG && nv.is<long>())
+                          || ((e.type == T_F32 || e.type == T_F64) && nv.is<double>() && !nv.is<bool>());
+        if (type_ok && why) *why = range_text(e);
+        return 2;
+    }
+    // The vehicle name rules must leave the text as it is (as up to 0.5.111: refused, no change)
+    if (e.type == T_TEXT && strcmp((const char*)fptr(tmp, e), nv.as<const char*>())) return 2;
     *cfg = tmp;
     return 0;
 }
@@ -1401,3 +1499,158 @@ bool msc_fat_key_at(const DeviceConfig* cfg, int index, String* line)
     }
     return false;
 }
+
+// 0.6.15: the settings the board takes at its next start: the defaults, then the values stored in NVS.
+void msc_fat_saved_config(DeviceConfig* out)
+{
+    populate_defaults(*out);
+    prefs_load(*out);
+}
+
+// 0.6.15: "list saved": one line per key, "<key>=<active> saved=<saved>", both values as "list" writes them.
+bool msc_fat_key_pair_at(const DeviceConfig* active, const DeviceConfig* saved, int index, String* line)
+{
+    String a, s;
+    if (!msc_fat_key_at(active, index, &a) || !msc_fat_key_at(saved, index, &s)) return false;
+    const int eq = s.indexOf('=');
+    *line = a + " saved=" + (eq >= 0 ? s.substring(eq + 1) : s);
+    return true;
+}
+
+int msc_fat_setting_json(const DeviceConfig* cfg, int index, char* out, size_t cap)
+{
+    if (index < 0 || index >= N_SETTINGS) return -1;
+    const SettingDef& e = SETTINGS[index];
+    if (e.flags & F_LEGACY) return 0;
+    static const char* const TYPE_NAME[] = {"string", "int", "int", "bool", "bool", "float", "float", "int", "choice"};
+    JsonDocument d;
+    d["k"] = JsonString(e.name, true);  // static text: no copy
+    d["t"] = JsonString(TYPE_NAME[e.type], true);
+    put_value(d["v"].to<JsonVariant>(), e, *cfg);
+    switch (e.type) {
+        case T_TEXT:  d["d"] = JsonString(e.opts, true); d["n"] = (int)e.hi; break;
+        case T_BOOL: case T_IBOOL: d["d"] = e.def != 0; break;
+        case T_U8: case T_I32: case T_LONG: d["d"] = (long)e.def; break;
+        case T_F32: d["d"] = (float)e.def; break;
+        case T_F64: d["d"] = e.def; break;
+        case T_CHOICE: {
+            size_t n;
+            const char* s = choice_name(e.opts, (int)e.def, &n);
+            if (s) d["d"] = JsonString(s, n);
+            JsonArray c = d["c"].to<JsonArray>();
+            for (const char* p = e.opts; *p;) {
+                const char* end = strchr(p, '|');
+                if (!end) end = p + strlen(p);
+                const char* eq = (const char*)memchr(p, '=', end - p);
+                c.add(JsonString(p, (eq ? eq : end) - p));
+                p = *end ? end + 1 : end;
+            }
+            break;
+        }
+    }
+    if (e.type != T_TEXT && e.type != T_CHOICE && e.type != T_BOOL && e.type != T_IBOOL) {
+        if (!isnan(e.lo)) d["min"] = e.lo;
+        if (!isnan(e.hi)) d["max"] = e.hi;
+        if (e.flags & F_ZERO_OFF) d["z"] = 1;
+    }
+    if (e.flags & F_LIVE) d["live"] = 1;
+    const SettingWords& w = SETTING_WORDS[index];
+    if (*w.unit) d["u"] = JsonString(w.unit, true);
+    if (*w.group) d["g"] = JsonString(w.group, true);
+    if (*w.label) d["l"] = JsonString(w.label, true);
+    if (*w.help) d["h"] = JsonString(w.help, true);
+    const size_t len = serializeJson(d, out, cap);
+    return len + 1 < cap ? 1 : -2;
+}
+
+// Erase (USB and CMD "config erase [wifi]"; the caller refuses it while the vehicle drives)
+bool msc_fat_erase(DeviceConfig* cfg, bool wifi, bool keep_link)
+{
+    const uint8_t radio_mode = cfg->radio_mode;
+    const bool espnow_enabled = cfg->espnow_enabled, telemetry_enabled = cfg->telemetry_enabled;
+    const long cmd_key = cfg->cmd_key;
+    NvsStore s;
+    if (s.open(true)) { nvs_erase_all(s.h); s.close(); }
+    if (wifi) msc_fat_wifi_clear();
+    populate_defaults(*cfg);
+    settings_check(*cfg, SRC_SAVE);
+    if (keep_link) {  // a command over a radio link keeps that link
+        cfg->radio_mode        = radio_mode;
+        cfg->espnow_enabled    = espnow_enabled;
+        cfg->telemetry_enabled = telemetry_enabled;
+        cfg->cmd_key           = cmd_key;
+        prefs_save(*cfg);
+    }
+    return json_save(*cfg);  // config.json overrides NVS at the next start: it must hold the defaults too
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Wi-Fi network (radio_mode "wifi"): NVS only. The SSID is cached for "list" and "get"; the
+// password is read only by msc_fat_wifi_password(), for the Wi-Fi start.
+// ─────────────────────────────────────────────────────────────────────────────
+static char s_wifi_ssid[33] = "";
+static bool s_wifi_pass = false;
+static bool s_wifi_loaded = false;
+
+static void wifi_load()
+{
+    if (s_wifi_loaded) return;
+    s_wifi_loaded = true;
+    Preferences p;
+    if (!p.begin(NVS_WIFI_NAMESPACE, true)) return;  // namespace not made yet: nothing stored
+    String ssid = p.getString("ssid", "");
+    snprintf(s_wifi_ssid, sizeof(s_wifi_ssid), "%s", ssid.c_str());
+    s_wifi_pass = p.isKey("pass");
+    p.end();
+}
+
+bool msc_fat_wifi_set(const char* ssid, const char* pass)
+{
+    Preferences p;
+    if (!p.begin(NVS_WIFI_NAMESPACE, false)) return false;
+    bool ok = p.putString("ssid", ssid) == strlen(ssid);
+    if (pass && pass[0]) ok = ok && p.putString("pass", pass) == strlen(pass);
+    else if (p.isKey("pass")) p.remove("pass");  // an open network: no password stored
+    p.end();
+    s_wifi_loaded = false;
+    wifi_load();
+    return ok;
+}
+
+void msc_fat_wifi_clear()
+{
+    Preferences p;
+    if (p.begin(NVS_WIFI_NAMESPACE, false)) {
+        p.clear();
+        p.end();
+    }
+    s_wifi_ssid[0] = 0;
+    s_wifi_pass = false;
+    s_wifi_loaded = true;
+}
+
+const char* msc_fat_wifi_ssid()
+{
+    wifi_load();
+    return s_wifi_ssid;
+}
+
+bool msc_fat_wifi_has_password()
+{
+    wifi_load();
+    return s_wifi_pass;
+}
+
+void msc_fat_wifi_password(char* out, size_t cap)
+{
+    if (!cap) return;
+    out[0] = 0;
+    Preferences p;
+    if (!p.begin(NVS_WIFI_NAMESPACE, true)) return;
+    if (p.isKey("pass")) p.getString("pass", out, cap);
+    p.end();
+}
+
+#ifdef SETTINGS_SELFTEST
+#include "settings_selftest.inc"
+#endif

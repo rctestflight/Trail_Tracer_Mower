@@ -4,7 +4,7 @@ This branch is `main` plus the Rx v2 firmware: rover mode, the monitor role and 
 
 ## 1. Install from the web programmer page
 
-1. Open https://trtr6842-git.github.io/trailtracer-programmer/ in Chrome or Edge.
+1. Open https://rctestflight.github.io/Trail_Tracer_Mower/ in Chrome or Edge.
 2. In the menu, select `Trail_Tracer_Mower`, branch `feature/rx-v2-0.5.60`.
 3. Connect the Rx by USB. Press "Connect an Rx" and select the board.
 4. Press the full install. It writes the ESP32 firmware, then the STM32 app 2.0.24.

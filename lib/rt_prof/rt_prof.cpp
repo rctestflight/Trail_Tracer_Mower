@@ -33,10 +33,12 @@ uint32_t no_edge = 0;
 int64_t part_t = 0, pass_t = 0;
 uint8_t part_cur = 0;
 uint32_t part_max[MAX_PARTS];
+uint64_t part_sum[MAX_PARTS];  // time per part in the window, for the mean per pass
 uint8_t worst_pass_part = 0;      // the part that took the most time in the longest pass
 uint32_t pass_part_us[MAX_PARTS];  // this pass, per part
 uint32_t worst_pass_part_us = 0;
 uint32_t long_passes = 0, period_cache = 10000;
+uint32_t long_n[MAX_PARTS], long_part_max[MAX_PARTS], long_pass_max[MAX_PARTS];  // the others, by their biggest part
 
 }  // namespace
 
@@ -89,12 +91,14 @@ void canEnd() { s_can.add(esp_timer_get_time() - t_can); }
 
 void gyroSample() { t_gyro = esp_timer_get_time(); }
 
+
 void part(uint8_t p) {
   const int64_t now = esp_timer_get_time();
   if (part_t) {
     const uint32_t d = (uint32_t)(now - part_t);
     if (part_cur < MAX_PARTS) {
       if (d > part_max[part_cur]) part_max[part_cur] = d;
+      part_sum[part_cur] += d;
       pass_part_us[part_cur] += d;
     }
   }
@@ -102,7 +106,16 @@ void part(uint8_t p) {
     if (pass_t) {
       const uint32_t d = (uint32_t)(now - pass_t);
       s_pass.add(d);
-      if (d > period_cache) long_passes++;
+      if (d > period_cache) {
+        long_passes++;
+        {
+          uint8_t w = 0;
+          for (uint8_t i = 1; i < MAX_PARTS; i++) if (pass_part_us[i] > pass_part_us[w]) w = i;
+          long_n[w]++;
+          if (pass_part_us[w] > long_part_max[w]) long_part_max[w] = pass_part_us[w];
+          if (d > long_pass_max[w]) long_pass_max[w] = d;
+        }
+      }
       if (d >= s_pass.max) {  // the longest pass so far: remember its biggest part
         uint8_t w = 0;
         for (uint8_t i = 1; i < MAX_PARTS; i++) if (pass_part_us[i] > pass_part_us[w]) w = i;
@@ -139,10 +152,20 @@ int report(char* buf, size_t len, const char* const* names, int n, uint32_t peri
       (unsigned long)long_passes, worst_pass_part < n && names ? names[worst_pass_part] : "?", (unsigned long)worst_pass_part_us);
   for (int i = 0; i < n && i < MAX_PARTS && k < len; i++)
     if (part_max[i]) k += (size_t)snprintf(buf + k, len - k, " %s=%lu", names[i], (unsigned long)part_max[i]);
+  if (k < len) k += (size_t)snprintf(buf + k, len - k, " | part mean per pass:");
+  for (int i = 0; i < n && i < MAX_PARTS && k < len; i++)
+    if (part_sum[i] && s_pass.n) k += (size_t)snprintf(buf + k, len - k, " %s=%lu", names[i], (unsigned long)(part_sum[i] / s_pass.n));
+  if (k < len) k += (size_t)snprintf(buf + k, len - k,
+      " | over period, by biggest part (count/part us/pass us):");
+  for (int i = 0; i < n && i < MAX_PARTS && k < len; i++)
+    if (long_n[i]) k += (size_t)snprintf(buf + k, len - k, " %s=%lu/%lu/%lu", names[i], (unsigned long)long_n[i],
+                                         (unsigned long)long_part_max[i], (unsigned long)long_pass_max[i]);
   if (k >= len) k = len - 1;
+  memset(long_n, 0, sizeof(long_n)); memset(long_part_max, 0, sizeof(long_part_max)); memset(long_pass_max, 0, sizeof(long_pass_max));
   s_wait = s_decode = s_control = s_lat = s_can = s_gyro = s_pass = Stat();
   memset(hist, 0, sizeof(hist));
   memset(part_max, 0, sizeof(part_max));
+  memset(part_sum, 0, sizeof(part_sum));
   no_edge = long_passes = worst_pass_part_us = 0;
   worst_pass_part = 0;
   return (int)k;

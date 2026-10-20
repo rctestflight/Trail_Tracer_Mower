@@ -3,6 +3,7 @@
 #include "soc/usb_struct.h"
 
 extern "C" volatile uint32_t dcd_fix_cnt[4];
+extern "C" volatile uint32_t dcd_unknown_cnt;
 extern "C" volatile uint32_t dcd_fix_old_txf[4];  // FIFO registers as found before the endpoint open  // lib/tinyusb_dcd_fix: bus resets, closes, IN disables, time-outs
 
 namespace usb_guard {
@@ -18,6 +19,7 @@ uint32_t detach_ms = 0;
 uint32_t grace_until_ms = 0;
 uint32_t kick_count = 0;   // flushes sent to a full TX FIFO with no progress (KICK_MS)
 bool kicked = false;
+bool stall_seen = false;  // vehicle role: this output stop is counted
 bool ejecting = false;     // the drive eject ran; the detach follows EJECT_MS later
 uint32_t eject_ms = 0;
 void (*before_detach)() = nullptr;
@@ -77,12 +79,12 @@ bool take_saved(char* buf, int n) {
 
 int format_snapshot(char* buf, int n) {
   int k = snprintf(buf, n, "usbregs ms=%lu gintsts=%08lx gintmsk=%08lx dctl=%08lx dsts=%08lx daint=%08lx daintmsk=%08lx empmsk=%04lx"
-                   " cdc_tx_free=%lu cdc_rx=%lu ard_rx=%lu txev=%lu bres=%lu clos=%lu dis=%lu dto=%lu",
+                   " cdc_tx_free=%lu cdc_rx=%lu ard_rx=%lu txev=%lu bres=%lu clos=%lu dis=%lu dto=%lu unk=%lu",
                    (unsigned long)snap.ms, (unsigned long)snap.gintsts, (unsigned long)snap.gintmsk, (unsigned long)snap.dctl,
                    (unsigned long)snap.dsts, (unsigned long)snap.daint, (unsigned long)snap.daintmsk, (unsigned long)snap.empmsk,
                    (unsigned long)snap.cdc_tx_free, (unsigned long)snap.cdc_rx_avail, (unsigned long)snap.arduino_rx_avail,
                    (unsigned long)snap.tx_events, (unsigned long)dcd_fix_cnt[0], (unsigned long)dcd_fix_cnt[1],
-                   (unsigned long)dcd_fix_cnt[2], (unsigned long)dcd_fix_cnt[3]);
+                   (unsigned long)dcd_fix_cnt[2], (unsigned long)dcd_fix_cnt[3], (unsigned long)dcd_unknown_cnt);
   if (k < n) k += snprintf(buf + k, n - k, " rxf=%08lx nptxf=%08lx txf=%08lx,%08lx,%08lx,%08lx oldtxf=%08lx,%08lx,%08lx,%08lx",
                            (unsigned long)snap.grxfsiz, (unsigned long)snap.gnptxfsiz, (unsigned long)snap.txf[0],
                            (unsigned long)snap.txf[1], (unsigned long)snap.txf[2], (unsigned long)snap.txf[3],
@@ -118,9 +120,13 @@ void service(uint32_t now, bool) {
     seen_tx = tx;
     last_progress_ms = now;
     kicked = false;
+    stall_seen = false;
     return;
   }
-  if (!reconnect_on) return;  // vehicle role, or monitor before the PC program connected: drop output, touch nothing
+  if (!reconnect_on) {  // 0.5.88: the stop is counted (usb line, stalls=) even when nothing may be done about it
+    if (!stall_seen && now - last_progress_ms >= STUCK_MS) { stall_seen = true; stall_count++; snapshot(); }
+    return;
+  }  // vehicle role, or monitor before the PC program connected: drop output, touch nothing
   // A full TX FIFO with no completed transfer for KICK_MS: one flush first. The IN transfer of the data in the
   // FIFO may not have started (monitor role at about 14 KB/s, 2026-10-12); a flush starts it, with no reconnect.
   if (!kicked && now - last_progress_ms >= KICK_MS) {

@@ -1,6 +1,6 @@
 /*
  * rctf_wfrx_comms_v2.h — Trail Tracer v2.0 STM32 <-> ESP32 link.
- * Release-candidate prototype: frame layout 2 (app 2.0.10).
+ * Release-candidate prototype: frame layout 2 (app 2.0.54, DDC core, bin sweep page).
  *
  * Shared header: the STM32 main app and the ESP32 firmware use the same copy.
  * The STM32 side is in TrailTracer-Rx-STM32; the ESP32 side is in this repository.
@@ -110,9 +110,10 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     uint16_t work_end_last;     /* t when the UART TX starts */
     uint16_t work_end_worst;
-    uint16_t l2_wait_min;       /* lane 2 wait for DMA segments, minimum */
-    uint8_t  isr_worst;         /* frame-tick ISR */
-    uint8_t  overrun_count;     /* frames where the next tick came before UART TX */
+    uint16_t l2_wait_min;       /* app 2.0.11: update period minus work end, minimum */
+    uint8_t  isr_worst;         /* frame-tick handler */
+    uint8_t  overrun_count;     /* frames where the next tick came before UART TX, plus DDC
+                                   sub-frames discarded or missed (app 2.0.11) */
     uint8_t  hk_skip_count;     /* frames where housekeeping was skipped */
     uint8_t  spare;
     uint16_t cmd_ok;            /* commands executed or answered as duplicate */
@@ -122,13 +123,30 @@ typedef struct __attribute__((packed)) {
     uint8_t  bad_length;        /* non-empty windows that were not 10 B */
 } PageHealth;                   /* seq & 1 == 1; cmd_duplicate is read by CID 32 */
 
+/* Bin sweep (app 2.0.49; layout 2.0.51), on seq & 3 == 1 while sweep bins run (HEALTH then on seq & 3 == 3 only).
+ * Grid point of sweep bin i (i-th set bit of mask, from bin 0) for tag t: (t + i * positions / n) mod positions,
+ * n = bits set; its frequency: (f0_dhz + point * step_dhz) / 10 Hz. tag 0xFFFF: no sweep data in that frame. */
+typedef struct __attribute__((packed)) {
+    uint16_t tag;               /* grid point of the first sweep bin for this frame's coil data */
+    uint16_t tag_prev;          /* the same for the previous frame */
+    uint16_t positions;         /* grid points */
+    uint8_t  f0_dhz[3];         /* grid point 0, 0.1 Hz, 24 bit little-endian */
+    uint16_t step_dhz;          /* grid step, 0.1 Hz */
+    uint8_t  mask;              /* sweep bins */
+    uint8_t  state;             /* 0 off, 1 table build, 2 sweep */
+    uint8_t  table_id;          /* +1 per table build */
+    uint8_t  spare[2];
+} PageSweep;
+
 WFRX_STATIC_ASSERT(sizeof(PageMeas) == 16, "PageMeas size");
 WFRX_STATIC_ASSERT(sizeof(PageHealth) == 16, "PageHealth size");
+WFRX_STATIC_ASSERT(sizeof(PageSweep) == 16, "PageSweep size");
 
 typedef union {
     uint8_t    raw[16];
     PageMeas   meas;
     PageHealth health;
+    PageSweep  sweep;
 } StmPage;
 
 /* ===========================================================================
@@ -136,6 +154,15 @@ typedef union {
  * ========================================================================= */
 
 #define STM_FRAME_LEN               128u
+/* Frame version 3 (app 2.0.81): 144 B, the version 2 frame with a 16 B extension slot at bytes 126-141 (4 items of
+ * [item id u8][index u8: bits 0-2 bin or Tx channel, bit 4 sensor][value int16]; id 0 = empty) and the CRC at 142-143.
+ * The ESP32 takes version 2 (128 B) and version 3 (144 B) by the version byte. */
+#define WFRX_PROTO_VER3             3u
+#define STM_FRAME_LEN_V3            144u
+#define STM_FRAME_MAX               144u
+#define WFRX_EXT_OFFSET             126u
+#define WFRX_EXT_ITEMS              4u
+#define WFRX_EXT_IDS                10u   /* item ids 1..10 (1-2 bin SNR and trend; 3-8 FSK, retired in Rx STM32 2.1.134; 9 dual tone sign, 10 its spread) */
 
 typedef enum {
     RSP_NONE         = 0,
@@ -189,6 +216,7 @@ WFRX_STATIC_ASSERT(offsetof(StmFrameV2, crc)         == 126, "offset crc");
  *   bit 21         STM32 reset: set until the first executed write command
  *   bits 22,23     lane inputs: bit 22 lane 1, bit 23 lane 2 (0 = sensor 1, 1 = sensor 2)
  *   bit 24         acquisition running (CID 1); 0 = idle mode
+ *   bit 25         run mode without slow ADC (CID 39 = 0, debug): no charging, MEAS frozen
  */
 #define WFRX_STATUS_FRAME_OVERRUN       (1u << 19)
 #define WFRX_STATUS_CMD_LINK_ERR        (1u << 20)
@@ -196,6 +224,9 @@ WFRX_STATIC_ASSERT(offsetof(StmFrameV2, crc)         == 126, "offset crc");
 #define WFRX_STATUS_LANE1_INPUT         (1u << 22)
 #define WFRX_STATUS_LANE2_INPUT         (1u << 23)
 #define WFRX_STATUS_RUN                 (1u << 24)
+#define WFRX_STATUS_HK_OFF              (1u << 25)
+#define WFRX_STATUS_POLAR_STREAM        (1u << 26)  /* app 2.0.67 (CID 52 on): result 2 holds one polarity detector block (48 B) */
+#define WFRX_STATUS_UART_FRAME          (1u << 27)  /* app 2.0.76: accepts the 16 B Rx UART frame (control block + optional command) */
 
 /* ===========================================================================
  * ESP32 -> STM32 command frame: 10 B, framed by the frame tick.
@@ -206,6 +237,12 @@ WFRX_STATIC_ASSERT(offsetof(StmFrameV2, crc)         == 126, "offset crc");
  * ========================================================================= */
 
 #define ESP_FRAME_LEN               10u
+/* Rx UART frame (16 B, every frame once the app sets status bit 27): the control block (version, angle, flags), then
+ * one optional command (cid 0 = none), then one CRC-16 over bytes 0-13. The app keeps the last valid block; it uses
+ * the defaults (angle 0, flags 0) before the first. It still takes the 10 B command frame (told apart by length). */
+#define ESP_UART_FRAME_LEN          16u
+#define ESP_UART_FRAME_VERSION      1u
+#define ESP_UART_FLAG_CHARGE        (1u << 0)   /* charge output wanted */
 #define ESP_CID_WRITE               0x80u
 #define WFRX_DUPLICATE_WINDOW       10u
 
@@ -240,12 +277,22 @@ WFRX_STATIC_ASSERT(offsetof(EspFrameV2, crc)   == 8, "offset crc");
  *   8  charge time limit        R/W int32 s, clamped
  *   9  charge enable request    R/W int32 0/1
  *  10  timing reset             W   worst values and counters
- *  13  lane inputs              R/W int32 bit 0 lane 1, bit 1 lane 2; default 0x02
- *  18  frame period             R/W int32 us, 8000..655350, step 10; default 10000;
- *                                   starts at the next tick
+ *  13  lane inputs              R/W int32 bit 0 result 1, bit 1 result 2 (0 = sensor 1,
+ *                                   1 = sensor 2); default 0x02. 0x00: sensor 1 in both
+ *                                   results. One-sensor set-up (CID 38 = 1): bit 0 selects
+ *                                   the sensor, result 2 is zero. Run mode: the DDC restarts
+ *  18  frame period             R/W int32 us, 2000..655350 (app 2.0.18; was 8000); default 10000. The
+ *                                   update is K DDC sub-frames of N samples (36.5 us each,
+ *                                   + 18 us slow-ADC gap): K = ceil(T / 10.53 ms), N the
+ *                                   largest with K sub-frames <= T. The response is the
+ *                                   period in effect (RSP_OK_CLAMPED if it differs).
+ *                                   Examples: 10000 -> 9946, 20000 -> 19892, 100000 -> 99460
  *  19  primary bin              R/W index = sensor; int32 bin; default 0 (LED, internal)
- *  20  bin frequency            R/W index = bin; float Hz; 0 = off; outside 42.5..120 kHz
- *                                   = off (RSP_BAD_VALUE). Takes effect in the next frame.
+ *  20  bin frequency            R/W index = bin; float Hz; 0 = off; outside 46.8..62.8 kHz
+ *                                   = off (RSP_BAD_VALUE). Takes effect within slow_divider
+ *                                   updates (one bin set-up per slow-task cycle). The DDC
+ *                                   computes bins 0 .. highest bin on; turning on a higher bin
+ *                                   restarts the DDC in run mode.
  *                                   Default: Tx CH 1..5, 62.5 kHz, 46.875 kHz, off
  *  21  weak threshold           R/W index = bin; float magnitude; default 1/600
  *  22  lost threshold           R/W index = bin; float magnitude; default 1/1200
@@ -257,30 +304,70 @@ WFRX_STATIC_ASSERT(offsetof(EspFrameV2, crc)   == 8, "offset crc");
  *  28  angle calibration        R/W index = sensor; float rad; default from NVM
  *  30  versions                 R   int32 bytes: app major, minor, patch, proto_ver
  *  31  reset cause              R   int32 RCC CSR at app start
- *  32  frame count              R   index 0: frames since boot; index 1: cmd_duplicate
+ *  32  frame count              R   index 0: frames since boot; index 1: cmd_duplicate;
+ *                                   index 2: command windows extended by a late tick (2.0.15:
+ *                                   the last whole command of the window runs)
  *  33  timing detail            R   index = item; int32 = last (bits 0..15) | worst
  *                                   (bits 16..31), 10 us units unless stated. Items (app
- *                                   2.0.10, kernel during acquisition): 0 lane 1 done (t
- *                                   from the tick), 1 lane 2 set-up, 2 lane 1 post-
- *                                   processing, 3 lane 2 post-processing + PGA, 4
- *                                   housekeeping, 5 TX preparation, 6 lane 2 done (t),
- *                                   7 NVM pause (0.1 ms), 8 cross-check: TIM15 work end
- *                                   in us | fail count, 9 DMA ch 2/3 interrupt (ADC,
- *                                   USART1 TX) in us, 10 kernel segment call in us
- *  34  bins on at boot          R   int32 bits 8..15 (bits 0..7 = 0: no boot self-test)
+ *                                   2.0.11, DDC): 0 DDC DMA interrupt load (0.1 %), 1 DDC
+ *                                   bins load (0.1 %), 2 sub-frame finalize and combine
+ *                                   (us), 3 update combine and post-processing, 4
+ *                                   housekeeping, 5 TX preparation, 6 work end (t from the
+ *                                   tick), 7 NVM pause (0.1 ms), 8 cross-check: TIM15 work
+ *                                   end in us | fail count, 9 discarded sub-frames | missed
+ *                                   sub-frames, 10 DDC interrupt max cycles (int32), 11 DDC
+ *                                   bins max cycles (int32), 12 K | N << 16, 13 USART1-TX DMA
+ *                                   interrupt (us). Diagnosis (2.0.13): 14 ticks from TIM16 |
+ *                                   ticks from the DDC << 16, 15 tick interval min | max (us),
+ *                                   16 frame processing start (t, every frame), 17 late ticks
+ *                                   (a tick before the main loop took the previous one),
+ *                                   18..32 late ticks at main stage 0..14, 33 catch-up
+ *                                   updates (2.0.15: after an overrun, one update sends the
+ *                                   last coil data with status bit 19 and skips the DSP work),
+ *                                   34 PGA (2.0.19): sub-frames discarded for an overrange
+ *                                   above step 0 | step-up back-off (hold = 500 ms << this)
+ *                                   << 16. 35 PGA (2.0.20): sub-frames with the headroom flag
+ *                                   at the decision step (a step-up blocked) | PGA step << 16.
+ *                                   CID 10 clears items 9, 17, 33, 34 and 35
+ *  34  bins on at boot          R   int32 bits 8..15 bins on at boot, bits 0..7 last DDC
+ *                                   init result (int8, 0 = ok)
  *  29  PGA override             R/W index = sensor; int32 -1 auto (default), 0..2 fixed step
- *                                   (debug and test)
+ *                                   (debug and test). App 2.0.11: one step for both sensors;
+ *                                   a write to either index sets both
  *  35  fault record             R/W index 0..4, of the last reset (kept over a system reset):
  *                                   0 = 0xFA17 << 16 | type << 8 | main stage (type 1
  *                                   HardFault, 2 Error_Handler, 3 main-loop stall; 0 = none),
- *                                   1 = PC, 2 = LR, 3 = frame count, 4 = faults since
+ *                                   1 = PC, 2 = LR (stall: 1 = DDC stream stopped), 3 = frame
+ *                                   count, 4 = faults since
  *                                   power-on. Write (any index): clear.
  *  37  PGA calibration          R/W index = sensor * 6 + coil * 3 + PGA step (coil 0 = coil 1);
- *                                   float; the factory value from NVM; CID 3 saves it.
+ *                                   float, > 0 and < 1.8e-5 (else RSP_BAD_VALUE, app 2.0.17);
+ *                                   the factory value from NVM; CID 3 saves it.
  *                                   sN = |GN| x this value, so equal magnitudes across the PGA
  *                                   steps need these three values per coil matched.
- *  36  debug fault              W   int32 1 HardFault, 2 main-loop stall, 3 Error_Handler.
+ *  36  debug fault              W   int32 1 HardFault, 2 main-loop stall, 3 Error_Handler,
+ *                                   4 test load: index x 0.1 ms busy time per update (0 off).
  *                                   The unit resets; the ESP32 sends BOOT after 1 s silence.
+ *                                   Debug builds only (WFRX_DEBUG_COMMANDS) from app 2.0.39;
+ *                                   else RSP_UNKNOWN_CID.
+ *  38  DDC sensors              R/W int32 2 (default) or 1 (one sensor, 876.7 kHz per coil,
+ *                                   stronger filters). Write in idle mode only; else
+ *                                   RSP_BAD_VALUE
+ *  39  DDC slow ADC             R/W int32 1 (default) or 0 (debug: run mode without the slow
+ *                                   ADC; charging off, MEAS frozen, status bit 25). Write in
+ *                                   idle mode only. Changes the sub-frame step: CID 18 is
+ *                                   recomputed
+ *  41  Rx STM32 restart         W   app 2.0.39. Restart into the boot checker after its own checks
+ *                                   pass on a genuine update. Index 0 start (value 0), 1 append
+ *                                   4 B (value, little-endian; response = bytes held), 2 check.
+ *                                   Send the 52 B commit header, then the first 1040 B of the
+ *                                   .bin.encrypted file (273 appends). Check pass: response 1,
+ *                                   then the restart after that frame. Fail: RSP_BAD_VALUE, value
+ *                                   1 count, 2 header CRC, 3 magic, 4 product, 5 chunk size,
+ *                                   6 image size, 7 chunk count, 8 tag. Run mode: RSP_BAD_VALUE,
+ *                                   value -1. Read: bytes held. After a pass: send nothing for
+ *                                   50 ms, wait for the boot checker status frame, then the update
+ *                                   or BOOT (docs/RX_STM32_RESTART_COMMAND.md)
  * Unknown CID: RSP_UNKNOWN_CID. Index out of range or value not valid: RSP_BAD_VALUE.
  */
 

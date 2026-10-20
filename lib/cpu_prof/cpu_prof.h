@@ -28,5 +28,9 @@ void section(uint8_t s);
 // names: the loop part names, n of them. Returns the length written.
 int report(char* buf, size_t len, const char* const* names, int n);
 bool running();
+// 0.5.97: the CPU load of the window since the last call (its own window; report() does not touch it), in %:
+// busy = all but the idle task; loop = loopTask; drive = the loop parts in drive_mask (bit s = part s). Samples
+// that hit no known task count as busy. false: no sample yet.
+bool load(uint32_t drive_mask, uint8_t* busy, uint8_t* loop, uint8_t* drive);
 
 }  // namespace cpuprof

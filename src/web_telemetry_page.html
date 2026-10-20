@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vehicle telemetry</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;600&display=swap" media="print" onload="this.media='all'">
+<style>
+:root{color-scheme:light dark;--bg:#f4f5f7;--card:#fff;--fg:#1c1f24;--mute:#5f6670;--line:#dcdfe4;--acc:#1f6feb;--bad:#c62828}
+@media(max-width:400px){.grid{grid-template-columns:1fr}}
+@media(prefers-color-scheme:dark){:root{--bg:#121417;--card:#1b1e23;--fg:#e5e7ea;--mute:#9aa1ab;--line:#2e333a;--acc:#4c8dff;--bad:#ff6b6b}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 "Roboto Mono",monospace}
+header{background:var(--card);border-bottom:1px solid var(--line);padding:12px 16px}
+header h1{margin:0;font-size:18px}
+header p{margin:2px 0 0;color:var(--mute);font-size:12px;display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+a{color:var(--acc)}
+select{font:inherit;font-size:12px;padding:1px 4px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
+main{max-width:780px;margin:0 auto;padding:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
+section,details{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 14px}
+details{margin-top:14px}
+summary{cursor:pointer;padding:6px 0;font-weight:600}
+h2{margin:4px 0;font-size:13px;color:var(--mute);font-weight:600}
+.row{display:flex;gap:8px;padding:3px 0;border-top:1px solid var(--line)}
+.row .l{flex:1;min-width:0}
+.row .v{font-weight:600;text-align:right;max-width:55%;overflow-wrap:anywhere}
+.row .u{color:var(--mute);min-width:3.5em}
+#state.bad{color:var(--bad)}
+#foot{color:var(--mute);font-size:12px;margin-top:12px}
+</style>
+</head>
+<body>
+<header><h1>Vehicle telemetry</h1>
+<p><span id="fw">Loading</span><span id="state"></span>
+<label>Rate <select id="rate"><option value="1">1 Hz</option><option value="2">2 Hz</option></select></label>
+<a href="/settings">Settings</a><a href="/">Pages</a></p></header>
+<main>
+<div id="short" class="grid"></div>
+<details id="more"><summary>More values</summary><div id="morebox" class="grid"></div></details>
+<p id="foot"></p>
+</main>
+<script>
+let D=null,shortIdx=[],rate=1,timer=null,miss=0,lastMs=null,going=false;
+const $=id=>document.getElementById(id);
+try{rate=+localStorage.getItem('tlmRate')||1}catch(e){}
+$('rate').value=String(rate);
+$('rate').onchange=e=>{rate=+e.target.value;try{localStorage.setItem('tlmRate',rate)}catch(x){}};
+function el(t,c,txt){const e=document.createElement(t);if(c)e.className=c;if(txt!=null)e.textContent=txt;return e}
+// Groups in the order of their first field; one card per group.
+function cards(box,list){
+  box.textContent='';const g=new Map();
+  for(const i of list){const f=D.fields[i];if(!g.has(f.g)){const s=el('section');s.appendChild(el('h2','',f.g||'Other'));g.set(f.g,s);box.appendChild(s)}
+    const r=el('div','row');const l=el('span','l',f.l||f.n);l.title=f.n+' ('+f.r+')';r.appendChild(l);
+    const v=el('span','v','—');v.id='v'+i;r.appendChild(v);r.appendChild(el('span','u',f.u));g.get(f.g).appendChild(r)}
+}
+function build(){
+  const f=D.fields;shortIdx=[];const more=[];
+  f.forEach((x,i)=>{if(x.p>0)shortIdx.push(i);else more.push(i)});
+  cards($('short'),shortIdx.slice().sort((a,b)=>f[a].p-f[b].p));
+  cards($('morebox'),more);
+  $('more').hidden=!more.length;
+  $('fw').textContent='Firmware '+D.fw+', '+f.length+' values';
+}
+function names(s){const m={};for(const p of (s||'').split('|')){const k=p.indexOf('=');if(k>0)m[p.slice(0,k)]=p.slice(k+1)}return m}
+function show(f,x){
+  if(x===null||x===undefined)return'—';
+  if(f.k==='bits'){const b=f.b.split('|').filter((n,i)=>n&&(x>>i)&1);return b.length?b.join(' '):'none'}
+  if(f.k==='enum'){f.m=f.m||names(f.e);return f.m[x]||f.m['*']||String(x)}
+  if(typeof x==='number')return x.toFixed(f.d);
+  return String(x)
+}
+function age(ms){return ms===null?'none yet':ms<1000?ms+' ms':(ms/1000).toFixed(1)+' s'}
+function state(t,bad){$('state').textContent=t;$('state').className=bad?'bad':''}
+async function loadDef(){const r=await fetch('/api/telemetry?def=1',{cache:'no-store'});if(!r.ok)throw 0;D=await r.json();build()}
+async function poll(){
+  timer=null;if(document.hidden){going=false;state('Paused (tab hidden)');return}
+  try{
+    if(!D)await loadDef();
+    const all=$('more').open;
+    const r=await fetch('/api/telemetry'+(all?'?all=1':''),{cache:'no-store'});
+    if(r.status===503){const t=await r.text();if(t.startsWith('An update')){miss=0;state('An update runs: values return when it ends');schedule();return}}
+    if(!r.ok)throw 0;
+    const j=await r.json();
+    if(lastMs!==null&&j.ms<lastMs){lastMs=null;await loadDef();schedule();return}  // restarted: the table may be new
+    lastMs=j.ms;miss=0;
+    const idx=all?D.fields.map((x,i)=>i):shortIdx;
+    idx.forEach((i,k)=>{const e=$('v'+i);if(e)e.textContent=show(D.fields[i],j.v[k])});
+    state('Live, '+rate+' Hz');
+    $('foot').textContent='Sample '+age(j.sa)+' old, status '+age(j.st)+' old. Free heap '+j.heap+' B (lowest '+j.heap_min+' B).';
+  }catch(e){miss++;if(miss>=3)state('No answer from the vehicle',true)}
+  schedule();
+}
+function schedule(){if(!timer)timer=setTimeout(poll,1000/rate)}
+function start(){if(!going&&!document.hidden){going=true;poll()}}
+document.addEventListener('visibilitychange',start);
+start();
+</script>
+</body>
+</html>

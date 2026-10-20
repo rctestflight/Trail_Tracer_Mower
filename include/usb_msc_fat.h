@@ -13,6 +13,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 struct DeviceConfig {
     // Identification
+    char    vehicle_name[17];  // shown by the telemetry app: 16 at most; letters, digits, space, _ and -
     uint8_t vehicleID;
     uint8_t rx_channel;
 
@@ -20,17 +21,22 @@ struct DeviceConfig {
     int CRUISE_THROTTLE;
     int CREEP_THROTTLE;
 
-    // Output 1 – front steering
+    // Drive (0.5.69): 0 auto (motor controllers once one answers on CAN, else servos), 1 servos (V1.0), 2 CAN
+    uint8_t drive_output;
+    uint8_t steer_output;     // servo output channel of the steering, 1..4
+    uint8_t throttle_output;  // servo output channel of the throttle, 1..4
+
+    // Steering function: centre and end points (config.json steer_center_us, steer_min_us, steer_max_us)
     int PWM_OUT_1_DEFAULT;
     int PWM_OUT_1_MIN;
     int PWM_OUT_1_MAX;
 
-    // Output 2 – throttle
+    // Throttle function (config.json throttle_center_us, throttle_min_us, throttle_max_us)
     int PWM_OUT_2_DEFAULT;
     int PWM_OUT_2_MIN;
     int PWM_OUT_2_MAX;
 
-    // Output 3 – auxiliary
+    // Outputs 3 and 4: read from an older config.json only; an output with no function holds 1500 us
     int PWM_OUT_3_DEFAULT;
     int PWM_OUT_3_MIN;
     int PWM_OUT_3_MAX;
@@ -45,6 +51,7 @@ struct DeviceConfig {
     double ki;
     double kd;
     int    pid_direction;   // PID_v1: DIRECT=0, REVERSE=1
+    double steer_lpf_hz;    // 2nd-order low-pass on the steering PID output, Hz (0 = off; V1.0: 5)
     // Yaw-rate PID: input/setpoint in deg/s, output normalized to -1..1.
     double steering_rate_kp;
     double steering_rate_ki;
@@ -70,7 +77,7 @@ struct DeviceConfig {
     // Charging
     double CHARGE_VBATT_STOP;    // V
     double CHARGE_MAX_CURRENT;   // A
-    int    CHARGE_MAX_SECONDS;
+    int    CHARGE_MAX_SECONDS;  // the charge time limit, s (0.5.69; up to 0.5.68 half of it)
     uint8_t battery_cells;       // series cells (2 = 2S); the station scales its voltage graphs from it
 
     // Features
@@ -105,13 +112,27 @@ struct DeviceConfig {
     int     dsp_slow_adc;            // CID 39: 1 on, 0 off (off: no charging, no MEAS page)
     int     dsp_pga;                 // CID 29: -1 auto, 0..2 a fixed step for both sensors
     int     dsp_lanes;               // CID 13: lane map 0..3 (with dsp_sensors 1, bit 0 selects the sensor)
+    uint8_t dsp_sweep_bins;          // CID 43 (Rx STM32 2.0.49+): bins off (dsp_bin_hz 0) that sweep 46.8-62.8 kHz;
+                                     // 0 off, 1..8 that many, 255 auto (all free bins; the default). "off", "auto", "1".."8"
     bool    usb_drive;               // true (default): config.json as a USB drive; false: no drive, settings by command only
                                      // (from the next start). A PC that read the drive when the board left USB lost ports.
+    uint8_t radio_mode;              // RADIO_MODE_ESPNOW (default, "espnow" in config.json) or RADIO_MODE_WIFI ("wifi"):
+                                     // telemetry over ESP-NOW or over a Wi-Fi network, never both (from the next start)
+
+    // Fields that the settings table declares (SF lines in include/settings_table.h)
+#define S(...)
+#define SF(name, ctype, ...) ctype name;
+#include "settings_table.h"
+#undef S
+#undef SF
 };
+
+#define RADIO_MODE_ESPNOW 0
+#define RADIO_MODE_WIFI   1
 
 // The shortest frame period setting: the fastest STM32 period (2336 us, set-up S2N) plus 50 %, rounded up.
 // The ESP32 then has margin to serve the radio, the log and USB between frames.
-#define DSP_FRAME_PERIOD_MIN_US 3600
+#define DSP_FRAME_PERIOD_MIN_US 2938  // 0.5.103: the shortest with no link; each link mode has its own (src/main.cpp)
 
 // DSP values in effect, from the STM32 answers (NaN = no answer yet). "list" and "get" show them as the
 // read-only keys <key>_eff; config.json does not hold them.
@@ -175,11 +196,57 @@ bool msc_fat_save_all(const DeviceConfig* cfg);
 /**
  * Single config keys by their config.json name, for config commands over ESP-NOW.
  * get: the value as a JSON literal; false for an unknown key.
- * set: 0 ok (validated and clamped as for a config.json edit), 1 unknown key,
- *      2 bad value (not a JSON literal, or the wrong type for the key), 4 read-only (a _eff key).
+ * set: 0 ok (checked as for a config.json edit), 1 unknown key, 4 read-only (a _eff or wifi_ key),
+ *      2 bad value, refused with no change: not a JSON literal, the wrong type, not a choice, a text the vehicle
+ *      name rules would change, or out of range. Out of range: *why = "Range <min> to <max>" (", or 0 = off" for a
+ *      key where 0 = off). A set never takes a default; config.json and NVS do.
  *      The caller applies the result with applyDeviceConfig().
  * key_at: "key=value" for the index-th key; false past the last key.
  */
 bool msc_fat_get_key(const DeviceConfig* cfg, const char* key, String* value_json);
-int  msc_fat_set_key(DeviceConfig* cfg, const char* key, const char* value_json);
+int  msc_fat_set_key(DeviceConfig* cfg, const char* key, const char* value_json, String* why = nullptr);
 bool msc_fat_key_at(const DeviceConfig* cfg, int index, String* line);
+void msc_fat_saved_config(DeviceConfig* out);  // 0.6.15: the settings of the next start (defaults, then NVS)
+bool msc_fat_key_pair_at(const DeviceConfig* active, const DeviceConfig* saved, int index, String* line);  // "list saved"
+
+/**
+ * One table line as one JSON object, for the settings page (GET /api/settings), from the table at run time:
+ * {"k": key, "t": "string"|"int"|"float"|"bool"|"choice", "v": value, "d": default, "min", "max" (absent = no limit),
+ *  "z": 1 (0 = off is also valid), "n": text length, "c": [choice names], "live": 1, "u", "g", "l", "h" (unit, group,
+ *  label, help of the table line; absent when empty)}. Values as "get" gives them.
+ * index: a table line, 0 up. 1 written; 0 a line with no key (F_LEGACY); -1 past the last line; -2 cap too small.
+ */
+int msc_fat_setting_json(const DeviceConfig* cfg, int index, char* out, size_t cap);
+
+/**
+ * Erase the settings (USB and CMD "config erase [wifi]"): the NVS settings namespace is erased, *cfg takes the
+ * defaults and config.json is written with them. wifi: the Wi-Fi details too. keep_link: radio_mode,
+ * espnow_enabled, telemetry_enabled and cmd_key keep their values (and go to NVS), so a command over a radio
+ * link keeps that link. Writes flash once per part; the caller refuses it while the vehicle drives.
+ * false: the config.json write failed (NVS is erased all the same).
+ */
+bool msc_fat_erase(DeviceConfig* cfg, bool wifi, bool keep_link);
+
+/**
+ * A value that took its default (config.json or NVS; a set is refused instead): one line of text per value,
+ * oldest first, for the USB port and the log. Source: 0 config.json, 1 NVS, 3 save. false: none waiting.
+ */
+bool msc_fat_bad_value_pop(char* line, size_t cap, int* source);
+
+#ifdef SETTINGS_SELFTEST
+/** Self-check build: the old settings code against the table code (USB "cfgselftest"). Returns the difference count. */
+int msc_fat_selftest(void (*print)(const char* line));
+#endif
+
+/**
+ * Wi-Fi network for radio_mode "wifi" (USB "wifi set" / "wifi clear"). NVS only, in its own
+ * namespace: never in config.json, never in DeviceConfig. "list" and "get" show wifi_ssid and
+ * wifi_password = "set" or "not set"; this file never reads the password except in
+ * msc_fat_wifi_password(), for the Wi-Fi start.
+ * set: ssid 1..32 bytes; pass "" = an open network (no password key in NVS). false: NVS write failed.
+ */
+bool msc_fat_wifi_set(const char* ssid, const char* pass);
+void msc_fat_wifi_clear();
+const char* msc_fat_wifi_ssid();          // "" = none stored
+bool msc_fat_wifi_has_password();
+void msc_fat_wifi_password(char* out, size_t cap);  // "" = none

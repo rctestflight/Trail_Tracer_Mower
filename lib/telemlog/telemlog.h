@@ -5,6 +5,7 @@
 // - Records are numbered per stream per boot: seq 0, 1, 2, ...
 // - The rings live in no-init RAM. After a warm reset (panic, watchdog, software restart)
 //   the records of the previous boot stay available under the previous boot_id.
+// - RAM only: the log never writes flash (0.5.82; the flash ring of 0.3.0 to 0.5.81 is gone). The PC records it.
 // - Threads: call telemlog_on_frame() from the ESP-NOW receive callback; call every other
 //   function from loop() only. The two sides share one single-producer single-consumer
 //   queue with volatile indexes and no locks.
@@ -26,11 +27,11 @@
 #define TELEMLOG_FAST_SLOT_BYTES 244  // body 2 + 7 x 32 = 226 B plus the header
 #endif
 #ifndef TELEMLOG_SLOW_SLOT_BYTES
-#define TELEMLOG_SLOW_SLOT_BYTES 96   // 84 holds the 67 B status and short events
+#define TELEMLOG_SLOW_SLOT_BYTES 100  // 0.5.104: the 84 B status (was 96: 80 B bodies)
 #endif
 #define TELEMLOG_SLOT_HDR 16  // u32 boot_id, u32 seq, u32 ms, u16 len, u16 crc
 #define TELEMLOG_FAST_BODY_MAX (TELEMLOG_FAST_SLOT_BYTES - TELEMLOG_SLOT_HDR)  // 228
-#define TELEMLOG_SLOW_BODY_MAX (TELEMLOG_SLOW_SLOT_BYTES - TELEMLOG_SLOT_HDR)  // 80
+#define TELEMLOG_SLOW_BODY_MAX (TELEMLOG_SLOW_SLOT_BYTES - TELEMLOG_SLOT_HDR)  // 84
 
 #define TELEMLOG_FAST 0
 #define TELEMLOG_SLOW 1
@@ -96,40 +97,3 @@ void telemlog_on_frame(const uint8_t mac[6], const uint8_t *data, int len);
 // and the INFO frame when it is due. Never waits; a failed send is counted and dropped.
 void telemlog_poll(uint32_t now_ms, telemlog_send_fn send);
 
-// ---- SLOW flash ring (optional) -------------------------------------------------------------
-// SLOW records are also kept in a flash partition, so they survive a power cycle and reach back
-// hours. The caller owns the policy: when an erase is allowed, and how the flash is reached.
-// Layout: 4 KB sectors of 16 pages of 256 B. Page = u32 page_seq, u32 ~page_seq, then entries
-// {u8 n, n bytes LOG frame, u16 crc16}, never across a page; unused bytes stay 0xFF.
-// read() should use a memory-mapped partition (esp_partition_mmap): esp_partition_read() turns
-// the cache off, like erase and write, and stalls interrupts whose code is not in IRAM.
-#define TELEMLOG_T_FLASHINFO 0x43          // u8 type, u8 n, n x {u32 boot_id, u32 oldest, u32 newest}
-#define TELEMLOG_FLASHINFO_MAX 20          // newest boot first
-#define TELEMLOG_FLASHINFO_PERIOD_MS 5000
-#ifndef TELEMLOG_FLASH_ERASED_AHEAD
-#define TELEMLOG_FLASH_ERASED_AHEAD 4      // sectors kept erased ahead of the write position
-#endif
-#define TELEMLOG_FLASH_SECTOR 4096
-#define TELEMLOG_FLASH_PAGE 256
-
-typedef struct {
-  bool (*erase_sector)(uint32_t sector);                      // erase sector n of the partition
-  bool (*write)(uint32_t offset, const void *data, size_t n);  // program; never crosses a page
-  bool (*read)(uint32_t offset, void *data, size_t n);
-  uint32_t sectors;                                            // partition size / 4096
-} telemlog_flash_t;
-
-typedef struct {
-  uint32_t pages_written, sectors_erased;
-  uint32_t entries_skipped;  // no erased page was ready; the record is still in RAM
-  uint32_t write_fail, erase_fail;
-  uint32_t used_sectors, erased_sectors;
-} telemlog_flash_counters_t;
-
-// After telemlog_init(). Reads every sector once to rebuild the index (2 KB heap for 128 sectors).
-bool telemlog_flash_attach(const telemlog_flash_t *flash);
-// From loop(): programs at most one full staged page, and, if allow_erase, erases at most one
-// sector to keep TELEMLOG_FLASH_ERASED_AHEAD sectors ready. The oldest sector is erased first.
-void telemlog_flash_service(uint32_t now_ms, bool allow_erase);
-void telemlog_flash_counters(telemlog_flash_counters_t *out);
-size_t telemlog_flashinfo_frame(uint8_t *buf, size_t cap);

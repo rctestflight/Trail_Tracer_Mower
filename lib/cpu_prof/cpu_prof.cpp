@@ -30,6 +30,8 @@ Task tasks[MAX_TASKS];
 int n_tasks = 0;
 uint32_t sec_n[MAX_SECTIONS];
 uint32_t samples = 0, other = 0;
+uint32_t l_samples = 0, l_idle = 0, l_loop = 0, l_sec[MAX_SECTIONS];  // the load() window (0.5.97)
+TaskHandle_t idle_task = nullptr;
 uint64_t interval_sum_us = 0;
 uint64_t isr_cycles = 0;       // the sampler's own cost: CPU cycles inside onTimer  // the sampled time: the sum of the intervals that ended in a sample
 uint32_t cur_interval_us = 500;
@@ -60,6 +62,9 @@ bool IRAM_ATTR onTimer(void*) {
     other++;
   }
   if (h == loop_task) sec_n[cur_section]++;
+  l_samples++;
+  if (h == idle_task) l_idle++;
+  else if (h == loop_task) { l_loop++; l_sec[cur_section]++; }
   rng ^= rng << 13;  // xorshift32
   rng ^= rng >> 17;
   rng ^= rng << 5;
@@ -96,6 +101,22 @@ bool begin(uint32_t mean_us) {
 }
 
 void section(uint8_t s) { cur_section = s < MAX_SECTIONS ? s : MAX_SECTIONS - 1; }
+
+bool load(uint32_t drive_mask, uint8_t* busy, uint8_t* loop, uint8_t* drive) {
+  if (!idle_task) idle_task = xTaskGetIdleTaskHandle();
+  portENTER_CRITICAL(&mux);
+  const uint32_t n = l_samples, idle = l_idle, lp = l_loop;
+  uint32_t dr = 0;
+  for (int i = 0; i < MAX_SECTIONS; i++) if ((drive_mask >> i) & 1u) dr += l_sec[i];
+  l_samples = l_idle = l_loop = 0;
+  memset(l_sec, 0, sizeof(l_sec));
+  portEXIT_CRITICAL(&mux);
+  if (!n) return false;
+  *busy = (uint8_t)((100u * (n - idle) + n / 2) / n);
+  *loop = (uint8_t)((100u * lp + n / 2) / n);
+  *drive = (uint8_t)((100u * dr + n / 2) / n);
+  return true;
+}
 
 bool running() { return running_; }
 

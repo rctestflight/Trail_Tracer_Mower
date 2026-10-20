@@ -29,7 +29,7 @@ Byte 0 is the type. A frame whose byte 0 is `-` (0x2D) is the text status messag
 | 0x41 | REQ | collector to mower, unicast | request for log records, see "Telemetry log" |
 | 0x42 | INFO | mower broadcast, once a second | the record ranges that the mower holds |
 | 0x44 | MON | monitor broadcast, once a second | u8 type, u8 version (1), u32 monitor ms, u64 PC unix time in ms (0 = unknown), u8 n (0: no receipts yet) |
-| 0x43 | FLASHINFO | mower broadcast, every 5 s | the SLOW record ranges in the mower's flash, per boot |
+| 0x43 | FLASHINFO | not sent from firmware 0.5.82 | was: the SLOW record ranges in the mower's flash, per boot |
 | 0x7F | RESTART | any to one board, unicast | u8 type, then 4 ASCII bytes: "RST!" restarts the ESP32; "DLD!" restarts it into ROM download mode (USB 303a:0002, for esptool); then, to the mower, u32 fleet key |
 
 ## RESTART
@@ -78,6 +78,20 @@ CMD text, one of:
 - `save`
 - `list`
 - `run start`, `run stop`, `get run` (section "Run and STOP")
+- `sweep <index> <value>` (firmware 0.5.87): bin sweep command to the Rx STM32 as it is. Index 0: sweep bins 0-8, 255 auto (refused while the vehicle moves). Index 1, 2: range start, stop in Hz. Not saved.
+- `bin <index> <hz>` (firmware 0.5.103): bin `<index>` (0-7) to `<hz>` (46 800-62 800 Hz) on the Rx STM32; 0 puts the bin back on the sweep. Allowed while the vehicle drives. Not saved: the next DSP set sends `dsp_bin_hz` again. The ACK goes before the Rx STM32 answer; `get dsp_bin_hz_<index>_eff` gives the value in effect (empty until the Rx STM32 answers). Rx STM32 2.0.58 and later move the bin about 10 frames after the command; from 0.5.104 the ESP32 reads the bin every 50 ms (up to 1.5 s) until it reads the new value, so `_eff` follows. ACK texts:
+
+  | Result | Text | Case |
+  |---|---|---|
+  | 0 | `bin 7=55000 Hz` | sent to the Rx STM32 |
+  | 0 | `bin 7=sweep` | hz 0: the bin goes back on the sweep |
+  | 2 | `bin 7=Frequency out of range: 46800 to 62800 Hz` | hz outside the range, and not 0 |
+  | 2 | `bin=Bin index out of range: 0 to 7` | index outside 0-7 |
+  | 4 | `bin 0=Wire bin of sensor 1: not free` | the bin follows the wire of a sensor |
+  | 4 | `bin 7=No Rx STM32 link` | no layout 2 Rx STM32 |
+- `tlm` (firmware 0.5.116-telem): the table hash and the number of table values, for example `tlm=04b0ec9e values=4`. The hash is the `version` of the matching `telemetry_def.json` (section "Telemetry definition").
+- `get telemetry_def` (firmware 0.5.116-telem): the `version` of the matching `telemetry_def.json`, for example `telemetry_def=6d0fce8d`.
+- `set dsp_frame_period_us` (firmware 0.5.104, minimum from 0.5.105): the minimum is 2938 us with every link. A shorter value is refused with result 2 and the text `dsp_frame_period_us=Update period too short: 2.94 ms or longer`. An accepted value answers after the Rx STM32 answer (up to 500 ms) with the period in effect: `dsp_frame_period_us=2938 (asked 3000)`, or `dsp_frame_period_us=3000 (no Rx STM32 answer)`.
 
 `<key>` is the `config.json` key name. `<value>` is a JSON literal with no spaces: a number, `true` or `false`.
 
@@ -145,6 +159,7 @@ u8 body type 0x20, u8 n (1 to 7), then n samples of 32 bytes. One sample is take
 | 14 | wheel speed, node 0 (even side) | i16 | 0.001 rev/s, ODrive encoder estimate as received |
 | 16 | wheel speed, node 1 (odd side) | i16 | 0.001 rev/s |
 | 18 | gyro z | i16 | 0.02 deg/s; -32768 = no gyro. Logged only: the autopilot does not use the gyro |
+| 19 | Wi-Fi link (`radio_mode` `wifi`, `lib/wifi_telem`) | 1 associated, 2 association lost, 3 server address learned, 4 no server beacon and no mDNS (multicast DNS) answer 30 s after the association | 1: received signal strength, dBm; 3: server port; 4: 30 | 1: `ssid=<ssid> ip=<ip> ch=<channel>`; 2: `ssid=<ssid>`; 3: `server <ip>:<port> via beacon` or `via mdns`; 4: `no telemetry server on this network`. The text never holds the password. |
 | 20 | beacon 1 (`s1_btx_radius[0]`) | u8 | 4 mm, 255 = 1020 mm or more |
 | 21 | beacon 2 (`s1_btx_radius[1]`) | u8 | 4 mm |
 | 22 | sensor 1 coil 1, real | bf16 | `coil_data[0][0]`, bfloat16: the top 16 bits of the float32, rounded to nearest even (relative error 0.4 % at most; the float32 range, because the Goertzel output's scale is not fixed) |
@@ -154,6 +169,8 @@ u8 body type 0x20, u8 n (1 to 7), then n samples of 32 bytes. One sample is take
 | 30 | crossing point X, filtered (autopilot) | i16 | mm, left positive; -32768 = no reading |
 
 Size: 14 + 2 + 7 x 32 = 240 bytes a frame, about 14.3 frames a second, about 27 kbit/s.
+
+With the STM32 link version 2 (firmware 0.5.45 and later), bytes 22 to 29 hold sensor 1 coil 1, sensor 1 coil 2, sensor 2 coil 1 and sensor 2 coil 2 at the wire bin of each sensor, in STM32 magnitude units (2^-24 LSB). From 0.5.72 they are signed (the STM32 sign of each coil value); up to 0.5.71 they held the absolute value.
 
 ### Body 0x22: sample block with the six IMU axes (stream 0)
 
@@ -247,6 +264,83 @@ Size: 14 + 116 = 130 bytes a frame; at 5 Hz about 5 kbit/s.
 | 68 | PC time at this record, seconds (0.5.22 and later; from MON frames) | u32 | unix s; 0 = unknown |
 | 72 | PC time at this record, milliseconds part | u16 | ms |
 | 74 | firmware version major, minor, patch (0.5.24 and later) | 3 x u8 | for example 0, 5, 24 |
+| 77 | ESP32 CPU load of the last second: all tasks but idle, loop(), the drive parts of loop() (0.5.97 and later) | 3 x u8 | % |
+| 80 | update period in effect: the Rx STM32 answer to the period setting (0.5.104 and later) | u32 | us; 0 = no answer yet |
+
+### Body 0x33: bin sweep readings as they come (stream 0, firmware 0.5.103, Rx STM32 2.0.51+)
+
+The bins that are off step across the span. The ESP32 sends each frame's sweep bin values with the frame seq and, on a
+frame with the sweep page, the tag and the previous-frame tag. The PC places each reading on the grid
+(`tools/rover_log.py` `sweep_points()`), so a change of the Rx STM32 grid rule needs no ESP32 change. Wi-Fi: at most 40
+records a second; ESP-NOW: at most 4. A record waits one such period at most.
+
+| Offset | Field | Type |
+|---|---|---|
+| 0 | body type 0x33 | u8 |
+| 1 | table id: a change starts a new trace | u8 |
+| 2 | f0: frequency of grid point 0, 0.1 Hz | u24 |
+| 5 | step, 0.1 Hz | u16 |
+| 7 | grid points P | u16 |
+| 9 | sweep bins n | u8 |
+| 10 | bin mask (bit b = bin b sweeps) | u8 |
+| 11 | frames u | u8 |
+| 12 | u frames: seq (u8), flags (u8: bit 0 the frame holds the sweep page, bit 1 frame overrun), tag (u16), previous-frame tag (u16; both 0xFFFF on a frame without the page), then n x {sensor 1 coil 1, coil 2, sensor 2 coil 1, coil 2} (int24, magnitude LSB as body 0x2E; 0x800000 = the sensor is on no lane) | 6 + 12 n B each |
+
+Grid rule (Rx STM32): the tag step s per frame is tag - previous-frame tag (mod P). With s = n > 1 (2.0.57 and later),
+sweep bin i (the i-th set bit of the mask) reads grid point (tag + i) mod P. With s = 1 (2.0.51 to 2.0.56), it reads
+(tag + i x P / n) mod P. A frame without the page has tag = page tag + s x (seq difference). Frequency of grid point g:
+(f0 + g x step) / 10 Hz.
+
+### Body 0x37: polarity detector blocks (stream 0, firmware 0.5.120, Rx STM32 2.0.67+)
+
+While the Rx STM32 streams a polarity detector (status bit 26, CID 52 on), frame result 2 holds the detector block, not coil data; lane 2 then reads as zero. The vehicle logs each frame's block as it comes. Wi-Fi: a record at most every 20 ms, every sample arrives (978 samples a second). ESP-NOW: a record every 250 ms, the frames between are dropped.
+
+| Offset | Field | Type |
+|---|---|---|
+| 0 | body type 0x37 | u8 |
+| 1 | frames u in this record | u8 |
+| 2 | u entries: | |
+| +0 | frame seq | u8 |
+| +1 | n samples in this frame (0 to 10) | u8 |
+| +2 | detector (bits 0-2); samples lost since the last frame (bit 7) | u8 |
+| +3 | gap count since the stream start | u16 |
+| +5 | output index of the first sample, low 16 bits | u16 |
+| +7 | input index of the first sample after the last housekeeping gap, low 16 bits | u16 |
+| +9 | n x (re, im) | int16, int16 |
+
+An entry is 9 + 4 n bytes. `python tools/rover_log.py polar <log> --out samples.csv` writes one row per sample. USB `stm polar` gives the counters (frames, samples, logged, dropped, lost flags) and the last block header.
+
+### Body 0x32: bin sweep readings with grid points (stream 0, firmware 0.5.87 to 0.5.102)
+
+Replaced by body 0x33 in firmware 0.5.103. Layout, for old logs:
+
+The bins that are off step across the span, one grid point per update. Each reading goes out with its grid point; the
+PC builds the trace (live, average, maximum hold). Wi-Fi: every update; ESP-NOW: every 10th update. A record holds up
+to 15 readings and waits at most 100 ms.
+
+| Offset | Field | Type |
+|---|---|---|
+| 0 | body type 0x32 | u8 |
+| 1 | table id: a change starts a new trace | u8 |
+| 2 | f0: frequency of grid point 0, 0.1 Hz | u24 |
+| 5 | step, 0.1 Hz | u16 |
+| 7 | grid points P | u16 |
+| 9 | sweep bins n | u8 |
+| 10 | updates u | u8 |
+| 11 | u x n readings: grid point g (u16), then sensor 1 coil 1, coil 2, sensor 2 coil 1, coil 2 (int24, magnitude LSB as body 0x2E; 0x800000 = the sensor is on no lane) | 14 B each |
+
+Frequency of grid point g: (f0 + g x step) / 10 Hz.
+
+### Body 0x31: vehicle name (stream 1)
+
+From firmware 0.5.69: every 10 s, and at once after a change of the setting `vehicle_name`.
+
+| Offset | Field | Type | Unit |
+|---|---|---|---|
+| 0 | body type 0x31 | u8 | |
+| 1 | vehicle number (`vehicleID`) | u8 | |
+| 2 | name length n | u8 | 16 at most |
+| 3 | name | n bytes | ASCII: A-Z, a-z, 0-9, space, `_`, `-` |
 
 ### Body 0x30: event (stream 1)
 
@@ -267,6 +361,98 @@ u8 body type 0x30, u16 code, i32 a, i32 b, then ASCII text to the end of the fra
 | 11 | run start, run stop or STOP | 1 start, 0 stop | result (0 ok, 4 refused) | source and answer, e.g. `STOP frame -> run=stopped` |
 | 12 | IMU at boot | accelerometer range, g (0 = no IMU) | gyro range, deg/s | gyro offsets, filter, or `absent (init <code>)` |
 | 18 | STM32 command link (0.5.25 and later, `lib/stm_settings`) | kind: 1 no answer after the last send, 2 wrong answer, 3 a read-back differs (all five settings sent again), 4 packets back after a gap of 0.5 s or more (all five sent again), 5 command queue full, 6 HELLO/BOOT sent after 1 s without packets | kinds 1, 2, 3, 5: command ID (bit 31 the write bit); 4: the gap, ms; 6: 0 boot ok, 1 no HELLO answer, 2 BOOT failed, 3 no nDATA_READY, -1 line not silent, no HELLO sent | for example `read-back cmd 6 got 0.000 want 11.900: send all again`, `silent 1004 ms, 13 B: boot ok; hello 7 B: 00 00 01 00 00 01 00` |
+
+### Telemetry definition: `telemetry_def.json` (firmware 0.5.116-telem)
+
+The telemetry table (`include/telemetry_table.h`, user lines in `include/user_telemetry.h`) has one line per record field. The build writes `telemetry_def.json` from it (`tools/gen_telemetry_def.py`, run by `tools/gen_telemetry_def_build.py`, into the build folder; `docs/telemetry_def.json` holds the file of the default build). The file describes every record body of the log: the fixed records above, byte for byte as the firmware packs them, and the table values below. A reader decodes every record with the file; it needs no list of fields of its own. The record bytes on the air do not change.
+
+#### Which file
+
+- `version` is the table hash: 8 hex digits, the CRC-32 (zlib) of the table text (section "Table hash"). Each build with other table lines has its own version: keep one file per version.
+- The vehicle reports its version in three places: the answer to `get telemetry_def` (`telemetry_def=<version>`), the answer to `tlm` (`tlm=<version> values=<n>`), and every table record (bodies 0x34 to 0x36, bytes 1 to 4).
+- The fixed records carry no version. A reader uses the file of the version that the vehicle reported, or that a table record of the same boot carried. With no report, it uses the file of the default build: the fixed records are the same in each official build.
+
+#### File layout
+
+```json
+{"format": "telemetry_def", "format_version": 2, "version": "6d0fce8d", "about": "...", "table_values": 0,
+ "records": {"0x21": {"name": "status", "stream": 1, "rate_hz": 1, "min_bytes": 66, "fields": [...]}, ...}}
+```
+
+| Key | Meaning |
+|---|---|
+| `format`, `format_version` | `"telemetry_def"`, 2. Version 1 (0.5.116-telem, first part) described the table values only. |
+| `version` | the table hash, 8 hex digits |
+| `table_values` | the number of TLM lines (the `values=` of the `tlm` answer) |
+| `records` | one entry per body type, key `"0x"` and 2 lowercase hex digits |
+
+A record:
+
+| Key | Meaning |
+|---|---|
+| `name` | the `body` name of the decoded record, for example `samples`, `status`, `tlm` |
+| `stream` | 0 FAST, 1 SLOW |
+| `rate_hz` | records (or samples) a second; null when a setting or an event sets it, and then `rate` names it (`telemetry_rate_hz`, `telemetry_bins_hz`, `on a change`, `each sweep page`) |
+| `min_bytes` | the shortest body that decodes, in bytes after the body type. A field past the end of a shorter body (older firmware) has no value. |
+| `const` | fixed keys of the decoded record, for example `{"layout": 3, "imu": false, "rate_hz": 100}` |
+| `fields` | the header fields; `offset` counts from the byte after the body type |
+| `repeat` | the repeated block: `name` (`samples`), `count_offset` (the u8 block count n), `offset` (the first block), `stride` (bytes a block), `fields` (offsets from the block start). The body length must be 1 + `offset` + n x `stride`. With `rate_offset` (table records): block i is at the record ms + i x (1000 / the u8 rate at that offset) ms. |
+| `special` | only bodies 0x32 and 0x33: the part after the header fields is in this document only (frames of sweep readings) |
+
+A field:
+
+| Key | Meaning |
+|---|---|
+| `name` | the key of the value. Unique within a record. The same name in two records (for example `ap_state` in status and in samples) is two values. A name stays for good. |
+| `type` | `u8`, `i8`, `u16`, `i16`, `u24`, `i24`, `u32`, `i32` (little-endian), `f32`, `bf16` (the top 16 bits of a float32), `text` (ASCII to the body end, or with `length_offset`: a u8 length at that offset), `version` (3 x u8, shown `major.minor.patch`), `unix_ms` (u32 seconds, then u16 ms; value = s x 1000 + ms) |
+| `offset` | the first byte of the field (header: after the body type; block: from the block start) |
+| `scale`, `unit`, `decimals` | shown value = wire value x `scale`, in `unit`, with `decimals` on the screen |
+| `label`, `group` | the screen name and the plot group |
+| `kind` | `value`; `bits` (each name in `bits` is a 0/1 value of that bit, from bit 0; `""` = unused; the field name only names the set); `enum` (`names`: code to name; an unknown code shows `unknown` if given, else the code); `text`; `time` (ms after the record ms: the sample time); `hex` (8 hex digits) |
+| `none` | the wire code for "no value", compared before `shift` and `mask`; null: every code is a value. `"NaN"` for `f32`. |
+| `shift`, `mask` | a bit field: value = (wire >> shift) & mask |
+| `when` | `[field, value]`: the field exists only when that header field has that value (event `kind`: code 18) |
+| `list`, `index` | the element `index` of the array `list`; `tools/rover_log.py` gives the array as one list (`coil`, `enc_pos_turn`, `enc_age_ms`, `axis_state`, `hz`, `coils`) |
+
+Reader rules:
+
+- A record body whose length does not match (shorter than `min_bytes`, or a block count that does not fill the body) is not decoded. Show it as an error and keep the raw frame.
+- A table record (0x34 to 0x36) whose hash has no file is not decoded. Show "unknown definition <hash>".
+- If the status record of a boot has Rx STM32 status bit 24 and firmware 0.5.45 or later, the 4 `coil` values of its samples are magnitudes (`tools/rover_log.py` adds `coil_mag`). This rule spans two records; it is not in the file.
+
+### Table values: bodies 0x34, 0x35, 0x36 (firmware 0.5.116-telem)
+
+A table value is a value that one TLM line of the telemetry table defines. User code sets it with `tlm_set(TLM_<name>, value)`. The build writes its record into `telemetry_def.json` (above); a reader decodes it from there with no other change.
+
+Each rate has its own body. A rate with no value sends no record.
+
+| Body | Rate | Stream | Samples a record |
+|---|---|---|---|
+| 0x34 | 1 Hz | 1 (SLOW) | 1 |
+| 0x35 | 10 Hz | 0 (FAST) | up to 10 |
+| 0x36 | the log rate, `telemetry_rate_hz` (100, 50, 25, 20, 10, 5, 4, 2 or 1 Hz) | 0 (FAST) | up to the rate (one second of samples), fewer when the body is full |
+
+| Offset | Field | Type |
+|---|---|---|
+| 0 | body type: 0x34, 0x35 or 0x36 | u8 |
+| 1 | table hash: `version` of the matching `telemetry_def.json` | u32 |
+| 5 | sample count n | u8 |
+| 6 | rate in Hz | u8 |
+| 7 | n samples of `stride` bytes each | |
+
+- The LOG header's ms is the time of sample 0. Sample i is at ms + i x (1000 / rate) ms. Each rate divides 1000, so the step is a whole number of ms.
+- A sample holds the values of that body in table order, at the `offset` of each field in `repeat`.
+- The firmware sends round(value / `scale`), clamped to the type range without the `none` code. A wire value equal to `none` means "no value": the firmware had no value, or the value was never set.
+- A record carries the last value set before its sample time: there is no filter. A value set less often than its rate repeats.
+- A rate change starts a new record. A loop pass more than one sample late also starts a new record: the samples of that time are missing, and the next record starts at its own ms.
+
+Example record (env `telemetry_newvalue`, version `04b0ec9e`): body 0x36 at 20 Hz, 2 samples: `36 9e ec b0 04 02 14 | 2a 01 2c 01 | 3c 01 ff ff`. n = 2; rate 20 Hz. Sample 0 at ms: test_frames 298, test_r1_mm 300 mm. Sample 1 at ms + 50: test_frames 316, test_r1_mm no value.
+
+`tools/rover_log.py csv <file> --def telemetry_def.json` writes the table values as CSV, one column per value. `tools/rover_log.py decode <file> [--def telemetry_def.json]` gives every record in JSON lines.
+
+#### Table hash
+
+The hash is the CRC-32 (zlib) of a text, in UTF-8. The compiler computes it from the table lines (`lib/tlm`); `tools/gen_telemetry_def.py` computes the same from the same lines. The text is `tlm 2` and a line feed, then one line per table line in table order: a tag (`R` for a TLR line, `F` for TLF, `V` for TLM), then the columns as written in the line, joined by `|`, then a line feed. A token column loses its outer spaces, and each inner run of spaces becomes one space; a string column gives its text. Any change of a table line, of the order or of the format changes the hash. A reader does not compute the hash: it only matches it to a file.
 
 ### REQ 0x41
 
@@ -296,9 +482,9 @@ Broadcast once a second while ESP-NOW is on, also when a stream is empty.
 
 A boot that made no record in a stream has oldest 0xFFFFFFFF and newest 0xFFFFFFFF for it. A boot that made records but holds none of them any more has oldest = newest + 1, where newest is the last seq it made (telemlog 312d827): a collector then knows how far a crashed boot went.
 
-### FLASHINFO 0x43
+### FLASHINFO 0x43 (up to firmware 0.5.81)
 
-Broadcast every 5 s once the flash store is attached. The flash keeps SLOW records over a power cycle and over many boots; INFO shows only two boots.
+Firmware 0.5.82 and later keep the log in RAM only and send no FLASHINFO. The PC records the log. Up to 0.5.81: broadcast every 5 s once the flash store was attached; the flash kept SLOW records over a power cycle and over many boots.
 
 | Offset | Field | Type |
 |---|---|---|

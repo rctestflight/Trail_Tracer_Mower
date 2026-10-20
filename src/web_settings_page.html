@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vehicle settings</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;600&display=swap" media="print" onload="this.media='all'">
+<style>
+:root{color-scheme:light dark;--bg:#f4f5f7;--card:#fff;--fg:#1c1f24;--mute:#5f6670;--line:#dcdfe4;--acc:#1f6feb;--ok:#1a7f37;--bad:#c62828;--warn:#8a5a00;--warnbg:#fff4d6}
+@media(prefers-color-scheme:dark){:root{--bg:#121417;--card:#1b1e23;--fg:#e5e7ea;--mute:#9aa1ab;--line:#2e333a;--acc:#4c8dff;--ok:#3fb950;--bad:#ff6b6b;--warn:#e3b341;--warnbg:#2b2410}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 "Roboto Mono",monospace}
+header{background:var(--card);border-bottom:1px solid var(--line);padding:12px 16px}
+header h1{margin:0;font-size:18px}
+header p{margin:2px 0 0;color:var(--mute);font-size:12px}
+header button{padding:2px 8px;font-size:12px;margin-left:6px}
+main{max-width:780px;margin:0 auto;padding:16px 16px 96px}
+.note{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:0 0 14px;background:var(--card)}
+.note.warn{background:var(--warnbg);border-color:var(--warn)}
+details{background:var(--card);border:1px solid var(--line);border-radius:10px;margin:0 0 12px;padding:0 16px}
+summary{cursor:pointer;padding:12px 0;font-weight:600}
+summary small{font-weight:400;color:var(--mute);margin-left:8px}
+.row{display:grid;grid-template-columns:1fr minmax(140px,230px);gap:2px 14px;padding:10px 0;border-top:1px solid var(--line);align-items:center}
+.row label{font-weight:600}
+.row .key{display:block;font-weight:400;color:var(--mute);font-size:11px}
+.hint,.ans{grid-column:1/-1;font-size:12px}
+.hint{color:var(--mute)}
+.ans.ok{color:var(--ok)}.ans.bad{color:var(--bad)}
+input,select{width:100%;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
+input[type=checkbox]{width:20px;height:20px;justify-self:start;accent-color:var(--acc)}
+input:disabled,select:disabled{opacity:.6}
+button{font:inherit;padding:8px 14px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
+button.pri{background:var(--acc);border-color:var(--acc);color:#fff}
+button.danger{color:var(--bad);border-color:var(--bad)}
+button:disabled{opacity:.5;cursor:default}
+.bar{position:fixed;left:0;right:0;bottom:0;background:var(--card);border-top:1px solid var(--line);padding:10px 16px}
+.bar div{max-width:780px;margin:0 auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+#msg{flex:1;min-width:160px;font-size:12px}
+@media(max-width:560px){.row{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header><h1 id="title">Vehicle settings</h1><p><span id="sub">Loading</span> <button id="reload">Reload</button></p></header>
+<main>
+<div id="drive" class="note warn" hidden>The vehicle is in autonomous mode. Save, reset and restart need it stopped.
+ <button id="stop">Stop the vehicle</button></div>
+<p class="note">A change takes effect when you leave the field. Press <b>Save</b> to keep your changes after a restart.</p>
+<div id="groups"></div>
+<details id="reset"><summary>Reset</summary>
+<p>Set every setting back to its default and save. The Wi-Fi details and the radio link settings stay, so this page stays reachable.</p>
+<p><button class="danger" id="erase">Reset all settings</button></p>
+</details>
+</main>
+<div class="bar"><div>
+<button class="pri" id="save" disabled>Save</button>
+<button id="restart">Restart</button>
+<span id="msg"></span>
+</div></div>
+<script>
+const W=/*WORDS*/null;
+const $=id=>document.getElementById(id);
+let S=null,unsaved=new Set(),busy=false;
+function msg(t,ok){const m=$('msg');m.textContent=t;m.style.color=ok===false?'var(--bad)':ok?'var(--ok)':'';}
+async function call(url,body){
+  const r=await fetch(url,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
+  if(!r.ok)throw new Error(await r.text()||('HTTP '+r.status));
+  return r.json();
+}
+function num(v){return typeof v==='number'?String(+v.toPrecision(10)):String(v);}
+function rangeText(s){
+  if(s.t==='string')return 'Up to '+s.n+' characters.';
+  if(s.min===undefined&&s.max===undefined)return '';
+  let t=s.max===undefined?'Range '+num(s.min)+' or more':s.min===undefined?'Range up to '+num(s.max):'Range '+num(s.min)+' to '+num(s.max);
+  return t+(s.z?', or 0 = off':'')+'.';
+}
+function sentence(t){t=t.trim();return t&&!/[.!?)]$/.test(t)?t+'.':t;}
+function shown(v){return typeof v==='boolean'?(v?'on':'off'):num(v);}
+function words(k){return (W&&W.keys[k])||{};}
+function setStatus(){
+  const n=unsaved.size;
+  $('save').disabled=busy||n===0;
+  $('drive').hidden=!(S&&(S.run==='running'||S.moving));
+  if(S)$('sub').textContent='Firmware '+S.fw+' | '+S.settings.length+' settings | '+(S.run==='running'?'autonomous mode':S.moving?'moving':'stopped');
+}
+function field(s){
+  const w=words(s.k),row=document.createElement('div');row.className='row';
+  const id='f_'+s.k,lab=document.createElement('label');lab.htmlFor=id;
+  lab.textContent=(s.l||w.l||s.k)+((s.u||w.u)?' ('+(s.u||w.u)+')':'');
+  const key=document.createElement('span');key.className='key';key.textContent=s.k;lab.appendChild(key);
+  let inp;
+  const vals=s.c||w.vals;
+  if(s.t==='bool'){inp=document.createElement('input');inp.type='checkbox';}
+  else if(vals){inp=document.createElement('select');
+    const list=vals.map(String);if(!list.includes(String(s.v)))list.push(String(s.v));
+    for(const v of list){const o=document.createElement('option');o.value=o.textContent=v;inp.appendChild(o);}}
+  else{inp=document.createElement('input');inp.type='text';
+    if(s.t!=='string'){inp.inputMode=s.t==='int'&&!(s.min<0)?'numeric':'decimal';}else inp.maxLength=s.n;
+    inp.autocomplete='off';inp.spellcheck=false;}
+  inp.id=id;
+  const hint=document.createElement('div');hint.className='hint';
+  hint.textContent=[sentence(s.h||w.h||''),rangeText(s),'Default '+shown(s.d)+'.',w.restart?'Takes effect after Save and Restart.':''].filter(Boolean).join(' ');
+  const ans=document.createElement('div');ans.className='ans';
+  const put=v=>{if(inp.type==='checkbox')inp.checked=!!v;else inp.value=typeof v==='number'?num(v):String(v);};
+  put(s.v);
+  if(w.remote===0){inp.disabled=true;ans.textContent='Set over USB or in config.json only.';}
+  inp.addEventListener('change',async()=>{
+    const value=inp.type==='checkbox'?(inp.checked?'true':'false'):inp.value.trim();
+    if(value===''){ans.className='ans bad';ans.textContent='Enter a value.';put(s.v);return;}
+    ans.className='ans';ans.textContent='Sending';inp.disabled=true;
+    try{
+      const r=await call('/api/set',{key:s.k,value});
+      if(r.value!==undefined){s.v=r.value;}
+      put(s.v);
+      ans.className='ans '+(r.code===0?'ok':'bad');
+      ans.textContent=(r.code===0?'':'Not changed: ')+r.reply;
+      if(r.code===0)unsaved.add(s.k);
+      S.run=r.run;S.moving=r.moving;
+    }catch(e){ans.className='ans bad';ans.textContent='No answer: '+e.message;put(s.v);}
+    inp.disabled=false;setStatus();
+  });
+  row.append(lab,inp,hint,ans);
+  return row;
+}
+function build(){
+  const order=W?W.groups.map(g=>g[0]):[],byName={};
+  const box=$('groups');box.textContent='';
+  for(const s of S.settings){const g=s.g||words(s.k).g||'Other';(byName[g]=byName[g]||[]).push(s);if(!order.includes(g))order.push(g);}
+  for(const g of order){
+    if(!byName[g])continue;
+    const info=W&&W.groups.find(x=>x[0]===g);
+    const d=document.createElement('details');d.open=!(info&&info[1]);
+    const sum=document.createElement('summary');sum.textContent=g;
+    if(info&&info[2]){const sm=document.createElement('small');sm.textContent=info[2];sum.appendChild(sm);}
+    d.appendChild(sum);
+    for(const s of byName[g])d.appendChild(field(s));
+    box.appendChild(d);
+  }
+  const name=S.settings.find(s=>s.k==='vehicle_name');
+  $('title').textContent=(name?name.v+': ':'')+'settings';
+  setStatus();
+}
+async function load(){
+  msg('Loading');
+  try{S=await call('/api/settings');unsaved.clear();build();msg('');}
+  catch(e){msg('No answer from the vehicle: '+e.message,false);}
+}
+async function action(url,done,ask){
+  if(ask&&!confirm(ask))return null;
+  busy=true;setStatus();msg('Working');
+  let r=null;
+  try{r=await call(url,{});msg(r.code===0?done:r.reply,r.code===0);if(S){S.run=r.run;S.moving=r.moving;}}
+  catch(e){msg('No answer: '+e.message,false);}
+  busy=false;setStatus();return r;
+}
+$('save').onclick=async()=>{const r=await action('/api/save','Saved. The settings stay after a restart.');if(r&&r.code===0){unsaved.clear();setStatus();}};
+$('restart').onclick=async()=>{
+  const ask=unsaved.size?'You have changes that are not saved. They are lost at the restart. Restart now?':'Restart the vehicle now?';
+  const r=await action('/api/restart','Restarting',ask);
+  if(r&&r.code===0){unsaved.clear();msg('Restarting. The page reloads when the vehicle answers.');
+    let tries=0;const t=setInterval(async()=>{tries++;try{S=await call('/api/settings');clearInterval(t);build();msg('Restarted.',true);}catch(e){if(tries>30){clearInterval(t);msg('No answer after the restart. Press Reload.',false);}}},2000);}
+};
+$('erase').onclick=async()=>{
+  const r=await action('/api/erase','All settings are at their defaults and saved.','Reset every setting to its default? This cannot be undone.');
+  if(r&&r.code===0){const keep=$('msg').textContent;await load();msg(keep,true);}
+};
+$('stop').onclick=()=>action('/api/stop','The vehicle is stopped.');
+$('reload').onclick=()=>{if(!unsaved.size||confirm('Reload the values from the vehicle? Changes that are not saved stay in effect until a restart.'))load();};
+window.addEventListener('beforeunload',e=>{if(unsaved.size){e.preventDefault();e.returnValue='';}});
+load();
+</script>
+</body>
+</html>

@@ -171,6 +171,10 @@ int packStatus(uint8_t* o, const Status& s) {
   put32(o + 68, (uint32_t)(s.pc_unix_ms / 1000));
   put16(o + 72, (uint16_t)(s.pc_unix_ms % 1000));
   memcpy(o + 74, s.fw_ver, 3);
+  o[77] = s.cpu_busy;  // 0.5.97: CPU load %, the last second
+  o[78] = s.cpu_loop;
+  o[79] = s.cpu_drive;
+  put32(o + 80, s.dsp_period_us);  // 0.5.104: update period in effect, us
   return STATUS_BYTES;
 }
 
@@ -188,6 +192,16 @@ int packEvent(uint8_t* o, uint16_t code, int32_t a, int32_t b, const char* text)
     n += (int)len;
   }
   return n;
+}
+
+int packName(uint8_t* o, uint8_t vehicle_id, const char* name) {
+  size_t n = name ? strlen(name) : 0;
+  if (n > (size_t)VEHICLE_NAME_MAX) n = VEHICLE_NAME_MAX;
+  o[0] = BODY_NAME;
+  o[1] = vehicle_id;
+  o[2] = (uint8_t)n;
+  memcpy(o + 3, name, n);
+  return 3 + (int)n;
 }
 
 int packBins(uint8_t* o, uint8_t frames, uint16_t window_ms, const float hz[BINS], const int32_t v[BINS][4]) {

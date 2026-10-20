@@ -20,6 +20,9 @@
 //   - beacon radius: 12.22 * m^-0.330478 with m = sqrt(s1^2+s2^2) * bin gain (1 unless read, bins 5, 6).
 //     Bin 5 (62.5 kHz) -> btx_radius[0], bin 6 (46.875 kHz) -> btx_radius[1], as v1.
 //   - MEAS page: vbatt, vcharge, icharge, v5v, vesp_3v3, temperature, charge_code. HEALTH page: kept.
+//     Pages: MEAS on even seq, HEALTH on odd seq; with the bin sweep on (CID 43 answered OK with a value not 0,
+//     Rx STM32 2.0.49+): the SWEEP page on seq & 3 == 1 (sweep, page_sweep true) and HEALTH on seq & 3 == 3.
+//     A sweep bin (sweep.mask) is no beacon: its btx radius reads 32767 (none).
 //   - coil_data[sensor] = coil 1, 0, coil 2, 0 of the wire bin, int24 LSB (the v1 re/im places: coilStrength()).
 #pragma once
 #include <stddef.h>
@@ -64,7 +67,7 @@ struct Cal {
 class Decoder {
  public:
   // false: CRC or version bad, out not changed. true: out updated, ans holds this frame's answer.
-  bool decode(const uint8_t* f, __StmTxPacketStruct& out, Answer& ans);
+  bool decode(const uint8_t* f, __StmTxPacketStruct& out, Answer& ans, int len = STM_FRAME_LEN, uint32_t now_ms = 0);
   void setWireBin(int sensor, int bin) { if (sensor == 0 || sensor == 1) wire_bin_[sensor] = bin; }
   int wireBin(int sensor) const { return wire_bin_[sensor]; }
   void reset();  // the STM32 may be new: forget the seq and the learned values
@@ -80,9 +83,25 @@ class Decoder {
   PageMeas meas{};
   PageHealth health{};
   bool have_meas = false, have_health = false;
+  bool sweep_on = false;     // CID 43 answered OK with a value not 0: the sweep page layout
+  PageSweep sweep{};         // the last sweep page
+  bool page_sweep = false;   // this frame carried the sweep page
   float a[2] = {0, 0}, b[2] = {0, 0};  // per sensor, the wire bin after calibration
   bool lost[2] = {true, true};
   WfrxCoilPair coil[WFRX_RESULTS][WFRX_BINS];  // the last frame's coil data (bench print)
+  // Rx STM32 2.0.67+, status bit 26 (CID 52 on): frame result 2 is one polarity detector block, not coil data. polar
+  // holds its 48 B as sent: n samples (u8, 0-10), detector (bits 0-2) and samples lost (bit 7), gap count (u16),
+  // output index of the first sample (u16), input index after the last housekeeping gap (u16), n x (re, im) int16 LE.
+  // Lane 2 then reads as zero coil data (its sensor is lost).
+  static constexpr int POLAR_BLOCK = 48;
+  // Frame version 3 (Rx STM32 2.0.81+): the extension slot items, the last value of each item id (1..8) and index
+  // (bin or Tx channel 0-7, sensor 0-1: slot 0-15), with the time it came (10 ms units, wraps at 655 s; 0 = never).
+  uint8_t proto = 0;                       // the last good frame's version (2 or 3)
+  int16_t ext_val[WFRX_EXT_IDS][16] = {};
+  uint16_t ext_t10[WFRX_EXT_IDS][16] = {};
+  uint32_t ext_items = 0, ext_bad = 0;     // items taken; items with an unknown id or index
+  bool polar_on = false;
+  uint8_t polar[POLAR_BLOCK] = {};
 
  private:
   void learn(const Answer& ans);
@@ -97,5 +116,9 @@ class Decoder {
 
 // One command frame (10 B): seq, cid (bit 7 = write), index, reserved 0, value, CRC.
 void encodeCmd(uint8_t seq, uint8_t cid8, uint8_t index, uint32_t value, uint8_t out[ESP_FRAME_LEN]);
+// The Rx UART frame (16 B): version, angle (int16, 65 536 = one turn), flags (u32), seq, cid (0 = no command), index,
+// value, CRC-16 over bytes 0-13. crc_xor flips CRC bits (bench: a bad block).
+void encodeUartFrame(uint8_t version, int16_t angle, uint32_t flags, uint8_t seq, uint8_t cid8, uint8_t index, uint32_t value,
+                     uint8_t out[ESP_UART_FRAME_LEN], uint16_t crc_xor = 0);
 
 }  // namespace stmv2
