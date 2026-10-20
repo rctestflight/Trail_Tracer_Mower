@@ -8,7 +8,7 @@
 // Three kinds of line. One line each; no line breaks inside a line.
 //
 // TLR(body, name, stream, rate, header, block, count_offset, block_offset, stride, min_bytes, consts)
-//   A fixed record: its bytes are packed by hand (lib/rover_telemetry, src/main.cpp); these lines describe them.
+//   A fixed record: its bytes are packed by hand (lib/rover_telemetry, src/platform/telemetry.inc); these lines describe them.
 //   body          the body type byte
 //   name          the "body" name the reader gives the record (tools/rover_log.py)
 //   stream        0 FAST, 1 SLOW

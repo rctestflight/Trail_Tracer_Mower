@@ -6,7 +6,7 @@ No Arduino dependency: the same code builds on a PC for the tests.
 
 ## Where the firmware calls it
 
-`src/main.cpp`, section "Telemetry log":
+`src/platform/telemetry.inc`, section "Telemetry log":
 
 | Function | When | What |
 |---|---|---|

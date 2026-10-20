@@ -11,8 +11,19 @@ extern "C" {
 
 void pwm_read_rmt_init(uint8_t channelPins[], uint8_t numberOfPins);
 
+/**
+ * @brief The last pulse width of one RC receiver input.
+ * @param channel 0 to 3 (PWM_IN_1 to PWM_IN_4; 0 steering, 1 throttle, 2 aux)
+ * @return the pulse width in microseconds (500 to 2500 for a valid pulse)
+ */
 int32_t pwm_read_rmt_dur(uint8_t channel);
 void pwm_reset_readings();
+/**
+ * @brief Tells if one RC receiver input has a recent pulse.
+ * @param channel 0 to 3 (PWM_IN_1 to PWM_IN_4)
+ * @param max_age_ms the oldest pulse that counts, ms
+ * @return true when a valid pulse came within max_age_ms
+ */
 bool pwm_read_rmt_valid(uint8_t channel, uint32_t max_age_ms);
 // 0.5.104 (bench "pwm"): pulses since the last stats reset: count, width (0.1 us ticks) min, max, sum, and the
 // interval between pulses (us) min, max, sum over n - 1 intervals. Reset clears them.

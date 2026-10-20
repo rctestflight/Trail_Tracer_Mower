@@ -132,7 +132,7 @@ struct DeviceConfig {
 
 // The shortest frame period setting: the fastest STM32 period (2336 us, set-up S2N) plus 50 %, rounded up.
 // The ESP32 then has margin to serve the radio, the log and USB between frames.
-#define DSP_FRAME_PERIOD_MIN_US 2938  // 0.5.103: the shortest with no link; each link mode has its own (src/main.cpp)
+#define DSP_FRAME_PERIOD_MIN_US 2938  // 0.5.103: the shortest with no link; each link mode has its own (src/platform/radio.inc)
 
 // DSP values in effect, from the STM32 answers (NaN = no answer yet). "list" and "get" show them as the
 // read-only keys <key>_eff; config.json does not hold them.
@@ -179,18 +179,18 @@ bool msc_fat_loop(DeviceConfig* cfg);
  */
 void msc_fat_save_nvs(const DeviceConfig* cfg);
 
-/**
- * Persist the provided configuration to both NVS and config.json.
- *
- * Returns true when both saves succeed, false if JSON save fails.
- * NVS save is always attempted first.
- */
 void msc_fat_media_service();  // the medium back after msc_fat_save_all (also in the monitor role)
 // Before a planned USB detach (restart, ROM download mode, update, the power-off after "stm iaphold"):
 // the drive reports "no medium" and stays so, and the PC stops its reads. A PC that still read the
 // drive when the board left the bus lost USB ports until its own restart (Windows, 2026-10-12).
 // Wait about 500 ms after it before the detach.
 void msc_fat_eject();
+/**
+ * @brief Saves the settings to NVS and to config.json on the USB drive (NVS first). A flash write stops the CPU for
+ *        its time: save only while the vehicle stands still.
+ * @param cfg the settings to save (normally &g_deviceConfig)
+ * @return true when both saves passed, false when the config.json save failed
+ */
 bool msc_fat_save_all(const DeviceConfig* cfg);
 
 /**

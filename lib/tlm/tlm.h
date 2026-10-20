@@ -52,8 +52,12 @@ static_assert(TLM_BYTES_1HZ <= 77, "telemetry table: the 1HZ values take more th
 
 extern float g_tlm_value[TLM_COUNT + 1];
 
-// Sets one value: a store into RAM, nothing else. Call it as often as the value changes (every update period is
-// fine); each record takes the last value set before its sample time.
+/**
+ * @brief Sets one telemetry value: a store into RAM, nothing else. Call it as often as the value changes (every
+ *        update period is fine); each record takes the last value set before its sample time.
+ * @param id the value, TLM_<name> from its line in include/telemetry_table.h or include/user_telemetry.h
+ * @param v the value (NAN: no value)
+ */
 inline void tlm_set(tlm_id id, float v) { g_tlm_value[id] = v; }
 
 namespace tlm {

@@ -3,7 +3,7 @@
 #include <Arduino.h>
 #include "wifi_link.h"
 
-extern "C" const char* rover_fw_version();  // src/main.cpp
+extern "C" const char* rover_fw_version();  // src/platform/board.inc
 
 namespace web {
 namespace {

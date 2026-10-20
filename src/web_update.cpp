@@ -21,7 +21,7 @@
 #include "usb_ota.h"
 #include "web_server.h"
 
-// src/main.cpp
+// src/platform/updates.inc (rover_fw_version: src/platform/board.inc; vehicleStationary: src/platform/telemetry.inc)
 bool webUpdateGrant(uint8_t kind, unsigned long size, const char* sha, char* err, size_t cap);  // loop() context
 void webUpdateModeEnd();                                                                       // loop() context
 int stmUrlOutcome();        // 0 runs, 1 done, -1 failed, -2 idle

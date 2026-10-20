@@ -1,6 +1,6 @@
 # Trail Tracer rover firmware: user guide
 
-Branch `feature/rx-v2-0.5.60`, firmware 0.5.60 (`ROVER_FW_VERSION` in `src/main.cpp`), STM32 app 2.0.24. The autopilot ran in simulation (rover-sim). One image serves both Rx roles. Every board starts as a rover; a PC can put a board on USB into the monitor role (section 5). No part of this guide drove a real rover yet: see section 11.
+Branch `feature/rx-v2-0.5.60`, firmware 0.5.60 (`ROVER_FW_VERSION` in `include/firmware_version.h`), STM32 app 2.0.24. The autopilot ran in simulation (rover-sim). One image serves both Rx roles. Every board starts as a rover; a PC can put a board on USB into the monitor role (section 5). No part of this guide drove a real rover yet: see section 11.
 
 ## 1. What the rover does on its own
 

@@ -14,7 +14,7 @@ TLM(test_heap_kb, U16, 0.1,    "kB",    1,  1HZ,  "Test", "Free heap")
 
 // Your lines:
 // 0.6.11: dual tone polarity detection, Rx STM32 2.1.134+ extension items 9 (sign) and 10 (sign angle spread), per sensor and
-// Tx channel; set in src/main.cpp (dtTelemetry). No value when the item is older than 1 s (or never came).
+// Tx channel; set in src/platform/telemetry.inc (dtTelemetry). No value when the item is older than 1 s (or never came).
 //  name                type scale unit  dec rate  group                 label
 TLM(dt_decoded,        U8,  1,   "",    0, 1HZ,  "Polarity detection", "Tx channels decoded now (bit 0 = CH1 .. bit 4 = CH5)")
 TLM(follow_dir,        I8,  1,   "",    0, 1HZ,  "Drive",              "Direction round the perimeter (+1 clockwise, -1 counterclockwise, 0 not known)")

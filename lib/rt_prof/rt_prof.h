@@ -22,8 +22,11 @@ void edgeIsr();          // nDATA_READY interrupt (IRAM)
 void resync();           // the frame buffer was drained: edges so far have no frame
 void frameRead();        // a frame read starts
 void frameDecoded();
-void commandSet();       // the drive command now comes from this frame
-void canStart();         // odrive_outputUpdate starts its CAN burst
+/** @brief Real-time path timing (bench command "rt"): the drive command now comes from this frame. */
+void commandSet();
+/** @brief Real-time path timing: odrive_outputUpdate starts its CAN burst. */
+void canStart();
+/** @brief Real-time path timing: odrive_outputUpdate ends its CAN burst. */
 void canEnd();
 void gyroSample();       // an MPU sample was taken
 void part(uint8_t part); // loop part mark (called by the cpu_prof section mark); part 0 = loop start

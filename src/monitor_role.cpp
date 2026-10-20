@@ -50,9 +50,9 @@
 #include "monitor_role.h"
 #include "usb_msc_fat.h"
 
-void restartIntoRom();                                                   // src/main.cpp
-void applyTxPower();                                                     // src/main.cpp (setting espnow_tx_power_dbm)
-uint8_t configCommandRun(const char* t, bool over_espnow, String& reply);  // src/main.cpp
+void restartIntoRom();                                                   // src/platform/updates.inc
+void applyTxPower();                                                     // src/platform/radio.inc (setting espnow_tx_power_dbm)
+uint8_t configCommandRun(const char* t, bool over_espnow, String& reply);  // src/platform/commands.inc
 
 namespace {
 
