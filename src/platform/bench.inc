@@ -1039,7 +1039,7 @@ void benchSerial(){
                || !strcmp(line, "config erase") || !strcmp(line, "config erase wifi")
                || !strcmp(line, "run start") || !strcmp(line, "run stop")
                || !strncmp(line, "sweep ", 6) || !strncmp(line, "bin ", 4)  // 0.5.103: sweep and bin on USB too
-               || !strcmp(line, "tlm")) {
+               || !strcmp(line, "tlm") || !strncmp(line, "defget ", 7)) {
       String reply;  // the same config commands as ESP-NOW CMD 0x10, for a board with ESP-NOW off
       const uint8_t r = configCommand(line, false, reply);
       if (period_ack_want) periodAckDefer(true, nullptr, 0);  // 0.5.104: "CFG 0 ..." after the Rx STM32 answer

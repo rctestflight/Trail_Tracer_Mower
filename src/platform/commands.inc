@@ -70,7 +70,7 @@ void espnowCommands(){
     espnow_list_index = 0;  // the CMD's mac and seq stay in hand until "end"
     espnow_list_ms = 0;
   } else if (have_last && espnow_cmd_seq == last_seq && !memcmp(espnow_cmd_mac, last_mac, 6)
-             && strncmp(espnow_cmd_text, "get ", 4)) {
+             && strncmp(espnow_cmd_text, "get ", 4) && strncmp(espnow_cmd_text, "defget ", 7)) {
     // Only a command with an effect (set, save, run) is answered from the cache. A read ("get ...")
     // is answered fresh: a cached "get run" said running after a STOP had stopped the vehicle
     // (PC telemetry simulation, 1 in 18 runs at 30 % loss).
@@ -143,6 +143,34 @@ uint8_t runCommand(bool start, const char* source, String& reply){
   return r;
 }
 
+// 0.6.25 "defget <tlm|set> <offset>": the build's telemetry_def.json or settings_def.json, gzipped in the image
+// (tools/gen_def_files_build.py), so that an app reads the definition of a build it does not know from the Rx itself.
+// Answer "def <kind> <version> <total> <crc32> <offset> <base64>", at most DEFGET_CHUNK bytes from offset (an ESP-NOW
+// ACK holds 246 text bytes); version: the table hash (tlm) or the settings_def.json version (set); total: gzip bytes;
+// crc32: of the whole gzip. Offset at or past total: result 2, "def <kind> <version> <total> <crc32> end".
+#include "def_files_gz.h"
+#include <mbedtls/base64.h>
+static const size_t DEFGET_CHUNK = 144;  // 192 base64 characters
+uint8_t defgetCommand(const char* a, String& reply){
+  const uint8_t* gz; size_t total; const char* version; uint32_t crc; const char* kind;
+  if (!strncmp(a, "tlm ", 4)) { kind = "tlm"; gz = DEF_TLM_GZ; total = sizeof(DEF_TLM_GZ); version = DEF_TLM_VERSION; crc = DEF_TLM_CRC32; }
+  else if (!strncmp(a, "set ", 4)) { kind = "set"; gz = DEF_SET_GZ; total = sizeof(DEF_SET_GZ); version = DEF_SET_VERSION; crc = DEF_SET_CRC32; }
+  else { reply = "defget: <tlm|set> <offset>"; return 2; }
+  char* end;
+  const unsigned long off = strtoul(a + 4, &end, 10);
+  if (end == a + 4 || *end) { reply = "defget: <tlm|set> <offset>"; return 2; }
+  char head[64];
+  snprintf(head, sizeof(head), "def %s %s %u %08lx ", kind, version, (unsigned)total, (unsigned long)crc);
+  if (off >= total) { reply = String(head) + "end"; return 2; }
+  const size_t n = min(DEFGET_CHUNK, (size_t)(total - off));
+  unsigned char b64[DEFGET_CHUNK / 3 * 4 + 4];
+  size_t olen = 0;
+  mbedtls_base64_encode(b64, sizeof(b64), &olen, gz + off, n);
+  b64[olen] = 0;
+  reply = String(head) + off + " " + (const char*)b64;
+  return 0;
+}
+
 uint8_t configCommand(const char* t, bool over_espnow, String& reply){
   if (!strcmp(t, "run start") || !strcmp(t, "run stop"))
     return runCommand(!strcmp(t, "run start"), over_espnow ? "CMD" : "USB", reply);
@@ -162,6 +190,7 @@ uint8_t configCommand(const char* t, bool over_espnow, String& reply){
     reply = b;
     return 0;
   }
+  if (!strncmp(t, "defget ", 7)) return defgetCommand(t + 7, reply);  // read only: no event (about 100 chunks a file)
   if (!strncmp(t, "wifi", 4)) {  // Wi-Fi network and password: USB "wifi set" only, never over the radio
     reply = "wifi: USB only";
     telemetryEvent(rec::EV_SETTING, 4, over_espnow ? 1 : 0, "wifi (value not logged) -> refused");

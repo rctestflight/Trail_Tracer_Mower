@@ -115,6 +115,16 @@ Defined with the PC telemetry program (Trail-Tracer-PC-Telemetry `docs/control_a
 - The stop is held in RAM only: a restart with no RC signal enters mode 2 again, as before.
 - Each run start, run stop and STOP is event 11 in the vehicle log.
 
+## Definition files
+
+Firmware 0.6.25 and later: the Rx sends the telemetry definition (`docs/telemetry_def.json`) and the settings definition (`docs/settings_def.json`) of its own build, so the telemetry app can decode a build that it does not know. The build stores both files in the image as gzip (level 9, no name, no time stamp): the same file gives the same bytes in every build.
+
+- Command: `defget <tlm|set> <offset>` (CMD 0x10 over ESP-NOW or Wi-Fi, or a USB line). Read only, in any state, also during an update.
+- Answer (ACK result 0): `def <kind> <version> <total> <crc32> <offset> <base64>`. `version`: the table hash (8 hex digits, as `tlm` gives it) for `tlm`, the `settings_def.json` version for `set`. `total`: gzip bytes. `crc32`: of the whole gzip, 8 hex digits. The chunk holds up to 144 bytes from `offset` (192 base64 characters).
+- Offset at or past `total`: ACK result 2, text `def <kind> <version> <total> <crc32> end`.
+- Bad arguments: result 2, text `defget: <tlm|set> <offset>`.
+- USB: the line `CFG <result> <text>`, with the same text.
+
 ## Telemetry log
 
 The mower is the source of truth. It numbers every record and keeps the records in RAM. A collector on a PC receives the live records and requests the ones it missed. Neither side waits for the other: the mower never waits for an answer, and it sends live records as broadcast frames, so a monitor that is off costs the mower nothing.

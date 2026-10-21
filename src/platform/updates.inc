@@ -951,6 +951,7 @@ LineCapture line_cap;
 // Commands that run while an update holds loop() (update mode, "stm url"); the others are refused.
 bool updateAllowed(const char* t){
   return !strncmp(t, "ota ", 4) || !strncmp(t, "stm url", 7) || !strcmp(t, "stm status") || !strncmp(t, "get ", 4)
+         || !strncmp(t, "defget ", 7)
          || !strcmp(t, "restart");
 }
 
