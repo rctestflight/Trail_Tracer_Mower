@@ -12,7 +12,6 @@ extern uint8_t rover_entry_btx;
 extern uint8_t rover_exit_btx;
 extern bool rover_active;
 extern bool rover_need_charge;
-extern bool rover_stall_halted;
 extern uint8_t vehicleID;
 extern uint8_t rx_channel;
 extern int PWM_OUT_2_DEFAULT;

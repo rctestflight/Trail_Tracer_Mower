@@ -2,8 +2,8 @@ r"""Rover settings over USB, for a PC with no station and no bench daemon (needs
 opens the COM port with the bench's safe rules). The same commands as the station's settings page.
 
   python tools/rover_settings.py COM7 list                 all keys and values
-  python tools/rover_settings.py COM7 get rover_enabled
-  python tools/rover_settings.py COM7 set rover_enabled true
+  python tools/rover_settings.py COM7 get rover_mode
+  python tools/rover_settings.py COM7 set rover_mode 0
   python tools/rover_settings.py COM7 save                 write the settings to the rover's flash
 
 Each answer is "CFG <result> <text>": result 0 ok, 1 unknown key, 2 bad value, 4 refused (for example
