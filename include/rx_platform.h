@@ -352,6 +352,7 @@ void odrive_requestEncoderEstimates();
 extern MPU6050 mpu;
 /** @brief true once the gyro calibration is done and the yaw rate is a number. */
 extern bool gyro_ready;
+extern int16_t imu_roll16;   // the accelerometer roll, 65 536 = one turn; 0 with no IMU
 /** @brief millis() of the last gyro sample. */
 extern uint32_t gyro_sample_ms;
 /** @brief Always false (retired: the gyro check in the motor output keeps the motors off with no gyro). */

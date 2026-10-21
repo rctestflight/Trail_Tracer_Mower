@@ -103,7 +103,7 @@ static const char* const STATIONARY_KEYS[] = {
   "PWM_OUT_3_DEFAULT", "PWM_OUT_3_MIN", "PWM_OUT_3_MAX", "PWM_OUT_4_DEFAULT", "PWM_OUT_4_MIN", "PWM_OUT_4_MAX",
   "CHARGE_VBATT_STOP", "CHARGE_MAX_CURRENT", "CHARGE_MAX_SECONDS", "BTxFollowChannel",
   "espnow_enabled", "telemetry_enabled",
-  "rover_enabled", "rover_goal_cw", "rover_sensor_height_mm", "rover_full_speed_mps", "rover_full_yaw_rate_dps",
+  "rover_mode", "rover_goal_cw", "rover_sensor_height_mm", "rover_roam_speed_mps",
   "rover_entry_btx", "rover_exit_btx", "imu_required",
 };
 bool stationaryKey(const char* key){
@@ -114,7 +114,7 @@ bool stationaryKey(const char* key){
 bool vehicleStationary();
 
 // Run commands (docs/control_api.md in Trail-Tracer-PC-Telemetry): "run start" enters mode 2
-// (autonomous: the autopilot when rover_enabled, else the wire follower) unless an RC transmitter is
+// (autonomous: the rover state machine by rover_mode, else the wire follower) unless an RC transmitter is
 // present with its aux switch in manual (RC has priority); "run stop" (and the STOP frame) leaves
 // mode 2 for mode 0: with no RC that is neutral output, and the autopilot does not run. The stop is
 // held in RAM: a restart with no RC enters mode 2 again (boot behaviour unchanged).
