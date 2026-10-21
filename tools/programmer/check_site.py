@@ -57,11 +57,17 @@ def word_case(w):
     return not (letters and letters[0].islower() and any(c.isupper() for c in letters[1:]))
 
 
+SHORT_RUN = 12
+
+
 def banned_in(line, binary):
-    """A banned word in a text line; in a binary, only in a run that reads as text, in a case that text uses."""
+    """A banned word in a text line; in a binary, only in a run that reads as text, in a case that text uses. A
+    match of one or two letters counts in a binary only in a run of SHORT_RUN characters or more: machine code gives
+    short runs that read as text, and two capitals in them are common."""
     if not binary:
         return re.search(BANNED_WORDS, line, re.I) is not None
-    return texty(line) and any(word_case(m.group(0)) for m in re.finditer(BANNED_WORDS, line, re.I))
+    return texty(line) and any(word_case(m.group(0)) and (sum(c.isalpha() for c in m.group(0)) >= 3 or len(line) >= SHORT_RUN)
+                               for m in re.finditer(BANNED_WORDS, line, re.I))
 
 
 def check_text(rel, text, findings, binary=False):
