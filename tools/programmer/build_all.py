@@ -6,6 +6,7 @@ of its current commit is skipped. For each new commit: shallow clone, PlatformIO
 env, else the default environment) with prefix maps (no local path goes into the image), and the STM32
 update pairs (programmer.json "stm32", else every .commit_header with its .bin.encrypted); then
 tools/make_manifest.py adds each build to <out> (index.json and <repo>/<ref>/<commit>/).
+Writes the definition store <out>/defs (defs_store): each telemetry and settings definition file by version.
 
 Drops the builds of refs that are no longer offered (branch or tag deleted) and of commits that no branch
 or tag reaches any more; keeps only the build of the newest commit of each ref (KEEP = 1). A failed build is
@@ -14,6 +15,7 @@ reachable commits.
 
 Usage: python tools/build_all.py <out folder>
 """
+import hashlib
 import json
 import os
 import re
@@ -201,6 +203,56 @@ def prune(out, offered, reach):
     idx_path.write_text(json.dumps(idx, indent=2) + "\n")
 
 
+DEF_FILES = {"docs/telemetry_def.json": "telemetry", "docs/settings_def.json": "settings"}
+HASH8 = re.compile(r"^[0-9a-f]{8}$")
+
+
+def defs_store(cl, tg, out):
+    """The definition store <out>/defs: every telemetry and settings definition file in the history of the offered
+    refs, filed by version, so that an app meets no Rx build whose definitions it cannot fetch (an Rx keeps an older
+    build after the page lists a newer one). telemetry_def_<table hash>.json (the newest commit's file of each hash)
+    and settings_def_v<version>_<sha256 of the sorted JSON, 8 digits>.json (one settings version number has had
+    different lists). Files only come in; a file of a deleted branch stays. index.json lists every file."""
+    out.mkdir(parents=True, exist_ok=True)
+    for repo, d in cl.items():
+        shas = sorted({sha for r, ref, sha, *_ in tg if r == repo})
+        if not shas:
+            continue
+        log = git("-C", str(d), "log", "--format=", "--raw", "--no-abbrev", *shas, "--", *DEF_FILES).stdout
+        seen = set()
+        for line in log.splitlines():                      # :100644 100644 <old> <new> M\t<path>, newest commit first
+            m = re.match(r"^:\d+ \d+ [0-9a-f]+ ([0-9a-f]{40}) [AMRC]\d*\t(\S+)$", line)
+            if not m or m.group(2) not in DEF_FILES or m.group(1) in seen:
+                continue
+            seen.add(m.group(1))
+            kind = DEF_FILES[m.group(2)]
+            try:
+                dd = json.loads(git("-C", str(d), "cat-file", "-p", m.group(1)).stdout)
+                if kind == "telemetry":
+                    if not (isinstance(dd, dict) and dd.get("format") == "telemetry_def" and isinstance(dd.get("format_version"), int)
+                            and HASH8.match(str(dd.get("version", ""))) and isinstance(dd.get("records"), dict) and dd["records"]):
+                        raise ValueError("not a telemetry definition")
+                    name = f"telemetry_def_{dd['version']}.json"
+                else:
+                    if not (isinstance(dd, dict) and isinstance(dd.get("version"), int) and isinstance(dd.get("settings"), dict) and dd["settings"]):
+                        raise ValueError("not a settings definition")
+                    name = f"settings_def_v{dd['version']}_{hashlib.sha256(json.dumps(dd, sort_keys=True).encode()).hexdigest()[:8]}.json"
+            except (ValueError, subprocess.CalledProcessError) as ex:
+                print(f"{repo} {m.group(2)} {m.group(1)[:12]}: left out of the store ({ex})", flush=True)
+                continue
+            if not (out / name).exists():
+                (out / name).write_text(json.dumps(dd, indent=1) + "\n", encoding="utf-8")
+                print(f"store: {name} ({repo})", flush=True)
+    idx = {"format": 1, "telemetry": {}, "settings": {}}
+    for p in sorted(out.glob("*_def_*.json")):
+        m = re.match(r"^telemetry_def_([0-9a-f]{8})\.json$", p.name) or re.match(r"^settings_def_v(\d+)_[0-9a-f]{8}\.json$", p.name)
+        if m and p.name.startswith("telemetry"):
+            idx["telemetry"][m.group(1)] = p.name
+        elif m:
+            idx["settings"].setdefault(m.group(1), []).append(p.name)
+    (out / "index.json").write_text(json.dumps(idx, indent=1) + "\n")
+
+
 def main():
     out = Path(sys.argv[1]).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -220,6 +272,7 @@ def main():
                 print(f"   failed: {ex}", flush=True)
         reach = {repo: set(git("-C", str(d), "rev-list", "--all").stdout.split()) for repo, d in cl.items()}
         prune(out, {(r, ref) for r, ref, *_ in tg}, reach)
+        defs_store(cl, tg, out / "defs")
     # refs.json: the offered branches and tags with their menu title and description (programmer.json).
     refs = [{"repo": repo, "ref": ref, "tag": tag, **{k: cfg[k] for k in ("title", "description") if cfg and k in cfg}}
             for repo, ref, sha, cfg, tag in tg]
