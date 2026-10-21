@@ -3,32 +3,6 @@
 #pragma once
 
 // Change history
-//   0.6.24: rover wire heading from the approach fit (lib/rover_autopilot/approach_fit.h): every straight drive in
-//     range fits the distance from the Rx radius and the lateral wire offset against the distance driven; the larger
-//     heading counts, the local one when the fit bends. No wire angle from one reading. Probe (rover_probe_m): a
-//     straight drive at the start in range, and before a bounce or join when the fit is weak. Join by the signed
-//     heading (closing or moving away). The bounce re-arms while the rover closes on the wire. Polarity says outside
-//     in roam: turn round. Wrong direction in follow: pivot 90 deg to the inside, leave the wire, turn round, join
-//     again. Follow on x as the Rx sends it, with the sign of y. Optional IMU roll correction (rover_imu_roll). Least
-//     leave angle 35 deg; stuck detector 15 mm / 18 s. Join: drive to the wire, turn along it in the goal direction, follow; the join sets the follower x sign
-//     from the known wire side. Rx regain wait 0 (rx_regain_wait_ms default 0). Autonomous mode is rover mode: rover_mode rover (default),
-//     follow only, or position follower (expert). Removed: rover_enabled, rover_follow_only, rover_full_speed_mps,
-//     rover_full_yaw_rate_dps, rover_seek_after_s, rover_speed_limit_mps.
-//   0.6.23: rover state machine of the agreed design (lib/rover_autopilot): roam, return, join, follow, dock, depart,
-//     fault. Readings from x, y and radius as the Rx sends them: lateral wire offset, distance from the vertical field
-//     part, wire angle. Re-acquisition check at each bounce and join (the first 10 deg of the pivot; polarity decides
-//     when known). Join by the approach angle in the goal direction; polarity gives inside or outside, else the setting
-//     rover_join_no_pol. Follow and depart with the wire follower (in rover mode it steers on the lateral wire offset).
-//     Wrong-direction check: polarity direction or the exit beacon before the entry beacon, then a 180 deg pivot. Lost
-//     in join or follow, or Tx off in any state: stop and wait. Stuck detector (signal not lost) or lost longer than
-//     rover_lost_timeout_s in join, follow or depart: fault. The rate loop integral clears at the end of each pivot.
-//     Settings: rover_follow_only, rover_join_no_pol, rover_roam_speed_mps, rover_bounce_m, rover_bounce_spread_deg,
-//     rover_bounce_min_deg, rover_rearm_m, rover_rearm_drop_m, rover_beacon_bounce, rover_beacon_m,
-//     rover_beacon_rearm_m, rover_beacon_spread_deg, rover_approach_m, rover_approach_pct, rover_join_pivot_m,
-//     rover_join_angle_deg, rover_return_m, rover_wrong_dir_check, rover_depart_min_m, rover_depart_max_m,
-//     rover_turn_min_deg, rover_turn_max_deg. Retired (older config.json only): rover_full_speed_mps,
-//     rover_full_yaw_rate_dps, rover_seek_after_s, rover_speed_limit_mps. Autopilot states in telemetry: 0 roam,
-//     1 return, 2 join, 3 follow, 4 depart, 5 fault, 6 dock.
 //   0.6.21: polarity per sensor and Tx channel from Rx STM32 2.2.x (ext id 12, every frame): table values
 //     dt_polarity_s1_ch1..dt_polarity_s2_ch5, wire_inside and wire_heading (inside or outside, clockwise or
 //     counterclockwise); follow_dir from the polarity when the channel's current direction is set. Settings tx_dir_ch1..5
@@ -237,12 +211,12 @@
 #if defined(OTA_TEST_VERSION)
 #define ROVER_FW_VERSION OTA_TEST_VERSION  // OTA test images (envs ota_a, ota_b, ota_test_crash)
 #elif defined(BENCH_FAKE_IMU)
-#define ROVER_FW_VERSION "0.6.24+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.6.21+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #elif defined(SETTINGS_NEWKEY)
-#define ROVER_FW_VERSION "0.6.24-newkey"  // bench build: one more table line (test_new_setting)
+#define ROVER_FW_VERSION "0.6.21-newkey"  // bench build: one more table line (test_new_setting)
 #elif defined(TELEMETRY_NEWVALUE)
-#define ROVER_FW_VERSION "0.6.24-newvalue"  // bench build: the example lines of include/user_telemetry.h
+#define ROVER_FW_VERSION "0.6.21-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.6.24"
+#define ROVER_FW_VERSION "0.6.21"
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A

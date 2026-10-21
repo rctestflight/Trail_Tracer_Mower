@@ -60,7 +60,7 @@ After a full install, the firmware starts with the main-branch values:
 | `steering_rate_max_dps` | 90 |
 | `CRUISE_THROTTLE`, `CREEP_THROTTLE` | 1650, 1620 |
 | `vehicleID`, `rx_channel` | 3, 1 |
-| `rover_mode` | rover (autonomous runs the rover state machine) |
+| `rover_enabled` | false (rover mode off) |
 | `imu_required` | true: if the IMU fails, the motors stay locked |
 
 `docs/settings_def.json` lists every setting with its unit, limits and default.

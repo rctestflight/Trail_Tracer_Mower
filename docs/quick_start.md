@@ -20,7 +20,7 @@ This branch is `main` plus the Rx v2 firmware: rover mode, the monitor role and 
 
 ## 3. Rover mode
 
-1. Leave `rover_mode` at rover, the default (USB drive `config.json`, USB `set`, or the telemetry program).
+1. Set `rover_enabled` to true (USB drive `config.json`, USB `set`, or the telemetry program).
 2. Keep the RC transmitter on for the first tests. Click the board button to start rover mode. Move the aux switch to stop it.
 3. Read sections 1 and 2 of [rover_guide.md](rover_guide.md) before the first drive: steering sign, speed settings and dock direction.
 

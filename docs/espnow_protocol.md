@@ -108,7 +108,7 @@ ACK result: 0 ok, 1 unknown key, 2 bad value, 3 busy, 4 refused. The ACK text is
 
 Defined with the PC telemetry program (Trail-Tracer-PC-Telemetry `docs/control_api.md`, draft 3).
 
-- `run start` (CMD): the mower enters mode 2, autonomous: by `rover_mode`: the rover state machine (rover or follow only), else the wire follower (position follower). Answer `run=running`. Refused (result 4, `run=stopped rc_manual`) when an RC transmitter is present with its aux switch in manual: the RC has priority.
+- `run start` (CMD): the mower enters mode 2, autonomous: the autopilot if `rover_enabled` is true, else the wire follower. Answer `run=running`. Refused (result 4, `run=stopped rc_manual`) when an RC transmitter is present with its aux switch in manual: the RC has priority.
 - `run stop` (CMD) and STOP (frame 0x12): the mower leaves mode 2 for mode 0. With no RC signal, mode 0 gives neutral output; the autopilot does not run. Always accepted. Answer `run=stopped`; the STOP frame gets an ACK with the same seq and the text `stop`.
 - `get run`: `run=running` in mode 2, else `run=stopped`.
 - STOP takes no part in the one-CMD-at-a-time rule: the receive callback only sets a flag, and `loop()` acts on it at its next pass. It is never busy and never cached. A wrong or missing fleet key: no effect, counted (event 10). The PC sends it 5 times, 50 ms apart; broadcast is allowed for STOP only (RESTART stays unicast).

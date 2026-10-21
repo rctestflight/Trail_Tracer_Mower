@@ -10,9 +10,9 @@ The rover is standalone. It needs no Monitor Rx, no PC and no radio to behave co
 |---|---|---|
 | 0, manual | RC transmitter on at power-on, aux switch in manual | RC throttle and steering pass through |
 | 1, cruise | aux switch to auto (RC on) | cruise control on the RC throttle |
-| 2, autonomous | **no RC throttle signal 0.5 s after power-on**, or a click of the board button, or `run start` from the telemetry program | by `rover_mode`: the rover (default; off the wire it drives straight and steers on position only after the join), follow only, or the plain position-steering wire follower (expert) |
+| 2, autonomous | **no RC throttle signal 0.5 s after power-on**, or a click of the board button, or `run start` from the telemetry program | the autopilot (`rover_enabled` true) or the wire follower (`rover_enabled` false) |
 
-The autopilot (from 0.6.23) roams inside the perimeter wire and bounces off it, returns to the wire after the return distance or below the return voltage, joins it in the goal direction, follows it to the dock with the wire follower, charges, and departs again (`lib/rover_autopilot/README.md`). Lost signal in join or follow, or no Tx signal in any state: it stops and waits.
+The autopilot bounces inside the perimeter wire, goes home on low battery or after a set time, follows the wire to the dock in one direction, charges, and departs again (`lib/rover_autopilot/README.md`).
 
 **WARNING:** With no RC throttle signal at power-on, the rover enters mode 2 0.5 s after power-on and starts to drive. Keep the RC transmitter on for the first tests: the rover then starts in manual mode, a click of the board button enters mode 2, and a change of the aux switch leaves mode 2.
 
@@ -23,11 +23,11 @@ The autopilot (from 0.6.23) roams inside the perimeter wire and bounces off it, 
 1. Flash the firmware (section 8).
 2. Set the settings (section 3).
 3. Check the ODrive CAN watchdog on all six nodes (an ODrive setting). With it off, an ODrive keeps its last speed when the ESP32 stops sending, for example after a restart.
-4. Check the steering sign with the wheels off the ground: set `rover_mode` rover and enter mode 2; hold the sensor near the wire. The rover must stop and pivot away from the wire. If it pivots toward the wire, invert `pid_direction`. If the wire follower already follows correctly, the sign is correct.
-5. Measure the ground speed at full drive in mode 0 and set `rover_roam_speed_mps` to it: roam drives at full drive command, and the distances driven come from it. The pivot rate needs no setting: the gyro rate loop turns at the rate the autopilot asks for, up to `steering_rate_max_dps`.
-6. Set the current direction of the followed Tx channel (`tx_dir_ch1` to `tx_dir_ch5`) for polarity: the join then knows inside from outside, and the wrong-direction check works. Without it, the join assumes inside (`rover_join_no_pol`). On the first runs, check the dock direction: if the rover follows the wire counter-clockwise with `rover_goal_cw` true, invert `rover_goal_cw`.
+4. Check the steering sign with the wheels off the ground: set `rover_enabled` true and enter mode 2; hold the sensor near the wire. The rover must stop and pivot away from the wire. If it pivots toward the wire, invert `pid_direction`. If the wire follower already follows correctly, the sign is correct.
+5. Measure the ground speed at full drive in mode 0 and set `rover_full_speed_mps`. The pivot rate needs no setting: the gyro rate loop turns at the rate the autopilot asks for, up to `steering_rate_max_dps` (from 0.5.61).
+6. On the first runs, check the dock direction. The autopilot takes `s1_x` positive as the wire on the left. If the rover follows the wire counter-clockwise with `rover_goal_cw` true, invert `rover_goal_cw`.
 7. Check the IMU at boot: USB shows `MPU6050 +-8 g, +-500 deg/s`. With "IMU HALT", the rover does not drive (section 6).
-8. Watch the first runs in rover mode. The stuck detector is the only stall stop (only while the signal is not lost). Stop the rover with the RC, `run stop`, or the STOP button of the telemetry program.
+8. Watch the first runs in rover mode. Rover mode does not detect a stall or an obstacle, so the rover pushes on. Stop it with the RC, `run stop`, or the STOP button of the telemetry program. In the simulator, a rover that lost the wire signal in roam drove about 20 m before the lost timeout stopped it.
 
 ## 3. Settings
 
@@ -42,35 +42,17 @@ Three ways, all with the same keys:
 
 | Key | Default | Meaning |
 |---|---|---|
-| rover_mode | rover | Autonomous mode: rover (full mission), follow only (find the wire, join, follow), or position follower (expert: the plain wire follower, which circles off the wire) |
-| rover_goal_cw | true | Goal direction along the wire, clockwise seen from above |
+| rover_enabled | false | Mode 2 runs the autopilot instead of the wire follower |
+| rover_goal_cw | true | Dock direction along the wire, clockwise seen from above |
 | rover_sensor_height_mm | 150 | Height of the sensor centre above the wire |
-| rx_channel | 1 | The followed Tx channel |
-| tx_dir_ch1 to 5 | 0 | Current direction of each Tx channel, for polarity (0 not set, 1 clockwise, 2 counterclockwise) |
-| dt_spread_limit_deg | 45 | Sign spread limit: the Rx sets the polarity only at or under it |
-| rover_join_no_pol | inside | Join without polarity: assume inside, or stop |
-| rover_roam_speed_mps | 0.5 | The one top speed: the vehicle speed at full drive command |
-| rover_bounce_m | 0.5 | Distance to the wire of the bounce reading, stop and pivot |
-| rover_bounce_spread_deg | 45 | Random +- spread on the mirror bounce |
-| rover_bounce_min_deg | 35 | Least leave angle to the wire; the fitted heading must be better than it, else the probe first |
-| rover_rearm_m, rover_rearm_drop_m | 1.0, 0.3 | The next bounce arms at this distance, or when the distance falls this much below its highest value since the bounce |
-| rover_beacon_bounce | true | Turn round at a beacon in roam and return |
-| rover_beacon_m, rover_beacon_rearm_m | 0.15, 0.25 | Beacon distance of the turn; the beacon counts again past the re-arm distance |
-| rover_beacon_spread_deg | 30 | Random +- spread on the 180 deg beacon turn |
-| rover_approach_m | 1.1 | Inside it: approach speed; when returning, the join starts here |
-| rover_approach_pct | 60 | Approach and join speed, percent of the roam speed |
-| rover_join_pivot_m | 0.6 | Distance to the wire of the join reading, stop and pivot |
-| rover_join_angle_deg | 30 | Angle between the join heading and the wire, in the goal direction |
-| rover_return_m | 300 | Return after this distance driven since the last charge, m (0 = off). Keep it under the battery range by more than one lap of the wire |
-| rover_seek_vbatt | 0 | Return below this filtered battery voltage, V (0 = off) |
-| rover_wrong_dir_check | true | Follow: polarity direction against the goal, or the exit beacon before the entry beacon: turn round |
-| rover_entry_btx | 1 | BTx channel before the dock (0 = none) |
-| rover_exit_btx | 2 | BTx channel just past the dock exit (0 = none) |
-| rover_depart_min_m, rover_depart_max_m | 0.5, 3.0 | After a charge: follow a random distance off the dock contacts |
-| rover_turn_min_deg, rover_turn_max_deg | 60, 140 | Then pivot inward by a random angle |
-| rover_probe_m | 0.5 | Probe: a straight drive of this length at the start in range, and before a bounce or join when the fitted heading is weak (0 = off) |
-| rover_imu_roll | off | IMU roll correction: turn the Rx x and y back by the accelerometer roll before the heading fit (inverted: the IMU sits the other way round; check on a side slope over the wire) |
-| rover_lost_timeout_s | 30 | Fault after this long without the wire in join, follow or depart (0 = never) |
+| rover_full_speed_mps | 1.0 | Ground speed at full drive command (measure it) |
+| rover_full_yaw_rate_dps | 115 | Not used from 0.5.61 (the autopilot takes `steering_rate_max_dps`) |
+| rover_seek_vbatt | 0 | Go home below this filtered battery voltage, V (0 = off) |
+| rover_seek_after_s | 600 | Go home this long after the last charge, s (0 = off) |
+| rover_entry_btx | 1 | BTx channel before the dock: slow approach (0 = none) |
+| rover_exit_btx | 2 | BTx channel just past the dock exit: wrong-way guard (0 = none) |
+| rover_lost_timeout_s | 30 | Stop for good after this long without the wire (0 = never) |
+| rover_speed_limit_mps | 0.5 | Cap on every autopilot speed, m/s. Pivots are not affected |
 | battery_cells | 2 | Series cells (2 = 2S). The telemetry program scales its power graph from it |
 | telemetry_enabled | true | Vehicle log over ESP-NOW |
 | espnow_tx_power_dbm | 19.5 | The radio transmit power, 2 to 19.5 dBm, in 0.25 dB steps. A change applies at once. A low power can cut the radio link to the vehicle |
@@ -84,10 +66,10 @@ Three ways, all with the same keys:
 |---|---|
 | `rx_channel`, `enable_sensor_2`, `CHARGE_VBATT_STOP`, `CHARGE_MAX_CURRENT`, `CHARGE_MAX_SECONDS` | The STM32 changes at once: the wire is lost until the channel matches, and a charge limit changes. `rx_channel` also causes one STM32 flash write |
 | `pid_direction`, `PWM_OUT_1..4_DEFAULT/MIN/MAX` | A jump of the steering sign, a servo centre or a limit |
-| `rover_mode`, `rover_goal_cw`, `rover_sensor_height_mm`, `rover_roam_speed_mps`, `rover_entry_btx`, `rover_exit_btx`, `BTxFollowChannel` | A step of the drive command, or a change of mission |
+| `rover_enabled`, `rover_goal_cw`, `rover_sensor_height_mm`, `rover_full_speed_mps`, `rover_full_yaw_rate_dps`, `rover_entry_btx`, `rover_exit_btx`, `BTxFollowChannel` | A step of the drive command, or a change of mission |
 | `espnow_enabled`, `telemetry_enabled` | Starting Wi-Fi stops the control loop for about 220 ms |
 
-All other keys are live. Every `set` and `save`, applied or refused, is an event in the vehicle log. Beacon placement for the wrong-direction check: `lib/rover_autopilot/README.md`.
+All other keys are live. Every `set` and `save`, applied or refused, is an event in the vehicle log. Beacon placement for the wrong-way guard: `lib/rover_autopilot/README.md`, "Exit beacon guard".
 
 **STM32 settings.** The ESP32 sends these five settings to the STM32 at start-up and after a change. The STM32 holds them in RAM only; after an STM32 start they are 0, and a charge limit of 0 blocks every charge.
 
@@ -172,7 +154,7 @@ A remote stop holds until the next restart. After a restart with no RC signal, t
 
 ## 6. IMU (MPU6050)
 
-The autopilot measures its pivots with the gyro (the motor controller drive needs the gyro rate loop). The vehicle log records all axes for analysis.
+The autopilot does not use the IMU (it takes its pivot angles from its own commands). The vehicle log records it for analysis.
 
 - **Failed IMU:** when the MPU6050 does not start, the rover does not drive, as on `main`. USB, updates, the log and the radio still work. The rover sends "IMU HALT" on USB each second. The boot event 12 shows "DRIVE OFF". The setting `imu_required` false removes this stop, for a board with no MPU6050.
 - **Data:** all six axes in the sample blocks 0x22 and 0x25, at the log rate: accelerometer x, y, z in mg, gyro x, y, z in 0.02 deg/s.
@@ -186,10 +168,8 @@ The autopilot measures its pivots with the gyro (the motor controller drive need
 | Stop | Condition | Ends |
 |---|---|---|
 | As the wire follower | Signal overload, STM32 supply fault, over-temperature, charging | When the condition ends |
-| Lost wire | Join, follow or depart: stop and wait; fault after `rover_lost_timeout_s` | The wire back; after a fault: leave mode 2 and enter it again |
-| No Tx signal | Any state: no wire signal on either sensor for 2 s | The Tx signal back |
-| Stuck | The stuck detector while the signal is not lost | Leave mode 2 and enter it again |
-| No polarity at a join | Only with `rover_join_no_pol` stop | Leave mode 2 and enter it again |
+| Lost wire | No wire for `rover_lost_timeout_s` | Leave mode 2 and enter it again |
+| Stall | Drive command over 15 % of full while the wheel speeds (ODrive nodes 0 and 1) stay under a quarter of it, for 3 s. Without wheel speeds: the stuck detector while the wire is in range | Leave mode 2 and enter it again |
 | RC aux switch | A change of the aux channel (RC on) | Mode 0 or 1 |
 | STOP | From the telemetry program | `run start`, the button, or a restart |
 

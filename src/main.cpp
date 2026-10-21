@@ -24,27 +24,29 @@ static const char* TAG = "wfrx";
 
 // ===== Rover autopilot values =====
 
-// Rover autopilot (lib/rover_autopilot): roam inside the perimeter, return to the wire after the return distance
-// or below the return voltage, join it in the goal direction (rover_goal_cw), follow it to the dock with the wire
-// follower below, charge, depart. Runs in drive mode 2 (rover_mode rover or follow only); rover_mode position follower: mode 2 is the plain wire
-// follower.
+// Rover autopilot (lib/rover_autopilot): bounce inside the perimeter, go home on low battery,
+// follow the wire to the dock in rover_goal_cw direction, depart. Runs in drive mode 2 when
+// rover_enabled is set in config.json; otherwise mode 2 is the plain wire follower.
 rover::Autopilot roverAp;
 bool rover_enabled = false;
-double rover_seek_vbatt = 0.0;      // return battery voltage (0 = off)
-float rover_return_m = 0.0f;        // return distance (0 = off)
+double rover_seek_vbatt = 0.0;
+int rover_seek_after_s = 0;
 uint8_t rover_entry_btx = 0;
 uint8_t rover_exit_btx = 0;
 bool rover_active = false;          // mode 2 with the autopilot driving
 bool rover_need_charge = false;     // latched until the next charge ends
-float rover_driven_m = 0.0f;        // distance driven since the last charge
+uint32_t rover_last_charge_ms = 0;
 uint32_t rover_last_packet_us = 0;
 bool rover_was_docked = false;
 bool rover_charge_ran = false;       // charge step 3 seen in this docking
+// Stall stop: drive command over 15 % of full and the wheels under a quarter of it for 3 s (ODrive
+// wheel speeds), or, without fresh wheel speeds, the stuck detector while the wire is in range.
+#define ROVER_STALL_MS 3000
+uint32_t rover_stall_since_ms = 0;
+bool rover_stall_halted = false;
 float rover_vbatt_filt = 0.0f;
-float rover_btx_mm[2] = {9999.0f, 9999.0f};  // beacon radius per channel, filtered as BTx1Signal, not clamped
 rover::Output rover_out;
 void roverStep();  // one autopilot step per STM32 packet; sets throttle and steering_output
-float roverFollowSign();  // rover mode: the sign that the follower applies to x (Rx quadrant state)
 
 // ===== Settings values (config.json fills them at start and after each change) =====
 
@@ -584,7 +586,6 @@ void loop() {
   if (rxFrameReady()) {
     // update the double X position from the float in the latest STM32 packet
     live_position = stmPacket.items.s1_x;
-    if (rover_active) live_position *= roverFollowSign();  // the Rx quadrant state, learned from steady follow
     // 0.6.21: steering frame "world": x signed by the heading round the loop against the goal direction
     // (rover_goal_cw). The goal way: x as it is. The wrong way: -x, so the steering turns the vehicle round. Heading not
     // known: x as it is (vehicle frame).
@@ -794,7 +795,7 @@ void loop() {
      }else if(((drive_mode_status == 1 || drive_mode_status == 2)
           && !rover_active && stuckDetector.GetStatus())  // Stop wire-follow modes when stuck (the rover is off the wire most of the time).
           || (charge_status > 0)  // vehicle charge in progress
-          || (rover_active && roverAp.state == rover::FAULT)  // rover fault: stuck, lost too long, no polarity
+          || (rover_active && roverAp.state == rover::HALTED)  // rover lost the wire too long
           ){
         driveOutput(PWM_OUT_2_DEFAULT, PWM_OUT_1_DEFAULT, false);
         sine_wave_force_disabled = true; sine_wave_blend = 0.0; target_x_pos = 0.0;
@@ -1414,210 +1415,110 @@ void applyDeviceConfig(const DeviceConfig& cfg)
   last_s2 = enable_sensor_2;
 
   // Rover autopilot
-  rover_enabled               = cfg.rover_mode != 2 && !safe_mode;  // autonomous runs the rover unless "position follower"; safe mode (crash resets): no rover mode
+  rover_enabled               = cfg.rover_enabled && !safe_mode;  // safe mode (crash resets): no rover mode
   rover_seek_vbatt            = cfg.rover_seek_vbatt;
-  rover_return_m              = cfg.rover_return_m;
+  rover_seek_after_s          = cfg.rover_seek_after_s;
   rover_entry_btx             = cfg.rover_entry_btx;
   rover_exit_btx              = cfg.rover_exit_btx;
-  rover::Config& rc           = roverAp.cfg;
-  rc.goalCW                   = cfg.rover_goal_cw;
-  rc.followOnly               = cfg.rover_mode == 1;
-  rc.joinNoPolarityStop       = cfg.rover_join_no_pol == 1;
-  rc.sensorHeight             = (float)(cfg.rover_sensor_height_mm * 0.001);
-  rc.roamSpeed                = cfg.rover_roam_speed_mps;
-  rc.approachFraction         = cfg.rover_approach_pct * 0.01f;
-  rc.bounceDistance           = cfg.rover_bounce_m;
-  rc.bounceSpreadDeg          = cfg.rover_bounce_spread_deg;
-  rc.bounceMinDeg             = cfg.rover_bounce_min_deg;
-  rc.rearmDistance            = cfg.rover_rearm_m;
-  rc.rearmDrop                = cfg.rover_rearm_drop_m;
-  rc.beaconBounce             = cfg.rover_beacon_bounce;
-  rc.beaconDistance           = cfg.rover_beacon_m;
-  rc.beaconRearm              = cfg.rover_beacon_rearm_m;
-  rc.beaconSpreadDeg          = cfg.rover_beacon_spread_deg;
-  rc.approachDistance         = cfg.rover_approach_m;
-  rc.joinPivotDistance        = cfg.rover_join_pivot_m;
-  rc.approachAngleDeg         = cfg.rover_join_angle_deg;
-  rc.wrongDirCheck            = cfg.rover_wrong_dir_check;
-  rc.departMin                = cfg.rover_depart_min_m;
-  rc.departMax                = cfg.rover_depart_max_m;
-  rc.turnMinDeg               = cfg.rover_turn_min_deg;
-  rc.turnMaxDeg               = cfg.rover_turn_max_deg;
-  rc.probeLength              = cfg.rover_probe_m;
-  rc.noTxRoamS                = cfg.rover_no_tx_roam_s;
-  rc.noTxS                    = cfg.rover_no_tx_s;
-  rc.lostTimeout              = (float)cfg.rover_lost_timeout_s;
+  roverAp.cfg.goalCW          = cfg.rover_goal_cw;
+  roverAp.cfg.sensorHeight    = (float)(cfg.rover_sensor_height_mm * 0.001);
+  roverAp.cfg.maxSpeed        = (float)cfg.rover_full_speed_mps;
   // The autopilot steer command goes through the gyro rate loop: full steer requests steering_rate_max_dps
-  // (odrive_setDriveOutput), so the autopilot's full yaw rate is that value.
-  rc.maxYawRate               = (float)(steering_rate_max_dps * M_PI / 180.0);
+  // (odrive_setDriveOutput). The autopilot times its pivots from its own yaw rate, so its full yaw rate must
+  // be the same value, or a planned pivot turns by steering_rate_max_dps / full yaw rate of the plan (90/115
+  // with the defaults: 25 deg planned, 19.6 deg turned). rover_full_yaw_rate_dps is no longer used.
+  roverAp.cfg.maxYawRate      = (float)(steering_rate_max_dps * M_PI / 180.0);
+  roverAp.cfg.lostTimeout     = (float)cfg.rover_lost_timeout_s;
+  roverAp.cfg.speedLimit      = (float)cfg.rover_speed_limit_mps;
   applyTxPower();  // live: the next frame goes out at the new power
+  roverAp.cfg.exitGuard       = cfg.rover_exit_btx != 0;
 }
 
-// The Tx signal is present on the followed channel: the wire bin SNR (Rx STM32 extension item 1) of either sensor at
-// or above ROVER_TX_SNR_DB within the last 1 s. Not known (no item 1 yet): present.
-#define ROVER_TX_SNR_DB 10.0f
-bool roverTxSeen(){
-  const int b = stmDec.wireBin(0);
-  if (b < 0 || b > 7) return true;
-  const uint16_t now10 = (uint16_t)(millis() / 10u);
-  bool known = false;
-  for (unsigned r = 0; r < 2; r++) {
-    const unsigned sl = (unsigned)b | (r << 3);
-    const uint16_t t = stmDec.ext_t10[0][sl];
-    if (!t || (uint16_t)(now10 - t) > 100u) continue;
-    known = true;
-    if (stmDec.ext_val[0][sl] * 0.01f >= ROVER_TX_SNR_DB) return true;
-  }
-  return !known;
-}
-
-// Rover autopilot step, once per valid STM32 packet after the wire-follow outputs are computed. In mode 2 with
-// rover_enabled it replaces throttle and steering_output, except in FOLLOW and DEPART: there the wire follower's own
-// throttle and steering stay (the vehicle's follower and its tuning).
-// Rover mode, follower input: the Rx quadrant state can flip (x, y) -> (-x, -y) after a pivot through square-on, and
-// the follower steers on x. Near the wire (|y| > |x|) the wire is below the sensor, so the sign of y tells the state.
-// The sign of y in the follower's working state is learned in FOLLOW after the probe length of steady holding
-// (|x| within the join capture offset, the wire below) in the goal direction (polarity, when known): the follower holds
-// the wire steadily only in its working state, or mirrored in the other direction. Near
-// the wire a different sign of y gives -x; elsewhere the last decision holds; before the first steady hold, raw x.
-int8_t rover_y_below = 0;   // learned sign of y with the wire below (0 = not yet)
-static int8_t rover_x_sign = 1;
-int roverFollowSignNow() { return rover_x_sign; }  // for the log and the emulator
-float roverFollowSign(){
-  static float steady_from_m = -1.0f;
-  const float x = stmPacket.items.s1_x, y = stmPacket.items.s1_y;  // mm
-  const bool lost = WFRX_STATUS_GET_BIT(stmPacket.items.status_bits, WFRX_STATUS_S1_SIGNAL_LOST);
-  const bool below = !lost && fabsf(y) > fabsf(x);
-  const int8_t ys = y < 0 ? -1 : 1;
-  // A follower with x mirrored also holds the wire, in the other direction: learn only in the goal direction
-  const int8_t goal = g_deviceConfig.rover_goal_cw ? 1 : -1;
-  const bool goalWay = world_heading == goal || world_heading == 0;
-  if (roverAp.state == rover::FOLLOW && rover_out.external && below && goalWay && fabsf(x) <= 100.0f) {
-    if (steady_from_m < 0) steady_from_m = rover_driven_m;
-    if (rover_driven_m - steady_from_m >= roverAp.cfg.probeLength && rover_y_below != ys * rover_x_sign) {
-      rover_y_below = (int8_t)(ys * rover_x_sign);  // the sign of y in the working state
-    }
-  } else {
-    steady_from_m = -1.0f;
-  }
-  if (roverAp.yBelow != 0) { rover_y_below = roverAp.yBelow; roverAp.yBelow = 0; }  // set by the join from geometry
-  if (rover_y_below != 0 && below) rover_x_sign = (ys == rover_y_below) ? 1 : -1;
-  return (float)rover_x_sign;
-}
-
+// Rover autopilot step, once per valid STM32 packet after the wire-follow outputs are
+// computed. In mode 2 with rover_enabled it replaces throttle and steering_output.
 void roverStep(){
-  const bool want = rover_enabled && drive_mode_status == 2;
+  const bool active = rover_enabled && drive_mode_status == 2;
   const uint32_t now_us = micros();
   float dt = rover_last_packet_us ? (now_us - rover_last_packet_us) * 1e-6f : 0.01f;
   rover_last_packet_us = now_us;
   if(dt > 0.1f) dt = 0.1f;  // a stalled loop must not become one long step
-  if(want && !rover_active){  // entering mode 2: start from a fresh state
-    roverAp.reset();
+  if(active && !rover_active){  // entering mode 2: start roaming from a fresh state
+    roverAp.reset(rover::ROAM);
     rover_out = rover::Output();
     rover_need_charge = false;
-    rover_driven_m = 0.0f;
+    rover_last_charge_ms = millis();
     rover_was_docked = charge_status > 0;
     rover_charge_ran = false;
+    rover_stall_since_ms = 0;
+    rover_stall_halted = false;
   }
-  rover_active = want;
-  if(!want) return;
+  rover_active = active;
+  if(!active) return;
 
   const uint32_t sb = stmPacket.items.status_bits;
-  const uint32_t now_ms = millis();
   rover::Inputs in;
   in.dt = dt;
+  in.packet = true;
   in.inRange = !WFRX_STATUS_GET_BIT(sb, WFRX_STATUS_S1_SIGNAL_LOST)
             && !WFRX_STATUS_GET_BIT(sb, WFRX_STATUS_S1_SIGNAL_OVERLOAD)
             && !WFRX_STATUS_GET_BIT(sb, WFRX_STATUS_S1_SIGNAL_DISABLED);
-  in.x = stmPacket.items.s1_x * 0.001f;  // mm -> m, as the Rx sends them
-  in.y = stmPacket.items.s1_y * 0.001f;
-  in.R = stmPacket.items.s1_radius * 0.001f;
-  // IMU roll correction (optional): a roll turns the field in the coil plane; turn x and y back by the accelerometer
-  // roll. The radius does not change.
-  if (g_deviceConfig.rover_imu_roll && gyro_ready) {
-    const float a = (g_deviceConfig.rover_imu_roll == 2 ? 1.0f : -1.0f) * imu_roll16 * (float)(M_PI / 32768.0);
-    const float x = in.x, y = in.y, c = cosf(a), s = sinf(a);
-    in.x = x * c - y * s;
-    in.y = x * s + y * c;
-  }
-  in.inside = world_inside;    // polarity facts (worldFacts); 0 when not known
-  in.heading = world_heading;
+  in.fwX = stmPacket.items.s1_x * 0.001f;  // mm -> m
+  in.fwY = stmPacket.items.s1_y * 0.001f;
+  in.fwR = stmPacket.items.s1_radius * 0.001f;
+  in.v = rover_out.v;  // no odometry: the commanded speed after the slew
+  // No gyro (design choice, 2026-10-08): the pivot angle comes from the autopilot's own slewed yaw-rate
+  // command, as the speed does. Only the magnitude is used. Track slip in a pivot makes the real
+  // turn smaller than this (lib/rover_autopilot/README.md, slip runs).
+  in.yawRate = rover_out.w;
 
-  // Speed and distance driven: the wheel speeds when fresh (full drive command = roam speed), else the command. Turn
-  // measure: the gyro when fitted, else the command.
-  const bool wheels_fresh = odrive_vel_received[0] && odrive_vel_received[1]
-      && now_ms - odrive_vel_millis[0] < ODRIVE_VEL_STALE_MS && now_ms - odrive_vel_millis[1] < ODRIVE_VEL_STALE_MS;
-  const float k_mps = roverAp.cfg.roamSpeed / ODRIVE_DRIVE_SCALE_RPS;  // m/s per rev/s
-  float travel_mps;
-  if (wheels_fresh) {
-    const float left = odrive_vel_rps[1] * k_mps, right = -odrive_vel_rps[0] * k_mps;  // skid mix: even nodes reversed
-    in.v = 0.5f * (left + right);
-    travel_mps = 0.5f * (fabsf(left) + fabsf(right));
-  } else {
-    in.v = rover_out.external ? (throttle - PWM_OUT_2_DEFAULT) / (float)(PWM_OUT_2_MAX - PWM_OUT_2_DEFAULT) * roverAp.cfg.roamSpeed
-                              : rover_out.v;
-    travel_mps = fabsf(in.v);
-  }
-  in.yawRate = steeringRateGyroValid() ? (float)(mpu.getGyroZ() * M_PI / 180.0) : rover_out.w;
-  static uint32_t tx_seen_ms = 0;
-  if (roverTxSeen()) tx_seen_ms = now_ms;
-  in.txOffS = (now_ms - tx_seen_ms) * 0.001f;  // the autopilot stops after its limit for the state
-  // Stuck detector: only while the signal is not lost; its window starts again while lost or while the autopilot
-  // holds still.
-  if (!in.inRange || (!rover_out.external && rover_out.v == 0.0f)) stuckDetector.ResetStatus();
-  in.stuck = in.inRange && stuckDetector.GetStatus();
-
-  // Charging: DOCK while the charge state machine runs; a charge clears the return.
+  // Charging: hold while the charge state machine runs; charged when it ends.
   const bool docked = charge_status > 0;
   in.docked = docked;
-  in.onContacts = stmPacket.items.vcharge > stmPacket.items.vbatt + 0.4f;  // the chargeControl() test
-  if (charge_status == 3) rover_charge_ran = true;  // the STM32 charged
-  if (rover_was_docked && !docked && rover_charge_ran) {
-    rover_need_charge = false;
-    rover_driven_m = 0.0f;
-  }
+  if (charge_status == 3) rover_charge_ran = true;  // the STM32 charged; a refused or failed charge never gets here
+  in.charged = rover_was_docked && !docked && rover_charge_ran;
   if (!docked) rover_charge_ran = false;
   rover_was_docked = docked;
+  if(in.charged){
+    rover_need_charge = false;
+    rover_last_charge_ms = millis();
+  }
 
-  // Return: distance driven since the last charge, or battery voltage (filtered: it sags under load).
-  rover_driven_m += travel_mps * dt;
+  // Go home on battery voltage (filtered: it sags under load) or time since the last charge.
   const float vb = stmPacket.items.vbatt;
   rover_vbatt_filt = (rover_vbatt_filt <= 0.0f) ? vb : 0.99f * rover_vbatt_filt + 0.01f * vb;
   if(rover_seek_vbatt > 0 && rover_vbatt_filt > 1.0f && rover_vbatt_filt < rover_seek_vbatt) rover_need_charge = true;
-  if(rover_return_m > 0 && rover_driven_m >= rover_return_m) rover_need_charge = true;
+  if(rover_seek_after_s > 0 && millis() - rover_last_charge_ms > (uint32_t)rover_seek_after_s * 1000U) rover_need_charge = true;
   in.needCharge = rover_need_charge;
 
-  // Beacons: the radius of each channel filtered as BTx1Signal but not clamped (the re-arm distance is past the BTx
-  // threshold); entry and exit by mower channel number with the follower's signals (BTx1Signal, BTx2Signal).
-  for (int c = 0; c < 2; c++) {
-    const float r = constrain(stmPacket.items.s1_btx_radius[c], 10.0f, 2000.0f);
-    rover_btx_mm[c] = BTxFilterAlpha * r + (1 - BTxFilterAlpha) * rover_btx_mm[c];
-  }
-  in.beaconRange = fminf(rover_btx_mm[0], rover_btx_mm[1]) * 0.001f;
+  // Beacons, by mower channel number (BTx1Signal, BTx2Signal: filtered radius in mm).
   const float btx_signal[3] = {(float)BTxThreshold + 1.0f, BTx1Signal, BTx2Signal};
-  in.entryBeacon = rover_entry_btx != 0 && btx_signal[rover_entry_btx] < BTxThreshold;
-  in.exitBeacon = rover_exit_btx != 0 && btx_signal[rover_exit_btx] < BTxThreshold;
+  in.entryBtx = rover_entry_btx != 0 && btx_signal[rover_entry_btx] < BTxThreshold;
+  in.exitBtx = rover_exit_btx != 0 && btx_signal[rover_exit_btx] < BTxThreshold;
 
-  const float prev_w = rover_out.w;
-  rover_out = roverAp.step(in);
-  // A pivot ended: clear the rate loop integral, or it keeps the vehicle turning for seconds after the pivot.
-  if (prev_w != 0.0f && rover_out.w == 0.0f && !rover_out.external) steeringRateReset();
-
-  // Decision log: each bounce, check, join, reversal, beacon turn, dock, depart, Tx change and fault.
-  static uint32_t dec_seen = 0;
-  if (roverAp.dec.seq != dec_seen) {
-    dec_seen = roverAp.dec.seq;
-    const rover::Decision& d = roverAp.dec;
-    if (usb_verbose)
-      usbOut.printf("ROVER %s %s d=%.2f X=%.2f psi=%.0f turn=%.0f side=%d fault=%d\n", rover::stateName(roverAp.state),
-                    rover::decisionName(d.code), d.d, d.X, d.psiDeg, d.turnDeg, d.side, d.reason);
+  // Stall stop (the stuck detector does not act in rover mode: off the wire, s1_y does not move).
+  const uint32_t now_ms = millis();
+  const bool wheels_fresh = odrive_vel_received[0] && odrive_vel_received[1]
+      && now_ms - odrive_vel_millis[0] < ODRIVE_VEL_STALE_MS && now_ms - odrive_vel_millis[1] < ODRIVE_VEL_STALE_MS;
+  const float drive_cmd = fabsf(rover_out.v) / roverAp.cfg.maxSpeed;
+  bool stalled;
+  if (wheels_fresh) {
+    const float turning = 0.5f * (fabsf(odrive_vel_rps[0]) + fabsf(odrive_vel_rps[1]));
+    stalled = drive_cmd > 0.15f && turning < 0.25f * drive_cmd * ODRIVE_DRIVE_SCALE_RPS;
+  } else {
+    stalled = in.inRange && stuckDetector.GetStatus();
+  }
+  if (!stalled) rover_stall_since_ms = 0;
+  else if (!rover_stall_since_ms) rover_stall_since_ms = now_ms;
+  else if (now_ms - rover_stall_since_ms > ROVER_STALL_MS && roverAp.state != rover::HALTED) {
+    roverAp.halt();
+    rover_stall_halted = true;
   }
 
-  if (rover_out.external) return;  // FOLLOW or DEPART: the wire follower's outputs stay
+  rover_out = roverAp.step(in);
 
-  // Command to the servo-equivalent outputs that odrive_setDriveOutput() normalises back.
-  const float drive = constrain(rover_out.v / roverAp.cfg.roamSpeed, -1.0f, 1.0f);
-  const float steer = constrain(rover_out.w / roverAp.cfg.maxYawRate, -1.0f, 1.0f);  // left (CCW) positive
+  // Slewed command to the servo-equivalent outputs that odrive_setDriveOutput() normalises back.
+  const float drive = rover_out.v / roverAp.cfg.maxSpeed;
+  const float steer = rover_out.w / roverAp.cfg.maxYawRate;  // left (CCW) positive
   throttle = (int)lround(drive >= 0 ? PWM_OUT_2_DEFAULT + drive * (PWM_OUT_2_MAX - PWM_OUT_2_DEFAULT)
                                     : PWM_OUT_2_DEFAULT + drive * (PWM_OUT_2_DEFAULT - PWM_OUT_2_MIN));
   // Wire following with pid_direction DIRECT turns toward a wire on the left with a positive
@@ -1629,9 +1530,8 @@ void roverStep(){
   static uint32_t print_ms = 0;
   if(usb_verbose && millis() - print_ms >= 1000){
     print_ms = millis();
-    usbOut.printf("rover %s sub=%d in=%d X=%.2f d=%.2f v=%.2f w=%.2f home=%d driven=%.0f inside=%d head=%d tx=%d\n",
+    usbOut.printf("rover %s sub=%d in=%d X=%.2f d=%.2f psi=%.0f v=%.2f w=%.2f home=%d turns=%lu\n",
       rover::stateName(roverAp.state), (int)roverAp.sub, (int)in.inRange, roverAp.rd.Xf, roverAp.rd.df,
-      rover_out.v, rover_out.w, (int)rover_need_charge, rover_driven_m,
-      in.inside, in.heading, (int)(in.txOffS < 2.0f));
+      roverAp.rd.psif * 57.2958f, rover_out.v, rover_out.w, (int)rover_need_charge, (unsigned long)roverAp.turnarounds);
   }
 }

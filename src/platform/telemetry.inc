@@ -349,7 +349,7 @@ void telemetryStatus(){
   st.xf_valid = rover_active && roverAp.rd.valid;
   st.xf_m = roverAp.rd.Xf;
   st.dist_m = roverAp.rd.df;
-  st.angle_deg = fabsf(roverAp.dec.psiDeg);  // the fitted heading at the last decision (bounce, join, probe), size
+  st.angle_deg = roverAp.rd.psif * 57.29578f;
 #ifdef TELEMETRY_NEWVALUE
   tlm_set(TLM_test_heap_kb, (float)st.free_heap / 1024.0f);  // example line, 1 Hz
 #endif
@@ -391,10 +391,10 @@ void telemetryEvents(){
   const bool stuck = stuckDetector.GetStatus();
   if (stuck && !telem_last_stuck) telemetryEvent(rec::EV_STUCK, 0, 0, nullptr);
   telem_last_stuck = stuck;
-  const bool halted = rover_active && roverAp.state == rover::FAULT;
+  const bool halted = rover_active && roverAp.state == rover::HALTED;
   if (halted && !telem_last_halted) {
-    telemetryEvent(rec::EV_HALTED, roverAp.fault, 0, roverAp.fault == rover::FAULT_STUCK ? "fault: stuck"
-                   : roverAp.fault == rover::FAULT_NO_POLARITY ? "fault: no polarity at join" : "fault: wire lost too long");
+    if (rover_stall_halted) telemetryEvent(rec::EV_STALL, 0, 0, "stalled: halted");
+    else telemetryEvent(rec::EV_HALTED, 0, 0, "wire lost too long");
   }
   telem_last_halted = halted;
   for (int n = 0; n < ODRIVE_NODE_COUNT; n++) {
