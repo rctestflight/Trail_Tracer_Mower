@@ -158,10 +158,11 @@ void Autopilot::joinNow(const Inputs& in) {
   stopT_ = 0;
 }
 
-// The approach fit takes every frame in range of a straight drive: no commanded turn, not the wire follower. A turn
-// starts a new fit. Lost frames carry no equation; the distance driven still counts.
+// The approach fit takes every frame in range of a straight drive: no commanded turn, not the wire follower. A
+// commanded turn starts a new fit; the gyro does not (straight drive on a real rover reads several deg/s). Lost frames
+// carry no equation; the distance driven still counts.
 void Autopilot::feedFit(const Inputs& in) {
-  if (last_.external || last_.w != 0.0f || fabsf(in.yawRate) > STOP_YAW) { fit_.reset(); return; }
+  if (last_.external || last_.w != 0.0f) { fit_.reset(); return; }
   fit_.advance(in.v * in.dt);
   if (in.inRange && in.R > 0) fit_.add(in.x, in.y, in.R, cfg.sensorHeight, in.inside);
 }

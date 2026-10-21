@@ -3,6 +3,8 @@
 #pragma once
 
 // Change history
+//   0.6.26: the approach fit restarts only on a commanded turn, not on gyro readings over 0.05 rad/s: a real rover in
+//     straight drive reads several deg/s, so the fit never formed and every bounce took the wire as square-on.
 //   0.6.25: the Rx describes itself: the build puts its telemetry_def.json and settings_def.json, gzipped, into the
 //     image (tools/gen_def_files_build.py); "defget <tlm|set> <offset>" sends them in chunks over USB, Wi-Fi and
 //     ESP-NOW (docs/espnow_protocol.md, "Definition files"), so the telemetry app needs no update for a new build.
@@ -240,12 +242,12 @@
 #if defined(OTA_TEST_VERSION)
 #define ROVER_FW_VERSION OTA_TEST_VERSION  // OTA test images (envs ota_a, ota_b, ota_test_crash)
 #elif defined(BENCH_FAKE_IMU)
-#define ROVER_FW_VERSION "0.6.25+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.6.26+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #elif defined(SETTINGS_NEWKEY)
-#define ROVER_FW_VERSION "0.6.25-newkey"  // bench build: one more table line (test_new_setting)
+#define ROVER_FW_VERSION "0.6.26-newkey"  // bench build: one more table line (test_new_setting)
 #elif defined(TELEMETRY_NEWVALUE)
-#define ROVER_FW_VERSION "0.6.25-newvalue"  // bench build: the example lines of include/user_telemetry.h
+#define ROVER_FW_VERSION "0.6.26-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.6.25"
+#define ROVER_FW_VERSION "0.6.26"
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
