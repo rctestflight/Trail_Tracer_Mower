@@ -101,6 +101,7 @@ uint32_t odrive_rc_update_millis = 0;
 float odrive_drive_command = 0.0f;
 float odrive_steer_command = 0.0f;
 bool odrive_output_enabled = false;
+bool odrive_arm_switch_was_high = false;
 uint32_t odrive_output_millis = 0;
 
 // ===== Button =====
@@ -333,6 +334,18 @@ void odrive_setDriveOutput(double throttle_us, double steering_us, bool enabled)
 void odrive_outputUpdate(bool frame_now) {
   const uint32_t now = millis();
   const bool motor_idle_requested = digitalRead(MOTOR_ARM_SWITCH_PIN) == LOW;
+  const bool arm_switch_high = !motor_idle_requested;
+  if (arm_switch_high && !odrive_arm_switch_was_high && can_init_ok) {
+    // Clear faults before rc_ready checks the reported axis errors. Otherwise
+    // a latched fault prevents odrive_startRc() from ever reaching Clear_Errors.
+    // Keep the reported faults until CAN confirms the clear, including for the
+    // buzzer; an unsuccessful clear must not silence a real fault.
+    for (uint8_t node = 0; node < ODRIVE_NODE_COUNT; ++node) {
+      odrive_clearErrors(node);
+      delay(2);
+    }
+  }
+  odrive_arm_switch_was_high = arm_switch_high;
   if (motor_idle_requested && odrive_rc_active) odrive_stopRc();
   if (!frame_now && now - odrive_rc_update_millis < ODRIVE_RC_UPDATE_MS) return;
   const double dt_s = frame_now ? stmFramePeriodS() : constrain((now - odrive_rc_update_millis) / 1000.0, 0.001, 0.1);
@@ -438,6 +451,7 @@ void setup() {
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   eraseWindowOpen();  // the settings erase gesture: a press in the first 3 s after power-on
   pinMode(MOTOR_ARM_SWITCH_PIN, INPUT_PULLUP);
+  odrive_arm_switch_was_high = digitalRead(MOTOR_ARM_SWITCH_PIN) == HIGH;
   digitalWrite(BUZZER_PIN, LOW);
   pinMode(BUZZER_PIN, OUTPUT);
 
