@@ -155,6 +155,40 @@ bool sine_wave_force_disabled = false;
 // ===== Steering PID =====
 double target_x_pos = 0;  // target x distance from wire
 double live_position = 0;
+
+// 0.6.21: world facts from the polarity (Rx STM32 2.2.0+), at the sensor nearest the wire, for the followed Tx channel
+// (rx_channel). world_inside: +1 inside the loop, -1 outside. world_heading: +1 clockwise round the loop, -1
+// counterclockwise (seen from above). 0: not known. With D = the current direction setting of the channel (+1
+// clockwise, -1 counterclockwise): inside = polarity x sign(x) x D; heading = polarity x sign(y) x D. Each fact
+// counts only away from its blind line (|x|, or |y|, at least 25 % of the radius: above the wire x is near 0, square
+// to the wire y is near 0); else, and while the polarity is 0, the last value holds. No sensor in range for 2 s,
+// no fresh polarity item for 1 s, or no current direction set: both 0.
+int8_t world_inside = 0, world_heading = 0;
+void worldFacts(){
+  const int c = (int)rx_channel - 1;
+  const uint8_t dirs[5] = {g_deviceConfig.tx_dir_ch1, g_deviceConfig.tx_dir_ch2, g_deviceConfig.tx_dir_ch3,
+                           g_deviceConfig.tx_dir_ch4, g_deviceConfig.tx_dir_ch5};
+  const int D = (c >= 0 && c < 5) ? (dirs[c] == 1 ? 1 : dirs[c] == 2 ? -1 : 0) : 0;
+  const uint32_t now = millis();
+  const bool fresh = stmDec.pol_t10 && (uint16_t)((uint16_t)(now / 10u) - stmDec.pol_t10) <= 100u;
+  static uint32_t seen_ms = 0;
+  int s = -1;
+  float rs = 0;
+  for (int k = 0; k < 2; k++) {
+    if (stmDec.lost[k]) continue;
+    const float r = k == 0 ? stmPacket.items.s1_radius : stmPacket.items.s2_radius;
+    if (s < 0 || r < rs) { s = k; rs = r; }
+  }
+  if (s >= 0) seen_ms = now;
+  if (D == 0 || !fresh || now - seen_ms > 2000u) { world_inside = world_heading = 0; return; }
+  if (s < 0) return;
+  const int p = stmDec.pol[s][c];
+  if (p == 0) return;
+  const float x = s == 0 ? stmPacket.items.s1_x : stmPacket.items.s2_x;
+  const float y = s == 0 ? stmPacket.items.s1_y : stmPacket.items.s2_y;
+  if (fabsf(x) >= 0.25f * rs) world_inside = (int8_t)(p * (x > 0 ? 1 : -1) * D);
+  if (fabsf(y) >= 0.25f * rs) world_heading = (int8_t)(p * (y > 0 ? 1 : -1) * D);
+}
 // PID Initialization
 double pid_output = 0.0;
 double steering_output = PWM_OUT_1_DEFAULT;
@@ -552,6 +586,12 @@ void loop() {
   if (rxFrameReady()) {
     // update the double X position from the float in the latest STM32 packet
     live_position = stmPacket.items.s1_x;
+    // 0.6.21: steering frame "world": x signed by the heading round the loop against the goal direction
+    // (rover_goal_cw). The goal way: x as it is. The wrong way: -x, so the steering turns the vehicle round. Heading not
+    // known: x as it is (vehicle frame).
+    worldFacts();
+    if (g_deviceConfig.steer_frame == 1 && world_heading != 0)
+      live_position *= (double)(world_heading * (g_deviceConfig.rover_goal_cw ? 1 : -1));
     uint32_t loop_now_ms = millis();
 
     // Filter and condition BTx signals

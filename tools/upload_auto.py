@@ -131,6 +131,13 @@ def main():
 
     rom = a.port if pid_of(a.port) == ROM_PID else None
     if rom is None:
+        # A port that another program holds gives no BOOT line either: stop, never take the full install for it.
+        import serial
+        try:
+            serial.Serial(a.port).close()
+        except serial.SerialException as e:
+            raise SystemExit(f"upload_auto: {a.port} is open in another program ({e}); close it, then upload again. "
+                             "Nothing was written.")
         line = boot_line(a.port)
         if line:
             print(f"upload_auto: {a.port}: {line}", flush=True)

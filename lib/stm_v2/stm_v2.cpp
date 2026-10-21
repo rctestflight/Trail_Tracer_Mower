@@ -86,11 +86,24 @@ IRAM_ATTR bool Decoder::decode(const uint8_t* f, __StmTxPacketStruct& out, Answe
   if (fr.proto_ver != (v3 ? WFRX_PROTO_VER3 : WFRX_PROTO_VER)) { st.ver_err++; return false; }
   proto = fr.proto_ver;
   if (v3) {  // the extension slot: 4 items
-    const uint16_t t10 = (uint16_t)((now_ms / 10u) | 1u);  // never 0 (0 = never came)
+    // 10 ms units; 0 means never came, so 0 becomes 1. (Before 0.6.21 this was "| 1", which put an even tick one unit
+    // ahead of the clock: "now - t" then wrapped to 65535 and a fresh item read as stale about half the time.)
+    uint16_t t10 = (uint16_t)(now_ms / 10u);
+    if (!t10) t10 = 1;
     for (unsigned k = 0; k < WFRX_EXT_ITEMS; k++) {
       const uint8_t* it = f + WFRX_EXT_OFFSET + 4 * k;
       const uint8_t id = it[0], ix = it[1];
       if (id == 0) continue;
+      if (id == WFRX_EXT_POLARITY) {  // 24 bits of codes in the index byte and the value
+        const uint32_t bits = (uint32_t)ix | ((uint32_t)it[2] << 8) | ((uint32_t)it[3] << 16);
+        for (unsigned k = 0; k < 10; k++) {
+          const unsigned code = (bits >> (2 * k)) & 3u;
+          pol[k / 5][k % 5] = code == 1 ? 1 : code == 3 ? -1 : 0;
+        }
+        pol_t10 = t10;
+        ext_items++;
+        continue;
+      }
       if (id > WFRX_EXT_IDS || (ix & 0xE8u)) { ext_bad++; continue; }  // index: bits 0-2 (bin or Tx channel 0-4) and bit 4 only
       const unsigned slot = (ix & 7u) | ((ix >> 1) & 8u);
       int16_t v;

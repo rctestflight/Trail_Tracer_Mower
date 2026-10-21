@@ -100,6 +100,10 @@ class Decoder {
   int16_t ext_val[WFRX_EXT_IDS][16] = {};
   uint16_t ext_t10[WFRX_EXT_IDS][16] = {};
   uint32_t ext_items = 0, ext_bad = 0;     // items taken; items with an unknown id or index
+  // Rx STM32 2.2.0: ext id 12, the polarity per sensor and Tx channel (+1, -1, 0 unknown), and the time of the last
+  // id 12 item (10 ms units, 0 = never).
+  int8_t pol[2][5] = {};
+  uint16_t pol_t10 = 0;
   bool polar_on = false;
   uint8_t polar[POLAR_BLOCK] = {};
 

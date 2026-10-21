@@ -38,3 +38,17 @@ TLM(dt_spread_s2_ch2, U16, 0.1, "deg", 1, 10HZ, "Polarity detection", "Sign angl
 TLM(dt_spread_s2_ch3, U16, 0.1, "deg", 1, 10HZ, "Polarity detection", "Sign angle spread, sensor 2, Tx channel 3 (over 45 deg: no reliable sign)")
 TLM(dt_spread_s2_ch4, U16, 0.1, "deg", 1, 10HZ, "Polarity detection", "Sign angle spread, sensor 2, Tx channel 4 (over 45 deg: no reliable sign)")
 TLM(dt_spread_s2_ch5, U16, 0.1, "deg", 1, 10HZ, "Polarity detection", "Sign angle spread, sensor 2, Tx channel 5 (over 45 deg: no reliable sign)")
+// 0.6.21: polarity per sensor and Tx channel (Rx STM32 2.2.0+, ext id 12, every frame; set in dtTelemetry), and the
+// world facts of src/main.cpp worldFacts().
+TLM(dt_polarity_s1_ch1,    I8,  1,   "",    0, 10HZ, "Polarity detection", "Polarity, sensor 1, Tx channel 1 (+1 along the tracked field, -1 opposite, 0 unknown)")
+TLM(dt_polarity_s1_ch2,    I8,  1,   "",    0, 10HZ, "Polarity detection", "Polarity, sensor 1, Tx channel 2 (+1 along the tracked field, -1 opposite, 0 unknown)")
+TLM(dt_polarity_s1_ch3,    I8,  1,   "",    0, 10HZ, "Polarity detection", "Polarity, sensor 1, Tx channel 3 (+1 along the tracked field, -1 opposite, 0 unknown)")
+TLM(dt_polarity_s1_ch4,    I8,  1,   "",    0, 10HZ, "Polarity detection", "Polarity, sensor 1, Tx channel 4 (+1 along the tracked field, -1 opposite, 0 unknown)")
+TLM(dt_polarity_s1_ch5,    I8,  1,   "",    0, 10HZ, "Polarity detection", "Polarity, sensor 1, Tx channel 5 (+1 along the tracked field, -1 opposite, 0 unknown)")
+TLM(dt_polarity_s2_ch1,    I8,  1,   "",    0, 10HZ, "Polarity detection", "Polarity, sensor 2, Tx channel 1 (+1 along the tracked field, -1 opposite, 0 unknown)")
+TLM(dt_polarity_s2_ch2,    I8,  1,   "",    0, 10HZ, "Polarity detection", "Polarity, sensor 2, Tx channel 2 (+1 along the tracked field, -1 opposite, 0 unknown)")
+TLM(dt_polarity_s2_ch3,    I8,  1,   "",    0, 10HZ, "Polarity detection", "Polarity, sensor 2, Tx channel 3 (+1 along the tracked field, -1 opposite, 0 unknown)")
+TLM(dt_polarity_s2_ch4,    I8,  1,   "",    0, 10HZ, "Polarity detection", "Polarity, sensor 2, Tx channel 4 (+1 along the tracked field, -1 opposite, 0 unknown)")
+TLM(dt_polarity_s2_ch5,    I8,  1,   "",    0, 10HZ, "Polarity detection", "Polarity, sensor 2, Tx channel 5 (+1 along the tracked field, -1 opposite, 0 unknown)")
+TLM(wire_inside,       I8,  1,   "",    0, 10HZ, "Polarity detection", "Inside the loop (+1 inside, -1 outside, 0 not known)")
+TLM(wire_heading,      I8,  1,   "",    0, 10HZ, "Polarity detection", "Heading round the loop (+1 clockwise, -1 counterclockwise, 0 not known)")

@@ -590,17 +590,38 @@ void stmRawCommand(const char* arg){
     stmLink.pushInt(STM_RUN_CMD | 0x80000000, v);
     stm_ans_print_until = millis() + 2000;
     usbOut.printf("STM run %d%c", v, 10);
-  } else if (!strcmp(arg, "ext")) {
-    // bench: frame version 3 extension items (Rx STM32 2.0.81+): the last value and age of each item id and index
+  } else if (!strcmp(arg, "ext") || !strncmp(arg, "ext ", 4)) {
+    // bench: frame version 3 extension items (Rx STM32 2.0.81+): the last value and age of each item id and index.
+    // "stm ext <id>": that id only (the full list can be longer than the USB output takes at once).
+    const unsigned only = arg[3] == ' ' ? (unsigned)atoi(arg + 4) : 0u;
     usbOut.printf("STM ext proto=%u frame=%d B items=%lu bad=%lu%c", (unsigned)stmDec.proto, stm_v2_len,
                   (unsigned long)stmDec.ext_items, (unsigned long)stmDec.ext_bad, 10);
     const uint16_t now10 = (uint16_t)(millis() / 10u);
     for (unsigned id = 0; id < WFRX_EXT_IDS; id++)
       for (unsigned sl = 0; sl < 16; sl++) {
+        if (only && id + 1 != only) continue;
         if (!stmDec.ext_t10[id][sl]) continue;
         usbOut.printf("STM ext id=%u sensor=%u index=%u value=%d age_ms=%u%c", id + 1, sl >> 3, sl & 7u, (int)stmDec.ext_val[id][sl],  // sensor = index bit 4
                       (unsigned)((uint16_t)(now10 - stmDec.ext_t10[id][sl]) * 10u), 10);
       }
+  } else if (!strcmp(arg, "pol")) {
+    // bench (0.6.21): per sensor, x, y and radius (mm, as the Rx gives them), and per Tx channel the field sign (id 9),
+    // the sign spread (id 10, deg) and the polarity (id 12); then the world facts of the followed channel.
+    const uint16_t now10 = (uint16_t)(millis() / 10u);
+    const uint16_t tp = stmDec.pol_t10;
+    usbOut.printf("STM pol age_ms=%d ch=%u inside=%d heading=%d%c", tp ? (int)((uint16_t)(now10 - tp) * 10u) : -1,
+                  (unsigned)rx_channel, (int)world_inside, (int)world_heading, 10);
+    for (unsigned s = 0; s < 2; s++) {
+      const float x = s ? stmPacket.items.s2_x : stmPacket.items.s1_x, y = s ? stmPacket.items.s2_y : stmPacket.items.s1_y;
+      const float r = s ? stmPacket.items.s2_radius : stmPacket.items.s1_radius;
+      usbOut.printf("STM pol s%u lost=%d x=%.0f y=%.0f r=%.0f", s + 1, (int)stmDec.lost[s], x, y, r);
+      for (unsigned c = 0; c < 5; c++) {
+        const unsigned sl = s * 8u + c;
+        usbOut.printf(" ch%u:%d/%d/%.1f", c + 1, stmDec.ext_t10[8][sl] ? (int)stmDec.ext_val[8][sl] : 0,
+                      (int)stmDec.pol[s][c], stmDec.ext_t10[9][sl] ? stmDec.ext_val[9][sl] * 0.1f : -1.0f);
+      }
+      usbOut.printf("%c", 10);
+    }
   } else if (!strcmp(arg, "polar")) {
     // bench: the polarity detector stream (Rx STM32 2.0.67+, CID 52 on) and its record (body 0x37)
     const uint8_t* b = stmDec.polar;

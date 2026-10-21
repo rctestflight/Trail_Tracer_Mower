@@ -1065,6 +1065,354 @@
       "group": "Polarity detection",
       "description": "0 = not set, 1 = inside the perimeter, 2 = outside",
       "label": "Side A of Tx channel 5"
+    },
+    "tx_dir_ch1": {
+      "type": "int",
+      "min": 0,
+      "max": 2,
+      "default": 0,
+      "live": true,
+      "group": "Polarity detection",
+      "description": "The way positive Tx current runs round the loop, seen from above: 0 = not set, 1 = clockwise, 2 = counterclockwise. Dual tone cannot see it.",
+      "label": "Current direction of Tx channel 1"
+    },
+    "tx_dir_ch2": {
+      "type": "int",
+      "min": 0,
+      "max": 2,
+      "default": 0,
+      "live": true,
+      "group": "Polarity detection",
+      "description": "The way positive Tx current runs round the loop, seen from above: 0 = not set, 1 = clockwise, 2 = counterclockwise. Dual tone cannot see it.",
+      "label": "Current direction of Tx channel 2"
+    },
+    "tx_dir_ch3": {
+      "type": "int",
+      "min": 0,
+      "max": 2,
+      "default": 0,
+      "live": true,
+      "group": "Polarity detection",
+      "description": "The way positive Tx current runs round the loop, seen from above: 0 = not set, 1 = clockwise, 2 = counterclockwise. Dual tone cannot see it.",
+      "label": "Current direction of Tx channel 3"
+    },
+    "tx_dir_ch4": {
+      "type": "int",
+      "min": 0,
+      "max": 2,
+      "default": 0,
+      "live": true,
+      "group": "Polarity detection",
+      "description": "The way positive Tx current runs round the loop, seen from above: 0 = not set, 1 = clockwise, 2 = counterclockwise. Dual tone cannot see it.",
+      "label": "Current direction of Tx channel 4"
+    },
+    "tx_dir_ch5": {
+      "type": "int",
+      "min": 0,
+      "max": 2,
+      "default": 0,
+      "live": true,
+      "group": "Polarity detection",
+      "description": "The way positive Tx current runs round the loop, seen from above: 0 = not set, 1 = clockwise, 2 = counterclockwise. Dual tone cannot see it.",
+      "label": "Current direction of Tx channel 5"
+    },
+    "steer_frame": {
+      "type": "choice",
+      "values": [
+        "vehicle",
+        "world"
+      ],
+      "default": "vehicle",
+      "live": true,
+      "group": "Steering PID",
+      "description": "vehicle: x as the sensor sees it. world: x signed by the heading round the loop, so a vehicle on the wire the wrong way turns round. World needs polarity (Rx STM32 2.2.0+) and the current direction of the followed Tx channel; without them: vehicle.",
+      "label": "Steering frame"
+    },
+    "dt_spread_limit_deg": {
+      "type": "float",
+      "unit": "deg",
+      "min": 1.0,
+      "max": 180.0,
+      "default": 45.0,
+      "live": false,
+      "group": "Polarity detection",
+      "description": "A dual tone block sets the polarity only at or below this sign spread (Rx STM32 2.2.0+, CID 54 index 14)",
+      "label": "Sign spread limit"
+    },
+    "rx_regain_wait_ms": {
+      "type": "int",
+      "unit": "ms",
+      "min": 0,
+      "max": 10000,
+      "default": 500,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "description": "The regained distance must hold this long before the wire counts as found again (CID 24)",
+      "label": "Regain wait"
+    },
+    "rx_weak_mm_0": {
+      "type": "float",
+      "unit": "mm",
+      "min": 50.0,
+      "max": 20000.0,
+      "default": 600.0,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "description": "Beyond this distance the position counts as weak (CID 21 index 0)",
+      "label": "Weak distance, bin 0"
+    },
+    "rx_weak_mm_1": {
+      "type": "float",
+      "unit": "mm",
+      "min": 50.0,
+      "max": 20000.0,
+      "default": 600.0,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "description": "Beyond this distance the position counts as weak (CID 21 index 1)",
+      "label": "Weak distance, bin 1"
+    },
+    "rx_weak_mm_2": {
+      "type": "float",
+      "unit": "mm",
+      "min": 50.0,
+      "max": 20000.0,
+      "default": 600.0,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "description": "Beyond this distance the position counts as weak (CID 21 index 2)",
+      "label": "Weak distance, bin 2"
+    },
+    "rx_weak_mm_3": {
+      "type": "float",
+      "unit": "mm",
+      "min": 50.0,
+      "max": 20000.0,
+      "default": 600.0,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "description": "Beyond this distance the position counts as weak (CID 21 index 3)",
+      "label": "Weak distance, bin 3"
+    },
+    "rx_weak_mm_4": {
+      "type": "float",
+      "unit": "mm",
+      "min": 50.0,
+      "max": 20000.0,
+      "default": 600.0,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "description": "Beyond this distance the position counts as weak (CID 21 index 4)",
+      "label": "Weak distance, bin 4"
+    },
+    "rx_weak_mm_5": {
+      "type": "float",
+      "unit": "mm",
+      "min": 50.0,
+      "max": 20000.0,
+      "default": 600.0,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "description": "Beyond this distance the position counts as weak (CID 21 index 5)",
+      "label": "Weak distance, bin 5"
+    },
+    "rx_weak_mm_6": {
+      "type": "float",
+      "unit": "mm",
+      "min": 50.0,
+      "max": 20000.0,
+      "default": 600.0,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "description": "Beyond this distance the position counts as weak (CID 21 index 6)",
+      "label": "Weak distance, bin 6"
+    },
+    "rx_weak_mm_7": {
+      "type": "float",
+      "unit": "mm",
+      "min": 50.0,
+      "max": 20000.0,
+      "default": 600.0,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "description": "Beyond this distance the position counts as weak (CID 21 index 7)",
+      "label": "Weak distance, bin 7"
+    },
+    "rx_lost_mm_0": {
+      "type": "float",
+      "unit": "mm",
+      "min": 50.0,
+      "max": 20000.0,
+      "default": 1200.0,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "description": "Beyond this distance the wire counts as lost (CID 22 index 0)",
+      "label": "Lost distance, bin 0"
+    },
+    "rx_lost_mm_1": {
+      "type": "float",
+      "unit": "mm",
+      "min": 50.0,
+      "max": 20000.0,
+      "default": 1200.0,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "description": "Beyond this distance the wire counts as lost (CID 22 index 1)",
+      "label": "Lost distance, bin 1"
+    },
+    "rx_lost_mm_2": {
+      "type": "float",
+      "unit": "mm",
+      "min": 50.0,
+      "max": 20000.0,
+      "default": 1200.0,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "description": "Beyond this distance the wire counts as lost (CID 22 index 2)",
+      "label": "Lost distance, bin 2"
+    },
+    "rx_lost_mm_3": {
+      "type": "float",
+      "unit": "mm",
+      "min": 50.0,
+      "max": 20000.0,
+      "default": 1200.0,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "description": "Beyond this distance the wire counts as lost (CID 22 index 3)",
+      "label": "Lost distance, bin 3"
+    },
+    "rx_lost_mm_4": {
+      "type": "float",
+      "unit": "mm",
+      "min": 50.0,
+      "max": 20000.0,
+      "default": 1200.0,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "description": "Beyond this distance the wire counts as lost (CID 22 index 4)",
+      "label": "Lost distance, bin 4"
+    },
+    "rx_lost_mm_5": {
+      "type": "float",
+      "unit": "mm",
+      "min": 50.0,
+      "max": 20000.0,
+      "default": 1200.0,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "description": "Beyond this distance the wire counts as lost (CID 22 index 5)",
+      "label": "Lost distance, bin 5"
+    },
+    "rx_lost_mm_6": {
+      "type": "float",
+      "unit": "mm",
+      "min": 50.0,
+      "max": 20000.0,
+      "default": 1200.0,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "description": "Beyond this distance the wire counts as lost (CID 22 index 6)",
+      "label": "Lost distance, bin 6"
+    },
+    "rx_lost_mm_7": {
+      "type": "float",
+      "unit": "mm",
+      "min": 50.0,
+      "max": 20000.0,
+      "default": 1200.0,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "description": "Beyond this distance the wire counts as lost (CID 22 index 7)",
+      "label": "Lost distance, bin 7"
+    },
+    "rx_regain_mm_0": {
+      "type": "float",
+      "unit": "mm",
+      "min": 50.0,
+      "max": 20000.0,
+      "default": 1000.0,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "description": "Within this distance a lost wire counts as found again (after the regain wait) (CID 23 index 0)",
+      "label": "Regained distance, bin 0"
+    },
+    "rx_regain_mm_1": {
+      "type": "float",
+      "unit": "mm",
+      "min": 50.0,
+      "max": 20000.0,
+      "default": 1000.0,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "description": "Within this distance a lost wire counts as found again (after the regain wait) (CID 23 index 1)",
+      "label": "Regained distance, bin 1"
+    },
+    "rx_regain_mm_2": {
+      "type": "float",
+      "unit": "mm",
+      "min": 50.0,
+      "max": 20000.0,
+      "default": 1000.0,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "description": "Within this distance a lost wire counts as found again (after the regain wait) (CID 23 index 2)",
+      "label": "Regained distance, bin 2"
+    },
+    "rx_regain_mm_3": {
+      "type": "float",
+      "unit": "mm",
+      "min": 50.0,
+      "max": 20000.0,
+      "default": 1000.0,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "description": "Within this distance a lost wire counts as found again (after the regain wait) (CID 23 index 3)",
+      "label": "Regained distance, bin 3"
+    },
+    "rx_regain_mm_4": {
+      "type": "float",
+      "unit": "mm",
+      "min": 50.0,
+      "max": 20000.0,
+      "default": 1000.0,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "description": "Within this distance a lost wire counts as found again (after the regain wait) (CID 23 index 4)",
+      "label": "Regained distance, bin 4"
+    },
+    "rx_regain_mm_5": {
+      "type": "float",
+      "unit": "mm",
+      "min": 50.0,
+      "max": 20000.0,
+      "default": 1000.0,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "description": "Within this distance a lost wire counts as found again (after the regain wait) (CID 23 index 5)",
+      "label": "Regained distance, bin 5"
+    },
+    "rx_regain_mm_6": {
+      "type": "float",
+      "unit": "mm",
+      "min": 50.0,
+      "max": 20000.0,
+      "default": 1000.0,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "description": "Within this distance a lost wire counts as found again (after the regain wait) (CID 23 index 6)",
+      "label": "Regained distance, bin 6"
+    },
+    "rx_regain_mm_7": {
+      "type": "float",
+      "unit": "mm",
+      "min": 50.0,
+      "max": 20000.0,
+      "default": 1000.0,
+      "live": false,
+      "group": "Signal processing: advanced",
+      "description": "Within this distance a lost wire counts as found again (after the regain wait) (CID 23 index 7)",
+      "label": "Regained distance, bin 7"
     }
   }
 }

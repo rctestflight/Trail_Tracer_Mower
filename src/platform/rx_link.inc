@@ -827,6 +827,22 @@ void dspApply(){
   // 0.6.11: the decoded Tx channels for polarity detection (CID 50 index 0; Rx STM32 2.1.134+). The Rx STM32 does not
   // store it: it goes at each DSP set. An older app refuses the unknown command once; the link moves on.
   stmLink.pushInt(50 | 0x80000000, c.dt_channels);
+  // 0.6.21: the position thresholds per bin (CID 21 weak, 22 lost, 23 regained: magnitude = 1 / distance in mm) and
+  // the regain wait (CID 24), from the settings; the answers set the values the decoder uses (stmDec.cal). The
+  // sign spread limit (CID 54 index 14, deg x 10; Rx STM32 2.2.0+; an older app refuses it once).
+  const double* weak[8] = {&c.rx_weak_mm_0, &c.rx_weak_mm_1, &c.rx_weak_mm_2, &c.rx_weak_mm_3,
+                           &c.rx_weak_mm_4, &c.rx_weak_mm_5, &c.rx_weak_mm_6, &c.rx_weak_mm_7};
+  const double* lost[8] = {&c.rx_lost_mm_0, &c.rx_lost_mm_1, &c.rx_lost_mm_2, &c.rx_lost_mm_3,
+                           &c.rx_lost_mm_4, &c.rx_lost_mm_5, &c.rx_lost_mm_6, &c.rx_lost_mm_7};
+  const double* rgn[8] = {&c.rx_regain_mm_0, &c.rx_regain_mm_1, &c.rx_regain_mm_2, &c.rx_regain_mm_3,
+                          &c.rx_regain_mm_4, &c.rx_regain_mm_5, &c.rx_regain_mm_6, &c.rx_regain_mm_7};
+  for (int b = 0; b < 8; b++) {
+    stmLink.pushFloat(21 | 0x80000000, (float)(1.0 / *weak[b]), (uint8_t)b);
+    stmLink.pushFloat(22 | 0x80000000, (float)(1.0 / *lost[b]), (uint8_t)b);
+    stmLink.pushFloat(23 | 0x80000000, (float)(1.0 / *rgn[b]), (uint8_t)b);
+  }
+  stmLink.pushInt(24 | 0x80000000, c.rx_regain_wait_ms);
+  stmLink.pushInt(54 | 0x80000000, (int32_t)lround(c.dt_spread_limit_deg * 10.0), 14);
   static uint32_t dsp_sets = 0;
   usbOut.printf("STM DSP set %lu (%s)\n", (unsigned long)++dsp_sets, dsp_apply_reason);  // bench: the rate of full DSP sets
   if (stm_v2_autorun) { stmLink.pushInt(STM_RUN_CMD | 0x80000000, 1); stm_v2_run_ms = millis(); }  // app 2.0.6: boots idle
@@ -1037,6 +1053,19 @@ void rxLinkBegin(){
   stmLink.setSeq((uint8_t)esp_random());  // v2: an ESP32 restart cannot repeat the last seq
 }
 
+// 0.6.21: the position thresholds of two configurations differ.
+static bool rxThresholdsDiffer(const DeviceConfig& a, const DeviceConfig& b){
+  const double DeviceConfig::* f[24] = {
+    &DeviceConfig::rx_weak_mm_0, &DeviceConfig::rx_weak_mm_1, &DeviceConfig::rx_weak_mm_2, &DeviceConfig::rx_weak_mm_3,
+    &DeviceConfig::rx_weak_mm_4, &DeviceConfig::rx_weak_mm_5, &DeviceConfig::rx_weak_mm_6, &DeviceConfig::rx_weak_mm_7,
+    &DeviceConfig::rx_lost_mm_0, &DeviceConfig::rx_lost_mm_1, &DeviceConfig::rx_lost_mm_2, &DeviceConfig::rx_lost_mm_3,
+    &DeviceConfig::rx_lost_mm_4, &DeviceConfig::rx_lost_mm_5, &DeviceConfig::rx_lost_mm_6, &DeviceConfig::rx_lost_mm_7,
+    &DeviceConfig::rx_regain_mm_0, &DeviceConfig::rx_regain_mm_1, &DeviceConfig::rx_regain_mm_2, &DeviceConfig::rx_regain_mm_3,
+    &DeviceConfig::rx_regain_mm_4, &DeviceConfig::rx_regain_mm_5, &DeviceConfig::rx_regain_mm_6, &DeviceConfig::rx_regain_mm_7};
+  for (auto m : f) if (a.*m != b.*m) return true;
+  return false;
+}
+
 // applyDeviceConfig(): DSP settings: a change goes to the STM32 at once (a set, or a config.json edit on the USB drive)
 void dspSettingsCheck(const DeviceConfig& cfg){
   static bool dsp_known = false;
@@ -1045,7 +1074,9 @@ void dspSettingsCheck(const DeviceConfig& cfg){
       || dsp_last.dsp_sensors != cfg.dsp_sensors || memcmp(dsp_last.dsp_bin_hz, cfg.dsp_bin_hz, sizeof(cfg.dsp_bin_hz))
       || dsp_last.dsp_xy_mask != cfg.dsp_xy_mask || dsp_last.dsp_slow_adc != cfg.dsp_slow_adc
       || dsp_last.dsp_pga != cfg.dsp_pga || dsp_last.dsp_lanes != cfg.dsp_lanes
-      || dsp_last.dsp_sweep_bins != cfg.dsp_sweep_bins || dsp_last.dt_channels != cfg.dt_channels;
+      || dsp_last.dsp_sweep_bins != cfg.dsp_sweep_bins || dsp_last.dt_channels != cfg.dt_channels
+      || dsp_last.rx_regain_wait_ms != cfg.rx_regain_wait_ms || dsp_last.dt_spread_limit_deg != cfg.dt_spread_limit_deg
+      || rxThresholdsDiffer(dsp_last, cfg);
   if (dsp_known && dsp_changed) { dsp_apply_reason = "setting change"; dspApply(); }  // the first call (boot) leaves it to stmV2Config
   dsp_last = cfg;
   dsp_known = true;

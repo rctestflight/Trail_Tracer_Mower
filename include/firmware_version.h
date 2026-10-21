@@ -3,6 +3,15 @@
 #pragma once
 
 // Change history
+//   0.6.21: polarity per sensor and Tx channel from Rx STM32 2.2.x (ext id 12, every frame): table values
+//     dt_polarity_s1_ch1..dt_polarity_s2_ch5, wire_inside and wire_heading (inside or outside, clockwise or
+//     counterclockwise); follow_dir from the polarity when the channel's current direction is set. Settings tx_dir_ch1..5
+//     (current direction of each Tx channel), steer_frame (vehicle or world: world signs x by the heading round the
+//     loop, so a vehicle on the wire the wrong way turns round), dt_spread_limit_deg (CID 54 index 14),
+//     rx_regain_wait_ms (CID 24), rx_weak_mm_0..7, rx_lost_mm_0..7, rx_regain_mm_0..7 (CID 21 to 23, sent at each DSP
+//     set). Extension items are no longer read as stale at random (their time stamp could run one tick ahead of the
+//     clock: field sign, spread and follow_dir values dropped out). Bench commands "stm pol" and "stm ext <id>". The
+//     Upload button stops when another program holds the port. The ODrive arming switch clears faults.
 //   0.6.19: the update page works again in update mode: the web server stops only for a download the board fetches
 //     ("ota url"), not during a page upload (it waited for the upload handler: an RTC watchdog reset or "no answer
 //     from the main loop")
@@ -202,12 +211,12 @@
 #if defined(OTA_TEST_VERSION)
 #define ROVER_FW_VERSION OTA_TEST_VERSION  // OTA test images (envs ota_a, ota_b, ota_test_crash)
 #elif defined(BENCH_FAKE_IMU)
-#define ROVER_FW_VERSION "0.6.19+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.6.21+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #elif defined(SETTINGS_NEWKEY)
-#define ROVER_FW_VERSION "0.6.19-newkey"  // bench build: one more table line (test_new_setting)
+#define ROVER_FW_VERSION "0.6.21-newkey"  // bench build: one more table line (test_new_setting)
 #elif defined(TELEMETRY_NEWVALUE)
-#define ROVER_FW_VERSION "0.6.19-newvalue"  // bench build: the example lines of include/user_telemetry.h
+#define ROVER_FW_VERSION "0.6.21-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.6.19"
+#define ROVER_FW_VERSION "0.6.21"
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A

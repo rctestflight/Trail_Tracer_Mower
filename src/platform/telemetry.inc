@@ -62,6 +62,9 @@ void dtTelemetry() {
   static const tlm_id SPREAD[2][5] = {
     {TLM_dt_spread_s1_ch1, TLM_dt_spread_s1_ch2, TLM_dt_spread_s1_ch3, TLM_dt_spread_s1_ch4, TLM_dt_spread_s1_ch5},
     {TLM_dt_spread_s2_ch1, TLM_dt_spread_s2_ch2, TLM_dt_spread_s2_ch3, TLM_dt_spread_s2_ch4, TLM_dt_spread_s2_ch5}};
+  static const tlm_id POL[2][5] = {
+    {TLM_dt_polarity_s1_ch1, TLM_dt_polarity_s1_ch2, TLM_dt_polarity_s1_ch3, TLM_dt_polarity_s1_ch4, TLM_dt_polarity_s1_ch5},
+    {TLM_dt_polarity_s2_ch1, TLM_dt_polarity_s2_ch2, TLM_dt_polarity_s2_ch3, TLM_dt_polarity_s2_ch4, TLM_dt_polarity_s2_ch5}};
   const uint16_t now10 = (uint16_t)(millis() / 10u);
   for (unsigned s = 0; s < 2; s++)
     for (unsigned c = 0; c < 5; c++) {
@@ -70,7 +73,12 @@ void dtTelemetry() {
       const bool sign_ok = ts && (uint16_t)(now10 - ts) <= 100u, spread_ok = tp && (uint16_t)(now10 - tp) <= 100u;
       tlm_set(SIGN[s][c], sign_ok ? (float)stmDec.ext_val[8][sl] : NAN);
       tlm_set(SPREAD[s][c], spread_ok ? stmDec.ext_val[9][sl] * 0.1f : NAN);
+      // 0.6.21: polarity, ext id 12 (Rx STM32 2.2.0+): no value when no id 12 item came in the last 1 s.
+      const uint16_t tp12 = stmDec.pol_t10;
+      tlm_set(POL[s][c], (tp12 && (uint16_t)(now10 - tp12) <= 100u) ? (float)stmDec.pol[s][c] : NAN);
     }
+  tlm_set(TLM_wire_inside, (float)world_inside);
+  tlm_set(TLM_wire_heading, (float)world_heading);
   tlm_set(TLM_dt_decoded, (dt_decoded >= 0 && millis() - dt_decoded_ms < 5000) ? (float)(dt_decoded & 0xFF) : NAN);
 
   // 0.6.13: the direction round the perimeter in follow mode (drive mode 2), seen from above: +1 clockwise, -1
@@ -95,7 +103,11 @@ void dtTelemetry() {
       const uint16_t ts = stmDec.ext_t10[8][sl];
       if (ts && (uint16_t)(now10 - ts) <= 100u) sign = stmDec.ext_val[8][sl];
     }
-    if (side_a != 1 && side_a != 2) {
+    const uint8_t dirs[5] = {g_deviceConfig.tx_dir_ch1, g_deviceConfig.tx_dir_ch2, g_deviceConfig.tx_dir_ch3,
+                             g_deviceConfig.tx_dir_ch4, g_deviceConfig.tx_dir_ch5};
+    if (c >= 0 && c < 5 && dirs[c] != 0) {
+      follow_dir_held = world_heading;  // 0.6.21: from the polarity and the current direction setting (worldFacts)
+    } else if (side_a != 1 && side_a != 2) {
       follow_dir_held = 0;
     } else if (sign != 0) {
       const bool a_left = (sign > 0) == (DT_SIGN_PLUS_IS_LEFT != 0);

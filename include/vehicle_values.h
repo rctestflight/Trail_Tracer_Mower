@@ -26,6 +26,8 @@ extern int8_t charge_status;
 extern bool lapFlag;
 extern int vehicleStatus;
 extern int8_t drive_mode_status;
+extern int8_t world_inside;
+extern int8_t world_heading;
 extern bool case2_use_cruise;
 extern bool case2_aux_entry_is_manual;
 extern bool case2_aux_changed;

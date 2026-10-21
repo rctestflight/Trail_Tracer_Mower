@@ -162,7 +162,13 @@ typedef union {
 #define STM_FRAME_MAX               144u
 #define WFRX_EXT_OFFSET             126u
 #define WFRX_EXT_ITEMS              4u
-#define WFRX_EXT_IDS                10u   /* item ids 1..10 (1-2 bin SNR and trend; 3-8 FSK, retired in Rx STM32 2.1.134; 9 dual tone sign, 10 its spread) */
+#define WFRX_EXT_IDS                12u   /* item ids 1..12 (1-2 bin SNR and trend; 3-8 FSK, retired in Rx STM32 2.1.134; 9 field sign,
+                                                 10 sign spread deg x 10; 11 retired (test build 2.1.223 only); 12 polarity, Rx STM32 2.2.0) */
+/* Rx STM32 2.2.0: ext id 12 POLARITY, in every frame. The index byte and the int16 value form 24 bits (index = bits
+ * 0-7, value = bits 8-23): 10 codes of 2 bits, code k = sensor x 5 + Tx channel (0-4) at bits 2k..2k+1; 0 unknown,
+ * 1 = +1, 3 = -1. Polarity: +1 if the dual tone field points along the tracked field (the field that gives x, y),
+ * -1 if opposite. */
+#define WFRX_EXT_POLARITY           12u
 
 typedef enum {
     RSP_NONE         = 0,
