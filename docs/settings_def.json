@@ -25,7 +25,7 @@
     {
       "name": "Rover mode",
       "advanced": false,
-      "description": "The autopilot: bounce inside the wire loop, go home to charge"
+      "description": "What autonomous mode runs (rover, follow only, or the expert position follower) and the rover settings"
     },
     {
       "name": "Beacons",
@@ -231,7 +231,7 @@
     "steering_rate_kp": {
       "type": "float",
       "min": 0,
-      "default": 0.02,
+      "default": 0.005,
       "live": true,
       "group": "Gyro PID",
       "description": "Proportional part of the yaw-rate steering PID (gyro feedback; output -1..1)",
@@ -241,7 +241,7 @@
     "steering_rate_ki": {
       "type": "float",
       "min": 0,
-      "default": 0.01,
+      "default": 0.0,
       "live": true,
       "group": "Gyro PID",
       "description": "Integral part of the yaw-rate steering PID",
@@ -251,7 +251,7 @@
     "steering_rate_kd": {
       "type": "float",
       "min": 0,
-      "default": 0.0,
+      "default": 0.0001,
       "live": true,
       "group": "Gyro PID",
       "description": "Derivative part of the yaw-rate steering PID",
@@ -319,7 +319,7 @@
       "type": "float",
       "unit": "mm",
       "min": 1.0,
-      "default": 1.0,
+      "default": 15.0,
       "live": true,
       "group": "Stuck detection",
       "description": "Smallest movement that counts as not stuck",
@@ -329,7 +329,7 @@
       "type": "float",
       "unit": "ms",
       "min": 1000,
-      "default": 20000,
+      "default": 18000,
       "live": true,
       "group": "Stuck detection",
       "description": "Time below that movement before the vehicle is stuck",
@@ -390,13 +390,18 @@
       "max": 3600,
       "label": "Charge time limit"
     },
-    "rover_enabled": {
-      "type": "bool",
-      "default": false,
+    "rover_mode": {
+      "type": "choice",
+      "values": [
+        "rover",
+        "follow only",
+        "position follower (expert)"
+      ],
+      "default": "rover",
       "live": false,
       "group": "Rover mode",
-      "description": "In autonomous drive mode, the autopilot drives, not the wire follower",
-      "label": "Rover mode on"
+      "description": "What drive mode 2 (autonomous) runs. rover: the full mission (roam, bounce, return, join, follow, dock, depart). follow only: find the wire, join it, follow it. In both the rover drives straight off the wire and steers on position only after the join. position follower (expert): the plain position-steering wire follower, which circles when it starts off the wire. Cruise mode (RC throttle) always uses the wire follower",
+      "label": "Autonomous mode"
     },
     "rover_goal_cw": {
       "type": "bool",
@@ -410,34 +415,12 @@
       "type": "float",
       "unit": "mm",
       "min": 30,
-      "default": 150,
+      "default": 180.0,
       "live": false,
       "group": "Rover mode",
       "description": "Distance of the sensor centre above the wire",
       "max": 500,
       "label": "Sensor height"
-    },
-    "rover_full_speed_mps": {
-      "type": "float",
-      "unit": "m/s",
-      "min": 0.1,
-      "default": 1.0,
-      "live": false,
-      "group": "Rover mode",
-      "description": "Ground speed at full drive command (measure it)",
-      "max": 5,
-      "label": "Speed at full drive"
-    },
-    "rover_full_yaw_rate_dps": {
-      "type": "float",
-      "unit": "°/s",
-      "min": 10,
-      "default": 115,
-      "live": false,
-      "group": "Rover mode",
-      "description": "Not used from firmware 0.5.61: the autopilot takes steering_rate_max_dps, the full scale of the gyro rate loop. Kept so that older config files load",
-      "max": 720,
-      "label": "Turn rate at full steer (rover)"
     },
     "rover_seek_vbatt": {
       "type": "float",
@@ -446,19 +429,9 @@
       "default": 0,
       "live": true,
       "group": "Rover mode",
-      "description": "Go to the charger below this battery voltage (0 = off, else 6 to 26)",
+      "description": "Return to the wire below this battery voltage (filtered; 0 = off, else 6 to 26)",
       "max": 26,
-      "label": "Go home below this voltage"
-    },
-    "rover_seek_after_s": {
-      "type": "int",
-      "unit": "s",
-      "min": 0,
-      "default": 600,
-      "live": true,
-      "group": "Rover mode",
-      "description": "Go to the charger this long after the last charge (0 = off)",
-      "label": "Go home after this time"
+      "label": "Return below this voltage"
     },
     "rover_entry_btx": {
       "type": "int",
@@ -489,17 +462,6 @@
       "group": "Rover mode",
       "description": "The autopilot halts after this long without the wire (0 = never)",
       "label": "Stop after wire lost for"
-    },
-    "rover_speed_limit_mps": {
-      "type": "float",
-      "unit": "m/s",
-      "min": 0,
-      "default": 0.5,
-      "live": true,
-      "group": "Rover mode",
-      "description": "Highest autopilot speed (0 = the simulator speeds)",
-      "max": 5,
-      "label": "Rover speed limit"
     },
     "espnow_enabled": {
       "type": "bool",
@@ -1144,7 +1106,7 @@
       "unit": "ms",
       "min": 0,
       "max": 10000,
-      "default": 500,
+      "default": 0,
       "live": false,
       "group": "Signal processing: advanced",
       "description": "The regained distance must hold this long before the wire counts as found again (CID 24)",
@@ -1413,6 +1375,278 @@
       "group": "Signal processing: advanced",
       "description": "Within this distance a lost wire counts as found again (after the regain wait) (CID 23 index 7)",
       "label": "Regained distance, bin 7"
+    },
+    "rover_join_no_pol": {
+      "type": "choice",
+      "values": [
+        "inside",
+        "stop"
+      ],
+      "default": "inside",
+      "live": false,
+      "group": "Polarity detection",
+      "description": "With no polarity at a join: inside = assume the rover is inside the loop; stop = stop",
+      "label": "Join without polarity"
+    },
+    "rover_roam_speed_mps": {
+      "type": "float",
+      "unit": "m/s",
+      "min": 0.05,
+      "max": 5.0,
+      "default": 0.5,
+      "live": false,
+      "group": "Rover mode",
+      "description": "The one top speed: the vehicle speed at full drive command; roam drives at it",
+      "label": "Roam speed"
+    },
+    "rover_bounce_m": {
+      "type": "float",
+      "unit": "m",
+      "min": 0.2,
+      "max": 2.0,
+      "default": 0.5,
+      "live": false,
+      "group": "Rover mode",
+      "description": "Distance to the wire at which the rover takes its reading, stops and pivots away",
+      "label": "Bounce distance"
+    },
+    "rover_bounce_spread_deg": {
+      "type": "float",
+      "unit": "deg",
+      "min": 0.0,
+      "max": 90.0,
+      "default": 45.0,
+      "live": false,
+      "group": "Rover mode",
+      "description": "Random +- spread on the mirror bounce leave angle",
+      "label": "Bounce spread"
+    },
+    "rover_bounce_min_deg": {
+      "type": "float",
+      "unit": "deg",
+      "min": 0.0,
+      "max": 80.0,
+      "default": 35.0,
+      "live": false,
+      "group": "Rover mode",
+      "description": "Least angle between the new heading and the wire",
+      "label": "Bounce minimum leave angle"
+    },
+    "rover_rearm_m": {
+      "type": "float",
+      "unit": "m",
+      "min": 0.2,
+      "max": 5.0,
+      "default": 1.0,
+      "live": false,
+      "group": "Rover mode",
+      "description": "After a bounce, the next bounce is armed at this distance from the wire",
+      "label": "Re-arm distance"
+    },
+    "rover_rearm_drop_m": {
+      "type": "float",
+      "unit": "m",
+      "min": 0.05,
+      "max": 2.0,
+      "default": 0.3,
+      "live": false,
+      "group": "Rover mode",
+      "description": "... or when the distance falls this much below its highest value since the bounce",
+      "label": "Re-arm drop"
+    },
+    "rover_beacon_bounce": {
+      "type": "bool",
+      "default": true,
+      "live": false,
+      "group": "Beacons",
+      "description": "Roam and return: turn round at a beacon",
+      "label": "Beacon bounce"
+    },
+    "rover_beacon_m": {
+      "type": "float",
+      "unit": "m",
+      "min": 0.02,
+      "max": 1.0,
+      "default": 0.15,
+      "live": false,
+      "group": "Beacons",
+      "description": "Beacon distance at which the rover stops and turns round",
+      "label": "Beacon bounce distance"
+    },
+    "rover_beacon_rearm_m": {
+      "type": "float",
+      "unit": "m",
+      "min": 0.05,
+      "max": 2.0,
+      "default": 0.25,
+      "live": false,
+      "group": "Beacons",
+      "description": "After a beacon turn, the beacon counts again past this distance",
+      "label": "Beacon re-arm distance"
+    },
+    "rover_beacon_spread_deg": {
+      "type": "float",
+      "unit": "deg",
+      "min": 0.0,
+      "max": 90.0,
+      "default": 30.0,
+      "live": false,
+      "group": "Beacons",
+      "description": "Random +- spread on the 180 deg beacon turn",
+      "label": "Beacon spread"
+    },
+    "rover_approach_m": {
+      "type": "float",
+      "unit": "m",
+      "min": 0.3,
+      "max": 3.0,
+      "default": 1.1,
+      "live": false,
+      "group": "Rover mode",
+      "description": "Inside this distance to the wire: approach speed; when returning, the join starts here",
+      "label": "Approach distance"
+    },
+    "rover_approach_pct": {
+      "type": "float",
+      "unit": "%",
+      "min": 10.0,
+      "max": 100.0,
+      "default": 60.0,
+      "live": false,
+      "group": "Rover mode",
+      "description": "Approach and join speed, percent of the roam speed",
+      "label": "Approach speed"
+    },
+    "rover_join_pivot_m": {
+      "type": "float",
+      "unit": "m",
+      "min": 0.2,
+      "max": 2.0,
+      "default": 0.6,
+      "live": false,
+      "group": "Rover mode",
+      "description": "Distance to the wire at which the join takes its reading, stops and pivots onto the wire",
+      "label": "Join pivot distance"
+    },
+    "rover_join_angle_deg": {
+      "type": "float",
+      "unit": "deg",
+      "min": 5.0,
+      "max": 80.0,
+      "default": 30.0,
+      "live": false,
+      "group": "Rover mode",
+      "description": "Angle between the join heading and the wire, in the goal direction",
+      "label": "Approach angle"
+    },
+    "rover_return_m": {
+      "type": "float",
+      "unit": "m",
+      "min": 0.0,
+      "max": 100000.0,
+      "default": 300.0,
+      "live": false,
+      "group": "Rover mode",
+      "description": "Return to the wire after this distance driven since the last charge. 0 = off",
+      "label": "Return distance"
+    },
+    "rover_wrong_dir_check": {
+      "type": "bool",
+      "default": true,
+      "live": false,
+      "group": "Rover mode",
+      "description": "Follow: polarity direction against the goal direction, or the exit beacon before the entry beacon: turn round",
+      "label": "Wrong-direction check"
+    },
+    "rover_depart_min_m": {
+      "type": "float",
+      "unit": "m",
+      "min": 0.0,
+      "max": 20.0,
+      "default": 0.5,
+      "live": false,
+      "group": "Rover mode",
+      "description": "After a charge: follow a random distance from minimum to maximum (equal: fixed)",
+      "label": "Depart distance minimum"
+    },
+    "rover_depart_max_m": {
+      "type": "float",
+      "unit": "m",
+      "min": 0.0,
+      "max": 20.0,
+      "default": 3.0,
+      "live": false,
+      "group": "Rover mode",
+      "description": "After a charge: follow a random distance from minimum to maximum (equal: fixed)",
+      "label": "Depart distance maximum"
+    },
+    "rover_turn_min_deg": {
+      "type": "float",
+      "unit": "deg",
+      "min": 0.0,
+      "max": 180.0,
+      "default": 60.0,
+      "live": false,
+      "group": "Rover mode",
+      "description": "After the depart distance: pivot inward by a random angle from minimum to maximum",
+      "label": "Inward turn minimum"
+    },
+    "rover_turn_max_deg": {
+      "type": "float",
+      "unit": "deg",
+      "min": 0.0,
+      "max": 180.0,
+      "default": 140.0,
+      "live": false,
+      "group": "Rover mode",
+      "description": "After the depart distance: pivot inward by a random angle from minimum to maximum",
+      "label": "Inward turn maximum"
+    },
+    "rover_probe_m": {
+      "type": "float",
+      "unit": "m",
+      "min": 0.0,
+      "max": 2.0,
+      "default": 0.5,
+      "live": false,
+      "group": "Rover mode",
+      "description": "Start in range: a straight drive of this length, forward when the wire is further away, else reverse; the approach fit then gives the heading (0 = no probe)",
+      "label": "Probe length"
+    },
+    "rover_imu_roll": {
+      "type": "choice",
+      "values": [
+        "off",
+        "on",
+        "inverted"
+      ],
+      "default": "off",
+      "live": true,
+      "group": "Rover mode",
+      "description": "Turn the Rx x and y back by the accelerometer roll before the heading fit, so a side slope does not bend the lateral wire offset. inverted: the IMU sits the other way round (check on a side slope over the wire)",
+      "label": "IMU roll correction"
+    },
+    "rover_no_tx_roam_s": {
+      "type": "float",
+      "unit": "s",
+      "min": 1.0,
+      "max": 600.0,
+      "default": 60.0,
+      "live": false,
+      "group": "Rover mode",
+      "description": "Roam and return: no Tx signal (the wire signal under 10 dB on both sensors) this long: stop and wait until it returns. Far from the wire in a large loop the signal can drop out",
+      "label": "Roam: stop after no Tx signal for"
+    },
+    "rover_no_tx_s": {
+      "type": "float",
+      "unit": "s",
+      "min": 0.5,
+      "max": 600.0,
+      "default": 2.0,
+      "live": false,
+      "group": "Rover mode",
+      "description": "Join, follow, depart and dock: no Tx signal (the wire signal under 10 dB on both sensors) this long: stop and wait until it returns",
+      "label": "Stop after no Tx signal for"
     }
   }
 }

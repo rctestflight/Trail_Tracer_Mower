@@ -57,17 +57,12 @@ static void old_populate_defaults(DeviceConfig& c,
     c.telemetry_enabled     = true;
     c.telemetry_rate_hz     = 20;
     c.telemetry_bins_hz     = 5;
-    c.rover_enabled            = false;
     c.rover_goal_cw            = true;
     c.rover_sensor_height_mm   = 150.0;
-    c.rover_full_speed_mps     = 1.0;
-    c.rover_full_yaw_rate_dps  = 115.0;
     c.rover_seek_vbatt         = 0.0;
-    c.rover_seek_after_s       = 600;
     c.rover_entry_btx          = 1;
     c.rover_exit_btx           = 2;
     c.rover_lost_timeout_s     = 30;
-    c.rover_speed_limit_mps    = 0.5;
     c.espnow_tx_power_dbm      = 19.5;
     c.cmd_key                  = 0;
     c.imu_required             = true;
@@ -168,14 +163,10 @@ static void old_validate_config(DeviceConfig& c)
 
     // Rover autopilot
     c.rover_sensor_height_mm  = constrain(c.rover_sensor_height_mm, 30.0, 500.0);
-    c.rover_full_speed_mps    = constrain(c.rover_full_speed_mps, 0.1, 5.0);
-    c.rover_full_yaw_rate_dps = constrain(c.rover_full_yaw_rate_dps, 10.0, 720.0);
     if (c.rover_seek_vbatt != 0.0) c.rover_seek_vbatt = constrain(c.rover_seek_vbatt, 6.0, 26.0);
-    if (c.rover_seek_after_s < 0)   c.rover_seek_after_s = 0;
     if (c.rover_entry_btx > 2)      c.rover_entry_btx = 0;
     if (c.rover_exit_btx > 2)       c.rover_exit_btx = 0;
     if (c.rover_lost_timeout_s < 0) c.rover_lost_timeout_s = 0;
-    c.rover_speed_limit_mps   = constrain(c.rover_speed_limit_mps, 0.0, 5.0);
     c.espnow_tx_power_dbm     = round(constrain(c.espnow_tx_power_dbm, 2.0, 19.5) * 4.0) / 4.0;
 
     // DSP: the widest ranges of the STM32 v2 apps; the STM32 clamps to its own and answers the value in effect
@@ -243,17 +234,12 @@ static void old_prefs_save(P& p, const DeviceConfig& c)
     p.putBool("telEn",     c.telemetry_enabled);
     p.putInt("telHz",      c.telemetry_rate_hz);
     p.putInt("binHz",      c.telemetry_bins_hz);
-    p.putBool("rvEn",      c.rover_enabled);
     p.putBool("rvCW",      c.rover_goal_cw);
     p.putDouble("rvH",     c.rover_sensor_height_mm);
-    p.putDouble("rvVmax",  c.rover_full_speed_mps);
-    p.putDouble("rvWmax",  c.rover_full_yaw_rate_dps);
     p.putDouble("rvSeekV", c.rover_seek_vbatt);
-    p.putInt("rvSeekS",    c.rover_seek_after_s);
     p.putUChar("rvEntBtx", c.rover_entry_btx);
     p.putUChar("rvExtBtx", c.rover_exit_btx);
     p.putInt("rvLostS",    c.rover_lost_timeout_s);
-    p.putDouble("rvVlim",  c.rover_speed_limit_mps);
     p.putDouble("txDbm",   c.espnow_tx_power_dbm);
     p.putLong("cmdKey",    c.cmd_key);
     p.putBool("imuReq",    c.imu_required);
@@ -326,17 +312,12 @@ static bool old_prefs_load(P& p, DeviceConfig& c)
     c.telemetry_enabled     = p.getBool("telEn",     c.telemetry_enabled);
     c.telemetry_rate_hz     = p.getInt("telHz",      c.telemetry_rate_hz);
     c.telemetry_bins_hz     = p.getInt("binHz",      c.telemetry_bins_hz);
-    c.rover_enabled            = p.getBool("rvEn",      c.rover_enabled);
     c.rover_goal_cw            = p.getBool("rvCW",      c.rover_goal_cw);
     c.rover_sensor_height_mm   = p.getDouble("rvH",     c.rover_sensor_height_mm);
-    c.rover_full_speed_mps     = p.getDouble("rvVmax",  c.rover_full_speed_mps);
-    c.rover_full_yaw_rate_dps  = p.getDouble("rvWmax",  c.rover_full_yaw_rate_dps);
     c.rover_seek_vbatt         = p.getDouble("rvSeekV", c.rover_seek_vbatt);
-    c.rover_seek_after_s       = p.getInt("rvSeekS",    c.rover_seek_after_s);
     c.rover_entry_btx          = p.getUChar("rvEntBtx", c.rover_entry_btx);
     c.rover_exit_btx           = p.getUChar("rvExtBtx", c.rover_exit_btx);
     c.rover_lost_timeout_s     = p.getInt("rvLostS",    c.rover_lost_timeout_s);
-    c.rover_speed_limit_mps    = p.getDouble("rvVlim",  c.rover_speed_limit_mps);
     c.espnow_tx_power_dbm      = p.getDouble("txDbm",   c.espnow_tx_power_dbm);
     c.cmd_key                  = p.getLong("cmdKey",    c.cmd_key);
     c.imu_required             = p.getBool("imuReq",    c.imu_required);
@@ -396,17 +377,12 @@ static void old_config_to_doc(const DeviceConfig& c, JsonDocument& doc, bool wit
     doc["telemetry_enabled"]     = c.telemetry_enabled;
     doc["telemetry_rate_hz"]     = c.telemetry_rate_hz;
     doc["telemetry_bins_hz"]     = c.telemetry_bins_hz;
-    doc["rover_enabled"]            = c.rover_enabled;
     doc["rover_goal_cw"]            = c.rover_goal_cw;
     doc["rover_sensor_height_mm"]   = c.rover_sensor_height_mm;
-    doc["rover_full_speed_mps"]     = c.rover_full_speed_mps;
-    doc["rover_full_yaw_rate_dps"]  = c.rover_full_yaw_rate_dps;
     doc["rover_seek_vbatt"]         = c.rover_seek_vbatt;
-    doc["rover_seek_after_s"]       = c.rover_seek_after_s;
     doc["rover_entry_btx"]          = c.rover_entry_btx;
     doc["rover_exit_btx"]           = c.rover_exit_btx;
     doc["rover_lost_timeout_s"]     = c.rover_lost_timeout_s;
-    doc["rover_speed_limit_mps"]    = c.rover_speed_limit_mps;
     doc["espnow_tx_power_dbm"]      = c.espnow_tx_power_dbm;
     doc["cmd_key"]                  = c.cmd_key;
     doc["imu_required"]             = c.imu_required;
@@ -521,17 +497,12 @@ static bool old_config_from_json_text(DeviceConfig& c, const String& json_no_com
     JSON_GET_BOOL("telemetry_enabled",      telemetry_enabled);
     JSON_GET_INT("telemetry_rate_hz",       telemetry_rate_hz);
     JSON_GET_INT("telemetry_bins_hz",       telemetry_bins_hz);
-    JSON_GET_BOOL("rover_enabled",           rover_enabled);
     JSON_GET_BOOL("rover_goal_cw",           rover_goal_cw);
     JSON_GET_DBL("rover_sensor_height_mm",   rover_sensor_height_mm);
-    JSON_GET_DBL("rover_full_speed_mps",     rover_full_speed_mps);
-    JSON_GET_DBL("rover_full_yaw_rate_dps",  rover_full_yaw_rate_dps);
     JSON_GET_DBL("rover_seek_vbatt",         rover_seek_vbatt);
-    JSON_GET_INT("rover_seek_after_s",       rover_seek_after_s);
     JSON_GET_UINT8("rover_entry_btx",        rover_entry_btx);
     JSON_GET_UINT8("rover_exit_btx",         rover_exit_btx);
     JSON_GET_INT("rover_lost_timeout_s",     rover_lost_timeout_s);
-    JSON_GET_DBL("rover_speed_limit_mps",    rover_speed_limit_mps);
     JSON_GET_DBL("espnow_tx_power_dbm",      espnow_tx_power_dbm);
     if (doc["cmd_key"].is<long>()) c.cmd_key = doc["cmd_key"].as<long>();
     JSON_GET_BOOL("imu_required",           imu_required);

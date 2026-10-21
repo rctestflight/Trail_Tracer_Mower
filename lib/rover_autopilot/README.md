@@ -1,94 +1,36 @@
 # rover_autopilot
 
-Draft autopilot for the mower: it bounces inside the perimeter wire, goes home on low battery, follows the wire to the dock in one direction, charges, and departs. It has not run on hardware. Everything below was verified in closed loop against rover-sim (Documentation repo, `rover-sim/src/core`, commit b6b1ae4) with the harness in `test/sim_harness`.
+The rover state machine of the agreed design (2026-10-20), with the wire heading from the approach fit (2026-10-21). It roams inside the perimeter wire and bounces off it, returns to the wire, joins it in the goal direction, follows it to the dock with the vehicle's own wire follower, charges and departs. It has not run on a real rover. It ran in closed loop in the PC emulator of what the ESP32 receives: the PC build of `src/main.cpp` and this library, unchanged, in a simple world (Biot-Savart wire field, coil strengths, the Rx position solve with its quadrant rule, polarity, beacon, skid-steer motion).
 
-## Behaviour
+## States
 
 | State | What the rover does |
 |---|---|
-| ROAM | Drives straight. At 0.5 m from the wire it stops and pivots away (mirror bounce plus a random spread). |
-| SEEK | Battery low: like ROAM, but within 1.1 m of the wire it changes to ACQUIRE. |
-| ACQUIRE | Approaches to 0.6 m, stops, pivots onto the wire at 30 deg in the dock direction, drives straight until the wire is under the sensor. |
-| FOLLOW | PD on the wire's crossing point X (P) and its rate dX/dt (D). After 0.5 m locked on the wire it goes fast and stays fast until the wire is lost. Holds still while docked. |
-| DEPART | After charging: follows 1 m, pivots 60 to 140 deg inward, ROAM. |
-| HALTED | Wire lost for `rover_lost_timeout_s`: outputs off until mode 2 is entered again. |
+| ROAM | Drives at roam speed; inside the approach distance, at approach speed. At the bounce distance: the fitted heading (probe first when its uncertainty is over the least leave angle), stop, re-acquisition check, pivot (mirror bounce away from the wire, plus a random spread, at least the least leave angle from the wire, the shorter way round). The next bounce arms at the re-arm distance, when the distance falls by the re-arm drop below its highest value since the bounce, or when the fit shows the rover closing on the wire over at least the probe length. A beacon at the beacon bounce distance: stop, pivot 180 deg +- the beacon spread. Polarity says outside: stop, turn round once, no bounce until inside again. A lost signal is normal: drive on. |
+| RETURN | Return distance driven since the last charge, or the battery under the return voltage: as ROAM; on entry into the approach distance, JOIN. |
+| JOIN | Drive straight to the wire (a lost signal drives on). On the wire (close by the radius, lost right after a close reading, or polarity says outside): stop, turn by the signed fitted heading to point along the wire in the goal direction, FOLLOW. The join also sets the follower's x sign: the wire side on the way in against the Rx x sign, and the sign of y on the wire. Polarity gives inside or outside; without it the join assumes inside or stops (`rover_join_no_pol`). |
+| FOLLOW | The wire follower drives on x with the follower sign (set at the join, refined in steady follow in the goal direction). Wrong direction (polarity direction against the goal, or the exit beacon before the entry beacon): stop, turn 180 deg on the wire, follow on. Lost: stop; after `rover_no_tx_s` one 30 deg turn in place out of the field null. Dock contacts: DOCK. |
+| DOCK | Holds still while it charges. Charge end: DEPART (follow-only: FOLLOW). A dock reached from ROAM or RETURN goes back to that state. |
+| DEPART | Follows a random distance from depart minimum to maximum after the dock contacts open, stops, pivots inward by a random angle, ROAM with the bounce disarmed. |
+| FAULT | Stopped until mode 2 is entered again: the stuck detector (only while the signal is not lost), lost longer than `rover_lost_timeout_s` in JOIN, FOLLOW or DEPART, or no polarity at a join with `rover_join_no_pol` stop. |
 
-The direction along the wire comes from two facts: the rover is always inside the perimeter, and the wire is always below the sensor. When ACQUIRE stops near the wire, the side of the wire gives the dock direction. FOLLOW keeps that direction by continuity. The transmitter's phase is never used.
+No Tx signal (the wire bin SNR of both sensors under 10 dB): stop and wait; ROAM and RETURN after `rover_no_tx_roam_s` (default 60 s), the other states after `rover_no_tx_s` (default 2 s). 
+## Heading: the approach fit (`approach_fit.h`)
 
-## Exit beacon guard
+Every straight drive in range feeds two weighted line fits against the distance driven (wheel speeds, else the command):
+- distance d = sqrt(R^2 - H^2) from the Rx radius: |sin(heading)| per metre. The radius is the field strength in the coil plane; a coil roll does not change it. It reads low in a small loop (the rest of the loop adds to the strength).
+- the lateral wire offset |H x / y|: |tan(heading)| per metre. It reads low under a coil roll (the vertical field leaks into the sideways part); the optional IMU roll correction (`rover_imu_roll`) turns x and y back by the accelerometer roll first.
 
-A beacon transmitter (BTx) lies on the wire just past the dock exit. Travelling the dock direction, the rover meets the dock first. Travelling the wrong way, it meets the beacon first. In FOLLOW, the exit beacon before the dock means the wrong way. The rover then stops, pivots 180 deg toward the inside, and follows on.
+The heading is the larger of the two (a low heading turns too little at a bounce). Each fit carries a curvature term; when it is significant, the heading is the one at the last frame (a straight drive past a curved wire). Distances are signed by the polarity inside fact when known. Left or right: polarity, else the offset sign. Quality: the heading uncertainty from the residual scatter and the distance span.
 
-- Place the exit beacon on the wire, at least the distance from the charge contacts to the sensor plus 0.3 m past the point where the contacts touch. In rover-sim, 1.0 m past the pad worked.
-- The guard arms only after 1.5 m of FOLLOW (`Config::guardArm`), so a rover that joins the wire between dock and beacon going the right way does not turn around. Keep `guardArm` larger than the dock-to-beacon distance.
-- With an entry beacon as well (`rover_entry_btx`), an exit beacon seen within 3 m after the entry beacon is ignored. This covers a dock that did not register a charge (charger off). Without an entry beacon, the rover then turns around and enters the dead dock from the wrong side.
-- Blind stretch: a wrong-way join less than `guardArm` before the beacon, or between beacon and dock, is not caught (about 2.5 m of wire).
+Probe: a straight drive of `rover_probe_m` on the same line (forward when the distance to the wire is over the probe length, else reverse); the fit with the probe frames then decides.
+
+No wire angle from one reading (decision 2026-10-21).
+
+## Re-acquisition check
+
+At each bounce and join, the first 10 deg of the planned pivot is the perturbation; turning toward the wire must bring it closer, so a distance change of more than 10 mm the other way reverses the wire side; polarity (inside x direction), when known, decides the side.
 
 ## Wiring in main.cpp
 
-`roverStep()` runs once per valid STM32 packet. In drive mode 2 with `rover_enabled` it replaces `throttle` and `steering_output`; the existing ODrive skid mixing, fault cut-offs and charge hold stay in place. The stuck detector is skipped in rover mode, because the rover is off the wire most of the time.
-
-- Speed input: the slewed command (no odometry).
-- Yaw rate input: the autopilot's own slewed yaw-rate command (no gyro, design choice 2026-10-08). Only its magnitude is used (pivot angles). The MPU6050, if fitted, is logged only.
-- Steering sign: taken from `pid_direction`. DIRECT means a positive ODrive steer command turns left, as the wire follower already does.
-- Units: STM32 `s1_x`, `s1_y` and `s1_radius` in mm are converted to m.
-
-## config.json keys
-
-| Key | Default | Meaning |
-|---|---|---|
-| rover_enabled | false | Mode 2 runs the autopilot instead of the wire follower |
-| rover_goal_cw | true | Dock direction along the wire, seen from above |
-| rover_sensor_height_mm | 150 | Sensor centre above the wire |
-| rover_full_speed_mps | 1.0 | Ground speed at full throttle command (measure it) |
-| rover_full_yaw_rate_dps | 115 | Not used from firmware 0.5.61: `maxYawRate` is `steering_rate_max_dps`, the full scale of the gyro rate loop |
-| rover_seek_vbatt | 0 | Go home below this battery voltage, filtered (0 = off) |
-| rover_seek_after_s | 600 | Go home this long after the last charge (0 = off) |
-| rover_entry_btx | 1 | BTx channel before the dock: creep at 0.2 m/s (0 = none) |
-| rover_exit_btx | 2 | BTx channel after the dock: wrong-way guard (0 = none) |
-| rover_lost_timeout_s | 30 | Stop for good after this long without the wire (0 = never) |
-
-All other tuning (speeds, distances, gains) is in `Config` in `rover_autopilot.h`, with rover-sim's values.
-
-## Differences from rover-sim
-
-| Change | Why |
-|---|---|
-| Exit beacon guard | Wrong-way protection (new). |
-| A charge in any state leads to DEPART | The rover then sits in the dock on the wire, facing the dock direction. rover-sim acts on a charge only in FOLLOW. |
-| `filterReadings` (on) | Bounce and transition decisions use a low-passed distance and an axis-averaged bearing (cos 2θ, sin 2θ), which keeps the wire's side through the noise flips near the sensor's horizon. Off reproduces rover-sim. |
-| Distance from the firmware's x and R | The vertical field is √2·H·\|x\|/R² in rover-sim's units, so `coil_data` is not needed. |
-| HALTED on lost timeout | Safety on an escape. |
-| No beacon bounce in ROAM | The beacons mark the dock (entry creep, exit guard), not a keep-out zone. |
-
-## Verification (rover-sim, no hardware)
-
-rover-sim b6b1ae4 (2026-10-08 23:4x): follow D term on dX/dt, the speed lock held until the wire is lost, pivots the shorter way, battery range 300 m. Each mission run is 450 s of simulated time, 100 Hz packets, float build, one autopilot call per packet, and the commanded speed used as the measured speed. "Battery" deaths come from rover-sim's seek margin of 1.2 wire lengths.
-
-| Check | Sim time | Result |
-|---|---|---|
-| `filterReadings` off, double build, compared step by step with rover-sim's own autopilot | 8 runs x 400 s | 6 runs identical throughout. 1 run: the deliberate charge-in-ACQUIRE change at 302 s. 1 run: rounding (1e-9 m at 302 s), then a battery death on a different packet at 344 s. |
-| Defaults, exit beacon, no noise, circle and garden tracks | 3.0 h | 23 charges, 0 turnarounds, 0 wrong-way, 1 battery |
-| Same, half of rover-sim's noise | 3.0 h | 22 charges, 1 turnaround, 0 wrong-way, 2 battery |
-| Same, full noise, roam speed 0.7 m/s | 3.0 h | 16 charges, 1 turnaround, 1 wrong-way, 0 battery |
-| Every transition forced the wrong way, no noise, seek margin 2.5 | 3.0 h | 23 turnarounds, 23 charges, 1 wrong-way |
-
-Yaw rate without a gyro (design choice, rover-sim c3ef53d): the firmware gives the autopilot its own slewed yaw-rate command as the measured yaw rate (harness `wModel`). Track slip makes the real pivot smaller or larger than this belief; the harness scales the belief. 12 runs x 450 s each (1.5 h):
-
-| Belief / real yaw rate | Defaults, exit beacon, no noise | Every transition forced the wrong way |
-|---|---|---|
-| 1.0 | 12 charges, 0 wrong-way | 12 turnarounds, 12 charges, 0 wrong-way |
-| 1.43 (real pivot 70 % of the command) | 12 charges, 0 wrong-way | 11 turnarounds, 11 charges, 1 wrong-way |
-| 0.8 (real pivot 125 % of the command) | 12 charges, 1 wrong-way | 11 turnarounds, 12 charges, 2 wrong-way |
-
-With the belief equal to the real rate, the half-noise and full-noise batches (3.0 h each) give the same counts as the runs with the true yaw rate: 22 charges, 1 turnaround, 2 battery; and 16 charges, 1 turnaround, 1 wrong-way.
-
-Speed cap `rover_speed_limit_mps` 0.5 (the firmware default) against no cap, every transition forced the wrong way, command-based yaw rate, 24 runs x 1500 s (10 h) each: no cap 120 joins, 110 turnarounds, 97 charges, 5 wrong-way (4.2 %); cap 0.5 m/s 53 joins, 46 turnarounds, 45 charges, 4 wrong-way (7.5 %). The difference is within chance at these counts. The cap halves the joins because rover-sim drains the battery per metre.
-
-Earlier results (rover-sim c1c6401, D term on asin(dX/ds), battery range 100 m, so about 4 times the charges): 98 charges with no noise; 96 turnarounds and 80 charges when forced the wrong way; 13 wrong-way entries and 0 charges with the guard off; noise A/B 55 failures against 4 for `filterReadings`.
-
-## Not verified
-
-- Hardware: steering sign, speed and yaw-rate calibration (`rover_full_speed_mps`, `rover_full_yaw_rate_dps`), ODrive response, real track slip in a pivot.
-- The real noise level. rover-sim's noise model (noise equals the wire's signal at 1.5 m) is an estimate; at that level escapes stay at 2 to 8 per hour and the lost timeout is the safety net.
-- Tracks with sharp corners or narrow necks beyond rover-sim's library.
+`roverStep()` runs once per Rx packet after the wire follower. In mode 2 with `rover_enabled` it replaces `throttle` and `steering_output`, except in FOLLOW and DEPART, where the wire follower's outputs stay. Speed: the wheel speeds (full drive command = roam speed), else the command. Turn measure: the gyro, else the command. The rate loop integral clears at the end of each pivot. Settings: `docs/settings_def.json`, group "Rover mode".

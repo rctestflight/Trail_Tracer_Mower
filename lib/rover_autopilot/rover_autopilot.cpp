@@ -1,328 +1,599 @@
-// Rover autopilot. See rover_autopilot.h for the behaviour; comments here cite the
-// rover-sim source each block was ported from (Documentation repo, commit c1c6401).
-
+// Rover autopilot: see rover_autopilot.h for the states and the readings.
 #include "rover_autopilot.h"
-#include <cmath>
+#include <math.h>
 
 namespace rover {
 
-#define K(x) static_cast<ap_real>(x)
-static const ap_real PI_ = K(3.14159265358979323846);
-static const ap_real D2R = PI_ / K(180);
+namespace {
+const float D2R = 0.017453293f;
+const float PI_F = 3.14159265f;
+// Fixed in code (not settings, operator 2026-10-20)
+const float CAPTURE_OFFSET = 0.10f;   // m: |X| at which the open-loop join hands over to FOLLOW
+const float RUN_LIMIT = 3.0f;         // open-loop join: hand over after this many times the expected run
+const float CHECK_ANGLE = 10 * D2R;   // re-acquisition check: the first part of the pivot
+const float CHECK_MIN = 0.01f;        // m: a smaller distance change says nothing
+const float CHECK_SETTLE = 0.15f;     // s after the check pivot before the distance is compared
+const float STOP_SPEED = 0.02f;       // m/s
+const float STOP_YAW = 0.05f;         // rad/s
+const float STOP_TIME = 1.5f;         // s: stopped at the latest after this
+const float YAW_ACCEL = 3.0f;         // rad/s^2: the pivot brakes in time for this
+const float PIVOT_MIN = 0.3f;         // part of the full yaw rate at the end of a pivot
+const float WRONG_FRAMES = 20;        // packets of wrong direction in a row before the reversal
+const float REVERSE_ARM = 1.0f;       // m of FOLLOW after a reversal before the check acts again
+const float FILTER_TAU = 0.05f;       // s, reading low-pass
 
-static inline ap_real clampr(ap_real x, ap_real lo, ap_real hi) { return x < lo ? lo : (x > hi ? hi : x); }
-static inline ap_real sgn(ap_real x) { return x > 0 ? K(1) : (x < 0 ? K(-1) : K(0)); }
-static inline ap_real wrapPi(ap_real a) { return std::atan2(std::sin(a), std::cos(a)); }
+float wrapPi(float a) {
+  while (a > PI_F) a -= 2 * PI_F;
+  while (a <= -PI_F) a += 2 * PI_F;
+  return a;
+}
+int8_t sgn(float v) { return v < 0 ? -1 : 1; }
+}  // namespace
 
 const char* stateName(State s) {
   switch (s) {
     case ROAM: return "roam";
-    case SEEK: return "seek";
-    case ACQUIRE: return "acquire";
+    case RETURN: return "return";
+    case JOIN: return "join";
     case FOLLOW: return "follow";
     case DEPART: return "depart";
-    case HALTED: return "halted";
+    case FAULT: return "fault";
+    case DOCK: return "dock";
   }
   return "?";
 }
 
-// ---- Biquad low-pass (rover_rx.js biquadLowpass / biquadStep) ----
-
-void Biquad::lowpass(ap_real fc, ap_real fs) {
-  const ap_real q = K(0.70710678118654752);
-  const ap_real w0 = 2 * PI_ * fc / fs, c = std::cos(w0), al = std::sin(w0) / (2 * q), a0 = 1 + al;
-  b0 = (1 - c) / 2 / a0; b1 = (1 - c) / a0; b2 = (1 - c) / 2 / a0;
-  a1 = -2 * c / a0; a2 = (1 - al) / a0;
-  x1 = x2 = y1 = y2 = 0; primed = false;
-}
-
-ap_real Biquad::step(ap_real x) {
-  if (!primed) { x1 = x2 = y1 = y2 = x; primed = true; }   // start at the first value, no step
-  const ap_real y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
-  x2 = x1; x1 = x; y2 = y1; y1 = y;
-  return y;
-}
-
-// ---- Autopilot ----
-
-void Autopilot::reset(State start) {
-  const Config keep = cfg;
-  *this = Autopilot();
-  cfg = keep;
-  state = start;
-  lpX.lowpass(5, cfg.packetHz);
-  lpD.lowpass(5, cfg.packetHz);
-  lpT.lowpass(5, cfg.packetHz);
-  lpDist.lowpass(5, cfg.packetHz);
-  lpU.lowpass(5, cfg.packetHz);
-  lpV.lowpass(5, cfg.packetHz);
-}
-
-// rover-sim's LCG. JavaScript evaluates m.rng * 1103515245 + 12345 in double precision and
-// then takes it mod 2^32; doing the same keeps the random sequence identical to the sim.
-ap_real Autopilot::rand01() {
-  double p = rng * 1103515245.0 + 12345.0;
-  rng = std::fmod(p, 4294967296.0);
-  const uint32_t r = static_cast<uint32_t>(rng);
-  return K((r & 0xffffffu) / 16777216.0);
-}
-
-// One STM32 packet: wire-below rule, crossing point, distance, angle, filters.
-// (receiver.js roverEstimate + rover_rx.js roverRxStep)
-void Autopilot::processPacket(const Inputs& in) {
-  const ap_real H = cfg.sensorHeight;
-  inRange = in.inRange;
-  lastR = in.fwR;
-  if (!in.inRange || !(in.fwR > 0)) {
-    lpX.lowpass(5, cfg.packetHz); lpD.lowpass(5, cfg.packetHz); lpT.lowpass(5, cfg.packetHz); lpDist.lowpass(5, cfg.packetHz);
-    lpU.lowpass(5, cfg.packetHz); lpV.lowpass(5, cfg.packetHz);
-    havePrev = false; rd.dXds = 0; rd.dXdt = 0; rd.valid = false;
-    return;
+const char* decisionName(DecisionCode c) {
+  switch (c) {
+    case DEC_NONE: return "none";
+    case DEC_BOUNCE: return "bounce";
+    case DEC_CHECK_FLIP: return "check-flip";
+    case DEC_JOIN: return "join";
+    case DEC_FOLLOW: return "follow";
+    case DEC_REVERSE: return "reverse";
+    case DEC_BEACON: return "beacon";
+    case DEC_DOCK: return "dock";
+    case DEC_DEPART: return "depart";
+    case DEC_RETURN: return "return";
+    case DEC_FAULT: return "fault";
+    case DEC_TX_OFF: return "tx-off";
+    case DEC_TX_ON: return "tx-on";
+    case DEC_START: return "start";
+    case DEC_TURN_BACK: return "turn-back";
+    case DEC_PROBE: return "probe";
   }
-  // 1. The wire is below the sensor: the pair only knows the field's axis.
-  ap_real x = in.fwX, y = in.fwY;
-  if (y < 0) { x = -x; y = -y; }
-  rd.xw = x;
-  // 2. Crossing point on the sensor's sideways axis (exact at any yaw).
-  const ap_real X = y > K(1e-4) ? H * x / y : (x < 0 ? K(-1e4) : K(1e4));
-  // 3. Distance from the vertical field. In units where each coil reads 1 over the wire,
-  //    |w| = sqrt2 H |x| / R^2 (the firmware's own x and R carry it), and a straight wire gives
-  //    |w| = sqrt2 H d / (d^2 + H^2): two roots d and H^2/d; keep the one nearer sqrt(R^2 - H^2).
-  const ap_real R = in.fwR;
-  const ap_real w = K(1.41421356237309505) * H * std::fabs(x) / (R * R);
-  const ap_real d1 = std::sqrt(std::fmax(K(0), R * R - H * H));
-  ap_real d;
-  if (w < K(1e-12)) d = 0;
-  else {
-    const ap_real disc = 2 - 4 * w * w;
-    if (disc <= 0) d = H;
-    else {
-      const ap_real r1 = H * (K(1.41421356237309505) + std::sqrt(disc)) / (2 * w), r0 = H * H / r1;
-      d = std::fabs(r0 - d1) < std::fabs(r1 - d1) ? r0 : r1;
-    }
+  return "?";
+}
+
+void Autopilot::reset() {
+  state = ROAM;
+  sub = SUB_START;
+  fault = FAULT_NONE;
+  rd = Reading();
+  txWait = false;
+  lostT_ = stopT_ = startT_ = 0;
+  armed_ = beaconArmed_ = joinArmed_ = true;
+  turnBacks_ = 0;
+  pivTarget_ = pivTurned_ = pivT_ = 0;
+  run_ = departLeft_ = reverseArm_ = 0;
+  wrongCount_ = 0;
+  entrySeen_ = false;
+  exitArmed_ = true;
+  fit_.reset();
+  last_ = Output();
+  probeLeft_ = 0;
+}
+
+float Autopilot::rnd() {
+  rng_ = rng_ * 1103515245u + 12345u;
+  return (float)(rng_ & 0xFFFFFFu) / (float)0x1000000;
+}
+
+void Autopilot::decide(DecisionCode c, float turnDeg, int8_t side) {
+  dec.seq++;
+  dec.code = c;
+  dec.d = rd.d;
+  dec.X = rd.X;
+  dec.turnDeg = turnDeg;
+  dec.side = side;
+  dec.reason = (int8_t)fault;
+  dec.fit = FitResult();
+  if (c == DEC_BOUNCE || c == DEC_JOIN || c == DEC_PROBE) {
+    fit_.solve(dec.fit, polNow_);
   }
-  // 4. |angle| between heading and wire.
-  const ap_real c = std::fabs(X) > K(1e-9) ? std::fmin(K(1), d / std::fabs(X)) : K(1);
-  rd.X = clampr(X, -3, 3);
-  rd.d = d;
-  rd.psi = std::acos(c);
-  rd.valid = true;
-  // Filters: X low-passed; dX/ds from the filtered difference over one packet's travel.
-  rd.Xf = lpX.step(rd.X);
-  const ap_real ds = std::fabs(in.v) / cfg.packetHz;
-  ap_real raw;
-  if (havePrev && ds > K(1e-3)) raw = clampr((rd.Xf - prevXf) / ds * (in.v < 0 ? K(-1) : K(1)), -1, 1);
-  else raw = rd.dXds * K(0.9);
-  rd.dXds = lpD.step(raw);
-  // Change of X per second (the D term's input): the filtered difference times the packet
-  // rate, with its own low-pass. No speed in it (rover-sim 512a748).
-  rd.dXdt = lpT.step(havePrev ? (rd.Xf - prevXf) * cfg.packetHz : K(0));
-  prevXf = rd.Xf;
-  havePrev = true;
-  // Low-passed readings for the mission decisions. The bearing is averaged as an axis
-  // (cos 2th, sin 2th): noise near the sensor's horizon flips (x, y) to (-x, -y), which the
-  // doubled angle ignores, so the average keeps the side. Halving the averaged angle gives
-  // a bearing within 90 deg of straight down: the wire-below rule.
-  rd.df = lpDist.step(d);
-  const ap_real R2 = R * R;
-  const ap_real uf = lpU.step((in.fwY * in.fwY - in.fwX * in.fwX) / R2);
-  const ap_real vf = lpV.step(2 * in.fwX * in.fwY / R2);
-  const ap_real th = std::atan2(vf, uf) / 2;
-  rd.Xa = std::fabs(th) < K(1.5706) ? H * std::tan(th) : (th < 0 ? K(-1e4) : K(1e4));
-  rd.psif = std::acos(std::fabs(rd.Xa) > K(1e-9) ? std::fmin(K(1), rd.df / std::fabs(rd.Xa)) : K(1));
+  dec.psiDeg = dec.fit.valid ? dec.fit.psiDeg : 0;
 }
 
-// Distance to the wire for the mission logic: the vertical-field distance when in range.
-ap_real Autopilot::dist() const {
-  if (rd.valid) return cfg.filterReadings ? rd.df : rd.d;
-  const ap_real H = cfg.sensorHeight;
-  return std::sqrt(std::fmax(K(0), lastR * lastR - H * H));
+// The fit shows the rover closing on the wire: the fitted distance falls over the span by more than 3 x its scatter.
+bool Autopilot::fitClosing() const {
+  FitResult f;
+  if (!fit_.solve(f, polNow_)) return false;
+  // At least the probe length of straight drive (the configured confident span): a pivot leaves a few frames of creep
+  if (f.span < cfg.probeLength) return false;
+  const float fall = sinf(fabsf(f.psiDeg) * D2R) * f.span;
+  return f.psiDeg * f.dNow > 0 && fall > 3 * f.residual;   // toward the wire: heading and side agree
 }
 
-// Bounce: mirror off the guessed wire line, plus a random spread, the shorter way round
-// (autopilot.js bounceTurn, shortestTurn).
-void Autopilot::bounceTurn() {
-  const ap_real psi = !rd.valid ? PI_ / 2 : (cfg.filterReadings ? rd.psif : rd.psi);
-  const ap_real xw = cfg.filterReadings ? rd.Xa : rd.xw;
-  ap_real leave = psi + (2 * rand01() - 1) * cfg.bounceRandomDeg * D2R;
-  leave = clampr(leave, cfg.bounceMinAngleDeg * D2R, PI_ - cfg.bounceMinAngleDeg * D2R);
-  const ap_real side = (std::fabs(xw) > K(0.02) && psi < 80 * D2R) ? sgn(xw) : (rand01() < K(0.5) ? K(1) : K(-1));
-  turnDir = side > 0 ? -1 : 1;
-  turnLeft = psi + leave;
-  // A pivot over 180 deg one way is the same heading change as 360 deg minus it the other way.
-  if (turnLeft > PI_) { turnLeft = 2 * PI_ - turnLeft; turnDir = -turnDir; }
+// The approach fit is good enough when its uncertainty is under the limit.
+bool Autopilot::fitGood(float limitDeg) const {
+  FitResult f;
+  return fit_.solve(f, polNow_) && f.uncDeg < limitDeg;
 }
 
-// Transition: the wire line is psi off the heading on side s (+1 left). Of the two mirror
-// lines, the one crossing ahead is real (the rover is closing from the inside). The goal way
-// keeps the wire on side g (CW: inside on the right, wire on the left, g = +1). Target:
-// that tangent turned approachAngle toward the wire (autopilot.js approachTurn).
-void Autopilot::approachTurn() {
-  const ap_real psi = !rd.valid ? PI_ / 2 : (cfg.filterReadings ? rd.psif : rd.psi);
-  const ap_real xw = cfg.filterReadings ? rd.Xa : rd.xw;
-  const ap_real s = std::fabs(xw) > K(0.02) ? sgn(xw) : K(1);
-  bool cw = cfg.goalCW;
-  if (cfg.testWrongWay) cw = !cw;
-  const ap_real g = cw ? K(1) : K(-1);
-  const ap_real tangent = -s * psi + (s == g ? K(0) : PI_);
-  pending = wrapPi(tangent + g * cfg.approachAngleDeg * D2R);
+// Heading and wire side for a bounce or a join, from the approach fit (or the probe that extended it). No fit at all
+// (probe off): square-on. Wire side: polarity when known, else the fit, else the offset sign of this reading.
+void Autopilot::planFromFit(const Inputs& in) {
+  FitResult f;
+  const bool ok = fit_.solve(f, polNow_);
+  planPsi_ = ok ? fabsf(f.psiDeg) * D2R : PI_F / 2;
+  planToward_ = (ok && f.psiDeg * f.dNow < 0) ? -1 : 1;   // moving away from the wire: heading and side disagree
+  planX_ = rd.X;
+  const int8_t ps = polSide(in);
+  planPolKnown_ = ps != 0;
+  planSide_ = ps ? ps : (ok ? (int8_t)(f.dNow < 0 ? -1 : 1) : sgn(rd.X));
 }
 
-// Drive target plus the slewed command for drives without their own ramp.
-Output Autopilot::out(ap_real v, ap_real w, ap_real accel, ap_real dt) {
-  Output o;
-  if (cfg.speedLimit > 0) v = clampr(v, -cfg.speedLimit, cfg.speedLimit);
-  o.drive = clampr(v / cfg.maxSpeed, -1, 1);
-  o.steer = clampr(w / cfg.maxYawRate, -1, 1);
-  o.accel = accel;
-  const ap_real tv = o.drive * cfg.maxSpeed, tw = o.steer * cfg.maxYawRate;
-  const ap_real dv = accel * dt, dw = cfg.yawAccel * dt;
-  vOut = tv - vOut > dv ? vOut + dv : (tv - vOut < -dv ? vOut - dv : tv);
-  wOut = tw - wOut > dw ? wOut + dw : (tw - wOut < -dw ? wOut - dw : tw);
-  o.v = vOut; o.w = wOut;
-  return o;
+void Autopilot::probeBegin(ProbeFor why, Output& o, float speed) {
+  probeFor_ = why;
+  probeLeft_ = cfg.probeLength;
+  probeDir_ = rd.d > cfg.probeLength ? 1 : -1;   // forward when it cannot reach the wire, else reverse
+  sub = SUB_PROBE;
+  o.v = probeDir_ * speed;
+}
+
+void Autopilot::bounceNow(const Inputs& in) {
+  planFromFit(in);
+  planBounce();
+  decide(DEC_BOUNCE, planDir_ * planTurn_ / D2R, planSide_);
+  sub = SUB_STOP;
+  stopT_ = 0;
+}
+
+void Autopilot::joinNow(const Inputs& in) {
+  planFromFit(in);
+  planJoin();
+  planDir_ = fabsf(planRot_) > 1e-3f ? sgn(planRot_) : 1;
+  decide(DEC_JOIN, planRot_ / D2R, planSide_);
+  sub = SUB_STOP;
+  stopT_ = 0;
+}
+
+// The approach fit takes every frame in range of a straight drive: no commanded turn, not the wire follower. A turn
+// starts a new fit. Lost frames carry no equation; the distance driven still counts.
+void Autopilot::feedFit(const Inputs& in) {
+  if (last_.external || last_.w != 0.0f || fabsf(in.yawRate) > STOP_YAW) { fit_.reset(); return; }
+  fit_.advance(in.v * in.dt);
+  if (in.inRange && in.R > 0) fit_.add(in.x, in.y, in.R, cfg.sensorHeight, in.inside);
 }
 
 Output Autopilot::step(const Inputs& in) {
-  const ap_real dt = in.dt;
-  if (in.packet) processPacket(in);
-  const ap_real av = std::fabs(in.v), aw = std::fabs(in.yawRate);
+  polNow_ = polSide(in);
+  feedFit(in);
+  last_ = stepStates(in);
+  return last_;
+}
 
-  // Safety: wire lost too long (an escape) -> stop for good.
-  if (state != HALTED && cfg.lostTimeout > 0) {
-    lostTime = inRange ? K(0) : lostTime + dt;
-    if (lostTime > cfg.lostTimeout) { state = HALTED; turnLeft = 0; }
+// The end of the start: on the wire -> FOLLOW (returns true), else ROAM or RETURN.
+bool Autopilot::startDone(const Inputs& in, Output& o) {
+  if (rd.valid && (fabsf(rd.X) <= CAPTURE_OFFSET || rd.d <= 0.5f * cfg.sensorHeight)) {
+    state = FOLLOW; sub = SUB_NONE;
+    wrongCount_ = 0; entrySeen_ = false; exitArmed_ = !in.exitBeacon; reverseArm_ = 0;
+    decide(DEC_START, 0, 0);
+    o.external = true;
+    return true;
   }
-  if (state == HALTED) return out(0, 0, cfg.bounceAccel, dt);
+  sub = SUB_NONE;
+  if (cfg.followOnly) state = RETURN;
+  decide(DEC_START, 0, 0);
+  return false;
+}
 
-  // Docked: hold still while charging. Charged: leave along the wire.
-  if (in.docked) { turnLeft = 0; return out(0, 0, cfg.followAccel, dt); }
-  // A charge in any other state also means the rover sits in the dock on the wire, facing
-  // the goal way (rover-sim only acts on it in FOLLOW).
-  if (in.charged) {
-    charges++;
-    if (state != DEPART) { state = DEPART; sub = SUB_NONE; turnLeft = 0; departLeft = cfg.departLength; }
+void Autopilot::toFault(FaultCode why) {
+  if (state == FAULT) return;
+  fault = why;
+  state = FAULT;
+  sub = SUB_NONE;
+  decide(DEC_FAULT, 0, 0);
+}
+
+// One reading from x, y and radius as the Rx sends them.
+void Autopilot::read(const Inputs& in) {
+  if (!in.inRange || !(in.R > 0)) {
+    rd.valid = false;
+    return;
+  }
+  const float H = cfg.sensorHeight, x = in.x, y = in.y, R = in.R;
+  const float X = fabsf(y) > 1e-4f ? H * x / y : (((x < 0) != (y < 0)) ? -1e4f : 1e4f);
+  // Distance from the vertical field part: d / (d^2 + H^2) = |x| / R^2 (a straight wire); the root nearer
+  // sqrt(R^2 - H^2).
+  const float q = fabsf(x) / (R * R);
+  const float d1 = sqrtf(fmaxf(0.0f, R * R - H * H));
+  float d;
+  if (q < 1e-6f) d = 0;
+  else {
+    const float disc = 1 - 4 * H * H * q * q;
+    if (disc <= 0) d = H;
+    else {
+      const float r1 = (1 + sqrtf(disc)) / (2 * q), r0 = H * H / r1;
+      d = fabsf(r0 - d1) < fabsf(r1 - d1) ? r0 : r1;
+    }
+  }
+  const float k = 1 - expf(-in.dt / FILTER_TAU);
+  if (!rd.valid) { rd.Xf = X; rd.df = d; }
+  else { rd.Xf += k * (X - rd.Xf); rd.df += k * (d - rd.df); }
+  rd.X = X; rd.d = d;
+  rd.valid = true;
+}
+
+bool Autopilot::stopped(const Inputs& in) {
+  stopT_ += in.dt;
+  return (fabsf(in.v) < STOP_SPEED && fabsf(in.yawRate) < STOP_YAW) || stopT_ > STOP_TIME;
+}
+
+void Autopilot::startPivot(float angle, int8_t dir) {
+  pivTarget_ = angle;
+  pivDir_ = dir;
+  pivTurned_ = 0;
+  pivT_ = 0;
+}
+
+bool Autopilot::pivotStep(const Inputs& in, Output& o) {
+  pivTurned_ += fabsf(in.yawRate) * in.dt;
+  pivT_ += in.dt;
+  const float left = pivTarget_ - pivTurned_;
+  const float limit = 3.0f + pivTarget_ / (PIVOT_MIN * cfg.maxYawRate);  // a pivot that cannot turn ends anyway
+  if (left <= 0.01f || pivT_ > limit) { o.v = 0; o.w = 0; return true; }
+  float w = sqrtf(2 * YAW_ACCEL * left);
+  w = fminf(cfg.maxYawRate, fmaxf(PIVOT_MIN * cfg.maxYawRate, w));
+  o.v = 0;
+  o.w = pivDir_ * w;
+  return false;
+}
+
+// Polarity: the wire x sign (+1 left) = inside x direction (inside the loop, travelling clockwise: the wire is on the
+// left). 0 when either fact is not known.
+int8_t Autopilot::polSide(const Inputs& in) const {
+  return (in.inside != 0 && in.heading != 0) ? (int8_t)(in.inside * in.heading) : 0;
+}
+
+// Mirror bounce from one reading: leave the wire at the wire angle on the other side, plus a random spread, kept at
+// least the minimum leave angle from the wire; turn away from the wire; the shorter way round.
+void Autopilot::planBounce() {
+  const float psi = planPsi_;
+  float leave = psi + (2 * rnd() - 1) * cfg.bounceSpreadDeg * D2R;
+  const float mn = cfg.bounceMinDeg * D2R;
+  leave = fmaxf(mn, fminf(PI_F - mn, leave));
+  planLeave_ = leave;
+  float T = psi + leave;
+  int8_t dir = (int8_t)-planSide_;
+  if (T > PI_F) { T = 2 * PI_F - T; dir = (int8_t)-dir; }
+  planTurn_ = T;
+  planDir_ = dir;
+}
+
+// Join from one reading: the estimated wire line in the goal direction, turned by the approach angle toward the
+// wire. g: the side the wire keeps when the rover travels the goal way (clockwise inside: the wire on the left).
+void Autopilot::planJoin() {
+  const int8_t g = (int8_t)((cfg.goalCW ? 1 : -1) * planInside_);
+  // The wire direction against the centreline: turned by the heading away from the wire side when closing in, toward
+  // it when moving away (the closest-approach reading comes after the rover starts to move away)
+  const float tangent = -planSide_ * planToward_ * planPsi_ + (planSide_ == g ? 0 : PI_F);
+  planRot_ = wrapPi(tangent + g * cfg.approachAngleDeg * D2R);
+}
+
+Output Autopilot::stepStates(const Inputs& in) {
+  Output o;
+  read(in);
+  if (state == FAULT) return o;
+
+  // Every state
+  if (in.stuck && in.inRange) { toFault(FAULT_STUCK); return o; }
+  lostT_ = in.inRange ? 0 : lostT_ + in.dt;
+  if (cfg.lostTimeout > 0 && lostT_ > cfg.lostTimeout && (state == JOIN || state == FOLLOW || state == DEPART)) {
+    toFault(FAULT_LOST);
+    return o;
+  }
+  // Lost in FOLLOW or DEPART for rover_no_tx_s: one 30 deg turn in place (alternate sides). Square-on over
+  // the wire the coils sit in the field null; the turn ends it. In place, so safe with the Tx off too.
+  const bool wireState = state == FOLLOW || state == DEPART;
+  if (in.inRange) { searched_ = searching_ = false; }
+  else if (wireState) {
+    if (searching_) {
+      Output so;
+      if (pivotStep(in, so)) { searching_ = false; so = Output(); }
+      return so;
+    }
+    if (!searched_ && lostT_ > cfg.noTxS) {
+      searched_ = searching_ = true;
+      startPivot(30 * D2R, searchDir_);
+      searchDir_ = (int8_t)-searchDir_;
+      return o;
+    }
+  }
+  // No Tx signal: ROAM and RETURN wait the roam limit (far from the wire the signal can drop out)
+  const float noTxLimit = (state == ROAM || state == RETURN) ? cfg.noTxRoamS : cfg.noTxS;
+  if (in.txOffS > noTxLimit) {
+    if (!txWait) decide(DEC_TX_OFF, 0, 0);
+    txWait = true;
+    return o;
+  }
+  if (txWait) { txWait = false; decide(DEC_TX_ON, 0, 0); }
+  if (in.docked && state != DOCK) {
+    dockFrom_ = state;
+    state = DOCK;
+    sub = SUB_NONE;
+    decide(DEC_DOCK, 0, 0);
   }
 
-  // A pivot in progress runs to completion first; brake in time to end on the angle.
-  if (turnLeft > 0) {
-    turnLeft -= aw * dt;
-    const ap_real wMax = std::sqrt(2 * cfg.yawAccel * std::fmax(K(0), turnLeft));
-    const ap_real w = turnDir * std::fmin(K(1), wMax / cfg.maxYawRate) * cfg.maxYawRate;
-    if (turnLeft <= K(0.005)) turnLeft = 0;
-    return out(0, w, cfg.bounceAccel, dt);
+  const float approachV = cfg.approachFraction * cfg.roamSpeed;
+  const float H = cfg.sensorHeight;
+
+  // Probe: a straight drive of the probe length on the line of the approach (the fit keeps the approach frames), then
+  // the decision that asked for it
+  if (sub == SUB_PROBE) {
+    probeLeft_ -= fabsf(in.v) * in.dt;
+    if (probeLeft_ > 0) { o.v = probeDir_ * approachV; return o; }
+    decide(DEC_PROBE, 0, 0);
+    if (dec.fit.valid) dec.side = (int8_t)(dec.fit.dNow < 0 ? -1 : 1);
+    sub = SUB_PROBE_STOP;
+    stopT_ = 0;
+    return o;
+  }
+  if (sub == SUB_PROBE_STOP) {
+    if (!stopped(in)) return o;
+    if (probeFor_ == PROBE_BOUNCE) { bounceNow(in); return o; }
+    if (probeFor_ == PROBE_JOIN) { joinNow(in); return o; }
+    startDone(in, o);
+    return o;
   }
 
-  if (state == ROAM && in.needCharge) state = SEEK;
-
-  ap_real v = 0, w = 0, acc = cfg.bounceAccel;
-  const ap_real d = dist();
   switch (state) {
     case ROAM:
-    case SEEK: {
-      acc = cfg.bounceAccel;
-      if (sub == SUB_LEAVING) {
-        // Drive away without bouncing until the distance has passed a maximum (closing on
-        // wire again), has fallen 0.15 m below its start (a curve bending toward the rover),
-        // or is past pivotDistance + 0.25 m.
-        if (!haveLeave) { leaveDist = d; leaveMax = d; leaveStart = d; haveLeave = true; }
-        leaveDist = std::fmin(leaveDist, d);
-        leaveMax = d <= leaveDist + K(1e-9) ? d : std::fmax(leaveMax, d);
-        const bool peaked = leaveMax > leaveDist + K(0.05) && d < leaveMax - K(0.05);
-        const bool closing = d < leaveStart - K(0.15);
-        if (!inRange || d >= cfg.bouncePivotDistance + K(0.25) || peaked || closing) sub = SUB_NONE;
-        else { v = cfg.bounceSpeed; break; }
+    case RETURN: {
+      if (sub == SUB_START) {
+        if (rd.valid && cfg.probeLength > 0) { probeBegin(PROBE_START, o, approachV); return o; }
+        if (startDone(in, o)) return o;
       }
-      if (inRange && state == SEEK && d <= cfg.transPivotDistance + K(0.5)) { state = ACQUIRE; sub = SUB_NONE; break; }
-      if (sub == SUB_STOPPING) {
-        if (av > K(0.02)) break;                       // stop first, then pivot
-        turnLeft = pending; sub = SUB_LEAVING; haveLeave = false; bounces++;
-        break;
-      }
-      if (inRange && d <= cfg.bouncePivotDistance) {
-        // The reading at the pivot distance, not after stopping (near d = H it is ill-conditioned).
-        bounceTurn(); pending = turnLeft; turnLeft = 0; sub = SUB_STOPPING;
-        break;
-      }
-      v = cfg.bounceSpeed;
-      break;
-    }
-
-    case ACQUIRE: {
-      acc = cfg.transAccel;
-      if (!inRange || (sub == SUB_NONE && d > cfg.transPivotDistance + K(0.7))) { state = SEEK; sub = SUB_NONE; break; }
-      if (sub == SUB_NONE) {
-        if (d > cfg.transPivotDistance) { v = cfg.transSpeed; break; }
-        approachTurn();
-        sub = SUB_STOPPING;
-      }
-      if (sub == SUB_STOPPING) {
-        if (av > K(0.02)) break;
-        turnLeft = std::fabs(pending); turnDir = pending < 0 ? -1 : 1;
-        sub = SUB_OPEN; openRun = 0;
-        break;
-      }
-      // Open loop straight on until the crossing point is within followRadius.
-      openRun += av * dt;
-      const ap_real expect = cfg.transPivotDistance / std::fmax(K(0.2), std::sin(cfg.approachAngleDeg * D2R));
-      const ap_real crossX = rd.valid ? std::fabs(rd.X) : K(1e9);
-      if (crossX <= cfg.followRadius || d <= K(0.5) * cfg.sensorHeight || openRun > 3 * expect) {
-        state = FOLLOW; sub = SUB_NONE; lockRun = 0; locked = false;
-        followRun = 0; exitHold = false; entrySeen = false;
-        break;
-      }
-      v = cfg.transSpeed;
-      break;
-    }
-
-    case FOLLOW:
-    case DEPART: {
-      acc = cfg.followAccel;
-      if (!inRange) { state = SEEK; sub = SUB_NONE; locked = false; break; }
-      followRun += av * dt;
-      if (in.entryBtx) { entrySeen = true; entryRun = 0; creepLeft = cfg.creepTime; }
-      else entryRun += av * dt;
-
-      // Exit beacon guard: the exit beacon before the dock means the wrong way.
-      if (state == FOLLOW && cfg.exitGuard) {
-        if (exitHold && !in.exitBtx) exitHold = false;
-        const bool rightWay = entrySeen && entryRun < cfg.entryWindow;
-        if (sub == SUB_NONE && in.exitBtx && !exitHold && followRun >= cfg.guardArm && !rightWay) {
-          sub = SUB_TURNAROUND; exitHold = true; turnarounds++;
+      if ((cfg.followOnly || in.needCharge) && state == ROAM) { state = RETURN; decide(DEC_RETURN, 0, 0); }
+      // Beacon re-arm: past the beacon re-arm distance
+      if (!beaconArmed_ && in.beaconRange > cfg.beaconRearm) beaconArmed_ = true;
+      switch (sub) {
+        case SUB_BSTOP:
+          if (!stopped(in)) return o;
+          {
+            float T = PI_F + (2 * rnd() - 1) * cfg.beaconSpreadDeg * D2R;
+            int8_t dir = rnd() < 0.5f ? 1 : -1;
+            if (T > PI_F) { T = 2 * PI_F - T; dir = (int8_t)-dir; }
+            startPivot(T, dir);
+            decide(DEC_BEACON, dir * T / D2R, 0);
+          }
+          sub = SUB_BPIVOT;
+          return o;
+        case SUB_BPIVOT:
+          if (pivotStep(in, o)) {
+            sub = SUB_NONE;
+            armed_ = joinArmed_ = false;  // as after a bounce turn
+            dMax_ = rd.valid ? rd.df : 99;
+            o = Output();
+          }
+          return o;
+        case SUB_STOP:
+          if (!stopped(in)) return o;
+          dRef_ = rd.df;
+          startPivot(CHECK_ANGLE, planDir_);
+          stopT_ = 0;
+          sub = SUB_CHECK;
+          return o;
+        case SUB_CHECK: {
+          if (stopT_ == 0 && !pivotStep(in, o)) return o;
+          o = Output();
+          stopT_ += in.dt;
+          if (stopT_ < CHECK_SETTLE) return o;
+          // The first CHECK_ANGLE of the turn is done. Distance change: turning toward side dir brings a wire on that
+          // side closer.
+          float remaining = planDir_ * (planTurn_ - CHECK_ANGLE);
+          if (rd.valid) {
+            const float dd = rd.df - dRef_;
+            if (fabsf(dd) > CHECK_MIN) {
+              const int8_t sMeas = (int8_t)(-sgn(dd) * planDir_);
+              if (sMeas != planSide_ && !planPolKnown_) {
+                planSide_ = sMeas;
+                const int8_t dir0 = planDir_;
+                planBounce();
+                remaining = wrapPi(planDir_ * planTurn_ - dir0 * CHECK_ANGLE);
+                decide(DEC_CHECK_FLIP, remaining / D2R, planSide_);
+              }
+            }
+          }
+          startPivot(fabsf(remaining), sgn(remaining));
+          sub = SUB_PIVOT;
+          return o;
         }
-        if (sub == SUB_TURNAROUND) {
-          if (av > K(0.02)) break;                     // stop, then 180 deg toward the inside
-          turnDir = cfg.goalCW ? 1 : -1;               // wrong way for CW travel: inside on the left
-          turnLeft = PI_; sub = SUB_NONE; followRun = 0; locked = false; lockRun = 0;
+        case SUB_PIVOT:
+          if (pivotStep(in, o)) {
+            sub = SUB_NONE;
+            armed_ = joinArmed_ = false;
+            dMax_ = rd.valid ? rd.df : 99;
+            bounces++;
+            o = Output();
+          }
+          return o;
+        default:
           break;
+      }
+      // Driving straight. Polarity says outside the loop: no bounce until inside again.
+      // Outside: turn round, and again each time the distance grows by the re-arm drop since the last turn
+      if (in.inside < 0) {
+        if (!outsideTurned_ || (rd.valid && rd.df > outsideD_ + cfg.rearmDrop)) {
+          outsideTurned_ = true;
+          outsideD_ = rd.valid ? rd.df : 0;
+          startPivot(PI_F, 1); sub = SUB_BPIVOT; decide(DEC_TURN_BACK, 180, 0); return o;
+        }
+        if (rd.valid) outsideD_ = fminf(outsideD_, rd.df);
+        o.v = approachV;
+        return o;
+      }
+      if (in.inside > 0) outsideTurned_ = false;
+      if (cfg.beaconBounce && beaconArmed_ && in.beaconRange <= cfg.beaconDistance) {
+        beaconArmed_ = false;
+        sub = SUB_BSTOP;
+        stopT_ = 0;
+        return o;
+      }
+      if (!armed_ || !joinArmed_) {
+        if (!rd.valid) armed_ = joinArmed_ = true;
+        else {
+          dMax_ = fmaxf(dMax_, rd.df);
+          // Closing on the wire since the pivot (the fit: the distance falls by more than 3 x its scatter): the turn did
+          // not take the rover away; it must bounce (or join) again before the wire, at any distance
+          const bool dropped = rd.df < dMax_ - cfg.rearmDrop || fitClosing();
+          if (rd.df >= cfg.rearmDistance || dropped) armed_ = true;
+          if (rd.df > cfg.approachDistance + 0.1f || dropped) joinArmed_ = true;  // the join starts on entry: closing in
         }
       }
-
-      // Lock test on X and the heading angle asin(dX/ds); the steering PD uses dX/dt.
-      const ap_real X = rd.Xf, ePsi = std::asin(clampr(rd.dXds, -1, 1));
-      if (std::fabs(X) < cfg.lockOffset && std::fabs(ePsi) < cfg.lockHeadingDeg * D2R) lockRun += av * dt;
-      else if (!locked) lockRun = 0;
-      if (!locked && lockRun >= cfg.lockLength) locked = true;
-      // Once locked the speed stays fast until the wire is lost (rover-sim 87fa177).
-      v = locked ? cfg.fastSpeed : cfg.followSpeed;
-      if (creepLeft > 0) { creepLeft -= dt; if (state == FOLLOW) v = std::fmin(v, cfg.padSpeed); }
-      w = cfg.kOffset * X + cfg.kHeading * rd.dXdt;  // PD: P on X, D on dX/dt
-      if (state == DEPART) {
-        departLeft -= av * dt;
-        if (departLeft <= 0) {
-          // Turn inward (CW travel has the inside on the right) by a random angle.
-          turnDir = cfg.goalCW ? -1 : 1;
-          turnLeft = (cfg.departTurnMinDeg + (cfg.departTurnMaxDeg - cfg.departTurnMinDeg) * rand01()) * D2R;
-          state = ROAM; sub = SUB_LEAVING; haveLeave = false; locked = false;
-        }
+      if (state == RETURN && joinArmed_ && rd.valid && rd.df <= cfg.approachDistance) {
+        state = JOIN;
+        sub = SUB_APPROACH;
+        lastDf_ = rd.df;
+        decide(DEC_JOIN, 0, 0);
+        o.v = approachV;
+        return o;
       }
-      break;
+      if (armed_ && rd.valid && rd.d <= cfg.bounceDistance) {
+        bounceNow(in);  // the fitted heading, or square-on with no fit
+        return o;
+      }
+      o.v = (rd.valid && rd.df <= cfg.approachDistance) ? approachV : cfg.roamSpeed;
+      return o;
     }
 
-    case HALTED:
-      break;
+    case JOIN: {
+      // Drive straight to the wire; on it, turn along the wire in the goal direction by the fitted heading; FOLLOW.
+      switch (sub) {
+        case SUB_STOP:
+          if (!stopped(in)) return o;
+          startPivot(fabsf(planRot_), planDir_);
+          sub = SUB_PIVOT;
+          return o;
+        case SUB_PIVOT:
+          if (pivotStep(in, o)) {
+            state = FOLLOW;
+            sub = SUB_NONE;
+            wrongCount_ = 0; entrySeen_ = false; exitArmed_ = !in.exitBeacon; reverseArm_ = 0;
+            decide(DEC_FOLLOW, 0, 0);
+            o = Output();
+            o.external = true;
+          }
+          return o;
+        default: {
+          // The wire under the sensor: close by the radius, or lost right after a close reading (the field null)
+          // or polarity says outside (the rover crossed the wire)
+          const bool onWire = in.inside < 0 ||
+              (rd.valid ? (rd.d <= 0.5f * H || fabsf(rd.X) <= CAPTURE_OFFSET) : (lastDf_ <= 2 * H));
+          if (rd.valid) lastDf_ = rd.d;
+          // The Rx x sign 1-3 sensor heights from the wire (x is large there; the Rx state holds on a straight run)
+          if (rd.valid && rd.d >= H && rd.d <= 3 * H) xSignNear_ = in.x < 0 ? -1 : 1;
+          if (!onWire) { o.v = approachV; return o; }  // lost far from the wire: drive on (Tx off stops by the no-Tx rule)
+          if (in.inside != 0) planInside_ = in.inside;
+          else if (cfg.joinNoPolarityStop) { toFault(FAULT_NO_POLARITY); return Output(); }
+          else planInside_ = 1;
+          planFromFit(in);
+          // The follower's x sign from known geometry: the wire was on side planSide_ (left +) on the way in, so raw x
+          // matches it when xSignNear_ == planSide_; on the wire it is below, so the sign of y now marks that Rx state
+          if (xSignNear_ != 0 && rd.valid && fabsf(in.y) > fabsf(in.x))
+            yBelow = (int8_t)((in.y < 0 ? -1 : 1) * (xSignNear_ == planSide_ ? 1 : -1));
+          xSignNear_ = 0;
+          const int8_t g = (int8_t)((cfg.goalCW ? 1 : -1) * planInside_);
+          planRot_ = wrapPi(-planSide_ * planToward_ * planPsi_ + (planSide_ == g ? 0 : PI_F));
+          planDir_ = fabsf(planRot_) > 1e-3f ? sgn(planRot_) : 1;
+          decide(DEC_JOIN, planRot_ / D2R, planSide_);
+          sub = SUB_STOP;
+          stopT_ = 0;
+          return o;
+        }
+      }
+    }
+
+    case FOLLOW: {
+      if (sub == SUB_REVERSE_STOP) {
+        if (!stopped(in)) return o;
+        startPivot(PI_F, cfg.goalCW ? 1 : -1);  // turn round on the wire, the nose over the inside
+        sub = SUB_REVERSE;
+        return o;
+      }
+      if (sub == SUB_REVERSE) {
+        if (pivotStep(in, o)) {
+          sub = SUB_NONE;
+          turnarounds++;
+          reverseArm_ = REVERSE_ARM;
+          wrongCount_ = 0;
+          entrySeen_ = false;
+          exitArmed_ = false;
+          o = Output();
+        }
+        return o;
+      }
+      if (!rd.valid) return o;  // lost: stop (one turn out of the field null after rover_no_tx_s)
+      reverseArm_ = fmaxf(0.0f, reverseArm_ - fabsf(in.v) * in.dt);
+      if (in.entryBeacon) entrySeen_ = true;
+      if (!in.exitBeacon) exitArmed_ = true;
+      if (cfg.wrongDirCheck && reverseArm_ <= 0) {
+        const int8_t goal = cfg.goalCW ? 1 : -1;
+        if (in.heading == -goal && fabsf(in.v) > STOP_SPEED) wrongCount_++;
+        else wrongCount_ = 0;
+        const bool beaconWrong = in.exitBeacon && exitArmed_ && !entrySeen_;
+        if (wrongCount_ >= WRONG_FRAMES || beaconWrong) {
+          decide(DEC_REVERSE, 180, 0);
+          sub = SUB_REVERSE_STOP;
+          stopT_ = 0;
+          return o;
+        }
+      }
+      o.external = true;
+      return o;
+    }
+
+    case DOCK:
+      if (in.docked) return o;
+      charges++;
+      if (cfg.followOnly) { state = FOLLOW; sub = SUB_NONE; reverseArm_ = REVERSE_ARM; o.external = true; return o; }
+      if (dockFrom_ == ROAM || dockFrom_ == RETURN) { state = dockFrom_; sub = SUB_NONE; return o; }  // not a wire dock
+      state = DEPART;
+      sub = SUB_NONE;
+      departLeft_ = cfg.departMin + (fmaxf(cfg.departMax, cfg.departMin) - cfg.departMin) * rnd();
+      decide(DEC_DEPART, 0, 0);
+      o.external = true;
+      return o;
+
+    case DEPART: {
+      if (sub == SUB_TURN_STOP) {
+        if (!stopped(in)) return o;
+        const float tmin = cfg.turnMinDeg * D2R, tmax = fmaxf(cfg.turnMaxDeg, cfg.turnMinDeg) * D2R;
+        startPivot(tmin + (tmax - tmin) * rnd(), cfg.goalCW ? -1 : 1);  // goal clockwise: the inside is on the right
+        sub = SUB_TURN;
+        return o;
+      }
+      if (sub == SUB_TURN) {
+        if (pivotStep(in, o)) {
+          state = ROAM;
+          sub = SUB_NONE;
+          armed_ = joinArmed_ = false;
+          dMax_ = rd.valid ? rd.df : 99;
+          o = Output();
+        }
+        return o;
+      }
+      if (!rd.valid) return o;  // lost: stop and wait
+      if (!in.onContacts) departLeft_ -= fabsf(in.v) * in.dt;  // counted off the dock contacts
+      if (departLeft_ <= 0) { sub = SUB_TURN_STOP; stopT_ = 0; return o; }
+      o.external = true;
+      return o;
+    }
+
+    case FAULT:
+      return o;
   }
-  return out(v, w, acc, dt);
+  return o;
 }
 
 }  // namespace rover
