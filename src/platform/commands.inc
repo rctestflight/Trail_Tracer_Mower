@@ -322,7 +322,7 @@ uint8_t configCommandRun(const char* t, bool over_espnow, String& reply){
   // "bin <index> <hz>" (0.5.103): CID 20 to the Rx STM32 as it is: bin index 0-7 to hz (0 = back to the sweep; the Rx
   // STM32 takes 46 800-62 800 Hz and answers the value in effect). The spectrum view puts a spare bin on a cursor
   // frequency. Safe while driving; the wire bin of each sensor is refused. Not saved: no Rx STM32 save, no settings
-  // change; the next DSP set sends dsp_bin_hz again.
+  // change. 0.6.29: it stays through each DSP set until a dsp_bin_hz change or an ESP32 restart (bin_ram_hz).
   {
     int bi = -1;
     float bhz = 0;
@@ -336,6 +336,8 @@ uint8_t configCommandRun(const char* t, bool over_espnow, String& reply){
       for (int sn = 0; sn < 2; sn++)
         if (stmDec.wireBin(sn) == bi) { reply = k + "=Wire bin of sensor " + (sn + 1) + ": not free"; return 4; }
       stmLink.pushFloat(20 | 0x80000000, bhz, (uint8_t)bi);
+      bin_ram_hz[bi] = bhz;
+      bin_ram_mask |= (uint8_t)(1u << bi);
       stm_ans_print_until = millis() + 2000;  // USB shows the answer (STM ans ...)
       if (bhz != 0) { bin_poll_idx = bi; bin_poll_hz = bhz; bin_poll_t0 = millis(); bin_poll_last = 0; }  // 0.5.104
       reply = bhz == 0 ? k + "=sweep" : k + "=" + String((long)lroundf(bhz)) + " Hz";

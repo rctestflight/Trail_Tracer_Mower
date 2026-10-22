@@ -3,6 +3,12 @@
 #pragma once
 
 // Change history
+//   0.6.29: "stm raw" works again: since 0.5.128 the send paths held back the idle mode and CID 42 commands of the
+//     request, so no stream started and every later Rx STM32 command waited until a restart. A request with no
+//     answer in 2 s now ends with a refusal. After the CID 42 frame no byte goes to the Rx STM32 (one byte at the
+//     answer frame edge stopped the stream: 0 packets). The coils of one sensor only: mask 1, 2, 3, 4, 8, 12 (four
+//     coils need 95 % of the stream baud; the Rx STM32 dropped half the packets). The PGA hold ("stm cmd 29") and a
+//     "bin" frequency stay through the DSP set after each stream (it returned them to the settings). tools/rx_usb.py: samples, polarity and bins over USB for the PC.
 //   0.6.28: rover self-audit fixes. No side check in the bounce pivot (a 10 mm radius change flipped the side on noise).
 //     Pivots count the net gyro angle (a sum of |rate| counted noise as turning: short turns). Stopped under 0.25 rad/s
 //     (0.05 rad/s never read stopped on a driving rover). The next bounce arms after 0.5 m of straight drive since a
@@ -253,12 +259,12 @@
 #if defined(OTA_TEST_VERSION)
 #define ROVER_FW_VERSION OTA_TEST_VERSION  // OTA test images (envs ota_a, ota_b, ota_test_crash)
 #elif defined(BENCH_FAKE_IMU)
-#define ROVER_FW_VERSION "0.6.28+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.6.29+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #elif defined(SETTINGS_NEWKEY)
-#define ROVER_FW_VERSION "0.6.28-newkey"  // bench build: one more table line (test_new_setting)
+#define ROVER_FW_VERSION "0.6.29-newkey"  // bench build: one more table line (test_new_setting)
 #elif defined(TELEMETRY_NEWVALUE)
-#define ROVER_FW_VERSION "0.6.28-newvalue"  // bench build: the example lines of include/user_telemetry.h
+#define ROVER_FW_VERSION "0.6.29-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.6.28"
+#define ROVER_FW_VERSION "0.6.29"
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A

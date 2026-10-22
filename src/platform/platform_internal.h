@@ -309,9 +309,15 @@ extern bool bench_timing_print;
 void benchPrintCounters(const char* tag, uint32_t loops, uint32_t min_us, uint32_t max_us);
 extern uint8_t raw_mode;
 extern uint8_t raw_stm_state;
+// 0.6.29: no byte may go to the Rx STM32: command 42 went (state 0xFD: the Rx STM32 ends a stream on any byte, and
+// the Rx UART frame goes at each frame edge, also at the edge of the answer frame) or the stream runs (1, 2). While
+// "stm raw" waits to send (0xFE) the idle mode and CID 42 commands must go out: up to 0.6.28 the send paths tested
+// raw_stm_state != 0, so these commands never went and every later command waited until a restart.
+inline bool rawStreamRuns() { return raw_stm_state == 1 || raw_stm_state == 2 || raw_stm_state == 0xFD; }
 void stmRawStreamCommand(const char* arg);
 void stmRawStreamOnAnswer(const stmv2::Answer& a);
 void rawService();
+void stmRawStreamTimeout();
 void stmRawService();
 extern uint32_t usb_rx_ms;
 void benchSerial();

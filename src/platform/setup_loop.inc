@@ -162,6 +162,7 @@ bool platformLoopStart(){
   webupd::loopService();  // the update page: an upload start, granted in loop() context
   if (stm_rs_phase == RS_RESTART) { mark(SEC_BRIDGE); stmRestartEnter(); return true; }  // command 41 passed: bridge to the boot checker
   if (sf_on) { mark(SEC_BRIDGE); stmFeedLoop(); return true; }  // "stm url": the ESP32 feeds the boot checker; nothing else runs
+  stmRawStreamTimeout();  // 0.6.29: "stm raw" with no answer in 2 s ends
   if (raw_mode) { mark(SEC_BRIDGE); rawService(); return true; }  // raw stream pass-through or rate test: nothing else runs
   if (stm_bridge) { mark(SEC_BRIDGE); stmBridgeService(); return true; }  // STM32 app update through the boot checker: nothing else runs
   if (update_mode) {

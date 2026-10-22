@@ -222,7 +222,7 @@ bool raw_first = true;
 // "stm raw" (Rx STM32 command 42, RAW_STREAM_INTERFACE.md section 4): the packets pass from the first A5 5A to the
 // end packet A5 5B (14 B); bytes before the first sync are dropped (the baud switch), a lost boundary resyncs.
 bool raw_stm = false;           // pass mode for an Rx STM32 stream (packet framing, stop at the end packet)
-uint8_t raw_stm_state = 0;      // 0 wait for the CID 42 answer, 1 before the first sync, 2 in the stream
+uint8_t raw_stm_state = 0;      // 0 off, 0xFE commands to send, 0xFD CID 42 sent, 1 before the first sync, 2 in the stream
 uint16_t raw_pkt_len = 40;      // 8 + 32 x coils
 uint32_t raw_pkt_pos = 0, raw_pkts = 0, raw_resync = 0, raw_presync = 0, raw_cmd_ms = 0, raw_last_rx_ms = 0;
 uint8_t raw_prev = 0;
@@ -278,13 +278,16 @@ void rawStop(){
 }
 // "stm raw <mask> <shift> <seconds> [baud]": Rx STM32 command 42 (idle mode first), then on its answer 1 the UART
 // goes to the stream baud at once (the first packet comes 50 ms after the answer frame) and the stream passes to USB.
+// 0.6.29: the coils of one sensor only (mask 1, 2, 3, 4, 8, 12; RAW_STREAM_INTERFACE.md): four coils need 95 % of
+// the stream baud and the Rx STM32 drops half the packets. Both sensors: two streams, mask 3 then mask 12.
 void stmRawStreamCommand(const char* arg){
   unsigned long mask = 0, shift = 0, sec = 0, baud = 4923077;
   const int n = sscanf(arg, "%lu %lu %lu %lu", &mask, &shift, &sec, &baud);
   int coils = 0;
   for (int i = 0; i < 4; i++) coils += (mask >> i) & 1;
-  if (n < 3 || coils < 1 || coils > 4 || mask > 15 || shift > 9 || sec < 1 || sec > 600 || baud < 115200 || baud > 5000000) {
-    usbOut.println("STM raw usage: stm raw <coil mask 1..15> <shift 0..9> <seconds 1..600> [baud, default 4923077]");
+  const bool one_sensor = mask >= 1 && mask <= 15 && ((mask & 3) == 0 || (mask & 12) == 0);
+  if (n < 3 || !one_sensor || shift > 9 || sec < 1 || sec > 600 || baud < 115200 || baud > 5000000) {
+    usbOut.println("STM raw usage: stm raw <coil mask 1, 2, 3 (sensor 1), 4, 8, 12 (sensor 2)> <shift 0..9> <seconds 1..600> [baud, default 4923077]");
     return;
   }
   if (stm_link_ver != 2) { usbOut.println("STM raw refused: no v2 link to the Rx STM32"); return; }
@@ -303,7 +306,7 @@ void stmRawStreamCommand(const char* arg){
 }
 // One v2 answer (before stmLink.onAnswerV2). Answer 1 to command 42: the UART switches now; nothing more goes out.
 void stmRawStreamOnAnswer(const stmv2::Answer& a){
-  if (raw_stm_state != 0xFE || !a.present || a.cid != (42 | ESP_CID_WRITE)) return;
+  if ((raw_stm_state != 0xFE && raw_stm_state != 0xFD) || !a.present || a.cid != (42 | ESP_CID_WRITE)) return;
   if (a.status != RSP_OK || a.value != 1) {
     raw_stm_state = 0;
     usbOut.printf("STM raw refused by the Rx STM32: status %u value %ld\n", (unsigned)a.status, (long)(int32_t)a.value);
@@ -366,6 +369,14 @@ void rawCommand(const char* arg){
   raw_mode = usb ? 1 : m[0] == 'p' ? 2 : 3;
   raw_t0 = millis();
   raw_end_ms = raw_t0 + sec * 1000;
+}
+// 0.6.29: "stm raw" waits 2 s at most for the Rx STM32 answer to command 42; then it ends with a refusal and the run
+// mode in effect before the request comes back.
+void stmRawStreamTimeout(){
+  if ((raw_stm_state != 0xFE && raw_stm_state != 0xFD) || millis() - raw_cmd_ms < 2000) return;
+  raw_stm_state = 0;
+  usbOut.println("STM raw refused: no answer from the Rx STM32 in 2 s");
+  if (stm_v2_autorun) { stmLink.pushInt(STM_RUN_CMD | 0x80000000, 1); stm_v2_run_ms = millis(); }
 }
 void rawService(){
   if ((int32_t)(millis() - raw_end_ms) >= 0) { rawStop(); return; }
@@ -524,6 +535,7 @@ void stmRawCommand(const char* arg){
     }
     const uint8_t idx = (uint8_t)strtol(e, nullptr, 0);
     if (cid == 13 && w && raw <= 3) stm_v2_lanes = (uint8_t)raw;
+    if (cid == 29 && w) { pga_ram_on = true; pga_ram = (int32_t)raw; }  // 0.6.29: kept through each DSP set (dspApply)
     if (cid == 3 && w) stm_v2_save_ok = true;  // a bench save goes out (a user action), as after a centre calibration
     stm_ans_print_until = millis() + 2000;
     if (dup) {

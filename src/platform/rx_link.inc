@@ -317,6 +317,7 @@ void stmRecoveryService(){
 }
 
 // STM32 UART ISR, triggered by falling edge of nDATA_READY after each full packet
+DRAM_ATTR volatile bool uart_cmd_raw = false;      // 0.6.29: the command frame holds command 42 ("stm raw")
 void IRAM_ATTR receiveStmUart(){
   data_ready++;
   stm_edge_us = (uint32_t)esp_timer_get_time();
@@ -327,13 +328,14 @@ void IRAM_ATTR receiveStmUart(){
   // a raw stream, a restart or "uart off|pause" starts in loop() between two builds.
   const uint32_t isr_ms = (uint32_t)(esp_timer_get_time() / 1000);  // millis() base
   // ... and Rx STM32 frames still run: a boot checker makes edges too, with no frame (no byte may go to it)
-  if (uart_isr_go && (uint32_t)(isr_ms - uart_last_good_ms) < 100 && !raw_mode && !raw_stm_state && !stm_dup_step &&
+  if (uart_isr_go && (uint32_t)(isr_ms - uart_last_good_ms) < 100 && !raw_mode && !rawStreamRuns() && !stm_dup_step &&
       stm_rs_phase != RS_RESTART && !uart_force_old && !(uart_pause_until && (int32_t)(isr_ms - uart_pause_until) < 0)) {
     if (uart_ll_get_txfifo_len(UART_LL_GET_HW(1)) < ESP_UART_FRAME_LEN) {
       uart_isr_fifo++;
     } else if (uart_cmd_ready) {
       uart_ll_write_txfifo(UART_LL_GET_HW(1), uart_cmdf, ESP_UART_FRAME_LEN);
       uart_cmd_ready = false;
+      if (uart_cmd_raw) raw_stm_state = 0xFD;  // 0.6.29: command 42 went: no byte more (one would stop the stream)
       uart_frames++;
     } else if (uart_blk_ok) {
       if (uart_blk_sent) uart_isr_repeat++;
@@ -458,7 +460,7 @@ uint32_t uart_jitter_us = 0, uart_jit_busy = 0;  // 0.5.127 bench test, not in t
 // The frames go only while Rx STM32 frames run (a boot checker also makes edges, with no frame), and never in a raw
 // stream (any byte ends it), the duplicate bench test or a restart into the boot checker.
 bool uartTaskMaySend() {
-  return uartFrameOn() && stm_link_ver == 2 && !raw_mode && !raw_stm_state && !stm_dup_step && stm_rs_phase != RS_RESTART &&
+  return uartFrameOn() && stm_link_ver == 2 && !raw_mode && !rawStreamRuns() && !stm_dup_step && stm_rs_phase != RS_RESTART &&
          (uint32_t)(millis() - uart_last_good_ms) < 100;
 }
 // Build one Rx UART frame into out.
@@ -496,7 +498,7 @@ void uartRefresh() {
     const uint32_t r = uart_pend_raw;
     uart_pend_on = false;
     portEXIT_CRITICAL(&uart_mux);
-    if (have) { uartBuild(uart_cmdf, s, c, i, r); uart_cmd_ready = true; }
+    if (have) { uartBuild(uart_cmdf, s, c, i, r); uart_cmd_raw = c == (42 | ESP_CID_WRITE); uart_cmd_ready = true; }
   }
 }
 // One command to the Rx STM32: with the Rx UART frame it waits in the pending slot for the next frame build; else the
@@ -800,6 +802,13 @@ void polarFrame(){
   if (polar_body_n + 1 + 8 + 40 > (int)sizeof(polar_body) || now - polar_body_ms >= min_ms) polarFlush();
 }
 const char* dsp_apply_reason = "boot";
+// 0.6.29: values set on the bench in Rx STM32 RAM ("stm cmd 29 <v>": the PGA hold; "bin <i> <hz>": a bin frequency)
+// stay through each DSP set (after a raw stream, an Rx STM32 reset), until a change of that setting or an ESP32 restart.
+// Before 0.6.29 the DSP set after each "stm raw" returned them to the settings: a capture series lost its PGA hold.
+bool pga_ram_on = false;
+int32_t pga_ram = -1;
+uint8_t bin_ram_mask = 0;
+float bin_ram_hz[8] = {};
 void dspApply(){
   if (stm_link_ver != 2) return;
   const DeviceConfig& c = g_deviceConfig;
@@ -814,10 +823,10 @@ void dspApply(){
     period_us = periodFloorUs(link_m, c);
   }
   stmLink.pushInt(18 | 0x80000000, period_us);
-  for (int b = 0; b < 8; b++) stmLink.pushFloat(20 | 0x80000000, (float)c.dsp_bin_hz[b], (uint8_t)b);
+  for (int b = 0; b < 8; b++) stmLink.pushFloat(20 | 0x80000000, (bin_ram_mask >> b & 1) ? bin_ram_hz[b] : (float)c.dsp_bin_hz[b], (uint8_t)b);
   stm_v2_lanes = (uint8_t)c.dsp_lanes;
   stmLink.pushInt(13 | 0x80000000, c.dsp_lanes);
-  stmLink.pushInt(29 | 0x80000000, c.dsp_pga);
+  stmLink.pushInt(29 | 0x80000000, pga_ram_on ? pga_ram : c.dsp_pga);
   stmLink.pushInt(25 | 0x80000000, c.dsp_xy_mask);
   // Bin sweep (CID 43 index 0, Rx STM32 2.0.51+; an older app answers unknown CID and sends no sweep page). Sent at
   // each DSP set: the Rx STM32 starts with the sweep on, so "off" must be sent too. Its OK answer sets the page layout
@@ -1077,6 +1086,8 @@ void dspSettingsCheck(const DeviceConfig& cfg){
       || dsp_last.dsp_sweep_bins != cfg.dsp_sweep_bins || dsp_last.dt_channels != cfg.dt_channels
       || dsp_last.rx_regain_wait_ms != cfg.rx_regain_wait_ms || dsp_last.dt_spread_limit_deg != cfg.dt_spread_limit_deg
       || rxThresholdsDiffer(dsp_last, cfg);
+  if (dsp_known && dsp_last.dsp_pga != cfg.dsp_pga) pga_ram_on = false;  // a setting change ends the bench value
+  if (dsp_known && memcmp(dsp_last.dsp_bin_hz, cfg.dsp_bin_hz, sizeof(cfg.dsp_bin_hz))) bin_ram_mask = 0;
   if (dsp_known && dsp_changed) { dsp_apply_reason = "setting change"; dspApply(); }  // the first call (boot) leaves it to stmV2Config
   dsp_last = cfg;
   dsp_known = true;
