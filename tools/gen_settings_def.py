@@ -24,7 +24,7 @@ import re
 import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-VERSION = 14
+VERSION = 15
 TYPES = {'T_TEXT': 'string', 'T_U8': 'int', 'T_I32': 'int', 'T_LONG': 'int', 'T_IBOOL': 'bool', 'T_BOOL': 'bool',
          'T_F32': 'float', 'T_F64': 'float', 'T_CHOICE': 'choice'}
 COLS = ['name', 'field', 'type', 'default', 'min', 'max', 'opts', 'nvs', 'flags', 'unit', 'group', 'label', 'help']

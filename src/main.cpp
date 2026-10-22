@@ -1608,6 +1608,13 @@ void roverStep(){
   if (roverAp.dec.seq != dec_seen) {
     dec_seen = roverAp.dec.seq;
     const rover::Decision& d = roverAp.dec;
+    tlm_set(TLM_rover_dec_seq, (float)(d.seq & 0xFFFFu));
+    tlm_set(TLM_rover_dec_code, (float)d.code);
+    tlm_set(TLM_rover_dec_side, (float)d.side);
+    tlm_set(TLM_rover_dec_psi_deg, d.psiDeg);
+    tlm_set(TLM_rover_dec_turn_deg, d.turnDeg);
+    tlm_set(TLM_rover_fault, (float)roverAp.fault);
+    tlm_set(TLM_rover_dec_d_mm, constrain(d.d * 1000.0f, 0.0f, 65000.0f));
     if (usb_verbose)
       usbOut.printf("ROVER %s %s d=%.2f X=%.2f psi=%.0f turn=%.0f side=%d fault=%d\n", rover::stateName(roverAp.state),
                     rover::decisionName(d.code), d.d, d.X, d.psiDeg, d.turnDeg, d.side, d.reason);

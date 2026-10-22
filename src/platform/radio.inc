@@ -59,7 +59,7 @@ volatile uint32_t sim_dropped_tx = 0, sim_dropped_rx = 0;
 #define ESPNOW_TYPE_CMD     0x10
 #define ESPNOW_TYPE_ACK     0x11
 #define ESPNOW_TYPE_STOP    0x12  // u8 type, u16 seq, u32 fleet key: stop at once (docs/espnow_protocol.md)
-#define SETTINGS_DEF_VERSION 14  // docs/settings_def.json version (14: rover ranges widened, every range from the table (0.6.27); 13: generated from include/settings_table.h by tools/gen_settings_def.py; 6: DSP settings dsp_*, groups for users; 7: servo map, drive_output, vehicle_name, steer_lpf_hz; 8: radio_mode, wifi_ssid, wifi_password; 9: dsp_sweep_bins; 10: dsp_frame_period_us min 2000; 11: min 2336; 12: min 2938)
+#define SETTINGS_DEF_VERSION 15  // docs/settings_def.json version (15: tx_dir default 1 (0.6.28); 14: rover ranges widened, every range from the table (0.6.27); 13: generated from include/settings_table.h by tools/gen_settings_def.py; 6: DSP settings dsp_*, groups for users; 7: servo map, drive_output, vehicle_name, steer_lpf_hz; 8: radio_mode, wifi_ssid, wifi_password; 9: dsp_sweep_bins; 10: dsp_frame_period_us min 2000; 11: min 2336; 12: min 2938)
 #define ESPNOW_TYPE_RESTART 0x7F
 #define ESPNOW_TYPE_MON     0x44  // monitor broadcast, once a second: u8 type, u8 version, u32 monitor ms, u64 PC unix ms (0 = unknown), u8 n
 // The last MON frame (set in the Wi-Fi task, read in loop()).

@@ -46,7 +46,8 @@ enum State : uint8_t { ROAM = 0, RETURN = 1, JOIN = 2, FOLLOW = 3, DEPART = 4, F
 enum Sub : uint8_t { SUB_NONE, SUB_START, SUB_STOP, SUB_CHECK, SUB_PIVOT, SUB_APPROACH, SUB_OPEN, SUB_WAIT, SUB_BSTOP,
                      SUB_BPIVOT, SUB_REVERSE_STOP, SUB_REVERSE, SUB_TURN_STOP, SUB_TURN, SUB_PROBE, SUB_PROBE_STOP, SUB_LEAVE, SUB_LEAVE_STOP, SUB_LEAVE_TURN };
 enum ProbeFor : uint8_t { PROBE_START, PROBE_BOUNCE, PROBE_JOIN };
-enum FaultCode : uint8_t { FAULT_NONE, FAULT_STUCK, FAULT_LOST, FAULT_NO_POLARITY };
+enum FaultCode : uint8_t { FAULT_NONE, FAULT_STUCK, FAULT_LOST, FAULT_NO_POLARITY, FAULT_POL_START };  // POL_START: polarity says
+// outside before the first turn in rover mode (the rover starts inside): the Tx direction setting is the wrong way
 enum DecisionCode : uint8_t { DEC_NONE, DEC_BOUNCE, DEC_CHECK_FLIP, DEC_JOIN, DEC_FOLLOW, DEC_REVERSE, DEC_BEACON,
                               DEC_DOCK, DEC_DEPART, DEC_RETURN, DEC_FAULT, DEC_TX_OFF, DEC_TX_ON, DEC_START,
                               DEC_TURN_BACK, DEC_PROBE };
@@ -162,7 +163,9 @@ class Autopilot {
   uint32_t rng_ = 12345;
   float lostT_ = 0, stopT_ = 0, startT_ = 0;
   // pivot
-  float pivTarget_ = 0, pivTurned_ = 0, pivT_ = 0;
+  float pivTarget_ = 0, pivTurned_ = 0, pivNet_ = 0, pivT_ = 0;
+  float drivenSinceTurn_ = 0;
+  bool startCheck_ = true;      // until the first bounce, join or follow: polarity outside = wrong Tx direction   // m of straight drive since the last bounce, beacon or depart turn
   int8_t pivDir_ = 1;
   // bounce and join plan
   bool armed_ = true, beaconArmed_ = true, joinArmed_ = true;

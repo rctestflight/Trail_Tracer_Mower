@@ -6,7 +6,7 @@ The rover state machine of the agreed design (2026-10-20), with the wire heading
 
 | State | What the rover does |
 |---|---|
-| ROAM | Drives at roam speed; inside the approach distance, at approach speed. At the bounce distance: the fitted heading (probe first when its uncertainty is over the least leave angle), stop, re-acquisition check, pivot (mirror bounce away from the wire, plus a random spread, at least the least leave angle from the wire, the shorter way round). The next bounce arms at the re-arm distance, when the distance falls by the re-arm drop below its highest value since the bounce, or when the fit shows the rover closing on the wire over at least the probe length. A beacon at the beacon bounce distance: stop, pivot 180 deg +- the beacon spread. Polarity says outside: stop, turn round once, no bounce until inside again. A lost signal is normal: drive on. |
+| ROAM | Drives at roam speed; inside the approach distance, at approach speed. At the bounce distance: the fitted heading stop, pivot (mirror bounce away from the wire, plus a random spread, at least the least leave angle from the wire, the shorter way round). The next bounce arms at the re-arm distance, when the distance falls by the re-arm drop below its highest value since the bounce, when the fit shows the rover closing on the wire over at least the probe length, or after 0.5 m of straight drive since the turn. A beacon at the beacon bounce distance: stop, pivot 180 deg +- the beacon spread. Polarity says outside: stop, turn round once, no bounce until inside again. A lost signal is normal: drive on. |
 | RETURN | Return distance driven since the last charge, or the battery under the return voltage: as ROAM; on entry into the approach distance, JOIN. |
 | JOIN | Drive straight to the wire (a lost signal drives on). On the wire (close by the radius, lost right after a close reading, or polarity says outside): stop, turn by the signed fitted heading to point along the wire in the goal direction, FOLLOW. The join also sets the follower's x sign: the wire side on the way in against the Rx x sign, and the sign of y on the wire. Polarity gives inside or outside; without it the join assumes inside or stops (`rover_join_no_pol`). |
 | FOLLOW | The wire follower drives on x with the follower sign (set at the join, refined in steady follow in the goal direction). Wrong direction (polarity direction against the goal, or the exit beacon before the entry beacon): stop, turn 180 deg on the wire, follow on. Lost: stop; after `rover_no_tx_s` one 30 deg turn in place out of the field null. Dock contacts: DOCK. |
@@ -23,13 +23,13 @@ Every straight drive in range feeds two weighted line fits against the distance 
 
 The heading is the larger of the two (a low heading turns too little at a bounce). Each fit carries a curvature term; when it is significant, the heading is the one at the last frame (a straight drive past a curved wire). Distances are signed by the polarity inside fact when known. Left or right: polarity, else the offset sign. Quality: the heading uncertainty from the residual scatter and the distance span.
 
-Probe: a straight drive of `rover_probe_m` on the same line (forward when the distance to the wire is over the probe length, else reverse); the fit with the probe frames then decides.
+Probe: at the start in range, a forward straight drive of `rover_probe_m`, only when the wire is beyond the probe length.
 
 No wire angle from one reading (decision 2026-10-21).
 
-## Re-acquisition check
+## Turns
 
-At each bounce and join, the first 10 deg of the planned pivot is the perturbation; turning toward the wire must bring it closer, so a distance change of more than 10 mm the other way reverses the wire side; polarity (inside x direction), when known, decides the side.
+No side check in the pivot (0.6.28: radius noise flipped the side). Pivots count the net gyro angle. Stopped: speed under 0.02 m/s and yaw rate under 0.25 rad/s, else after 1.5 s.
 
 ## Wiring in main.cpp
 
