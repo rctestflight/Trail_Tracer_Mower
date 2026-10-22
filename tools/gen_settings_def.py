@@ -8,7 +8,7 @@ the table gives its type and default, and the script stops if they differ from t
 wifi_ssid, wifi_password) are not in the table and stay as they are.
 
 Checks: no double name or NVS key, NVS keys of 15 characters at most, each default inside its range. A range of the
-table that differs from the app range of the file is listed as NOTE (the firmware range is the table's).
+table is the app range (0.6.26: the app keeps no range of its own).
 
 Usage (repository root):
     python tools/gen_settings_def.py                 write docs/settings_def.json
@@ -24,7 +24,7 @@ import re
 import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-VERSION = 13
+VERSION = 14
 TYPES = {'T_TEXT': 'string', 'T_U8': 'int', 'T_I32': 'int', 'T_LONG': 'int', 'T_IBOOL': 'bool', 'T_BOOL': 'bool',
          'T_F32': 'float', 'T_F64': 'float', 'T_CHOICE': 'choice'}
 COLS = ['name', 'field', 'type', 'default', 'min', 'max', 'opts', 'nvs', 'flags', 'unit', 'group', 'label', 'help']
@@ -185,12 +185,15 @@ def generate(defines):
         if d != old.get('default') or type(d) is not type(old.get('default')):
             sys.exit(f"{key}: table default {d!r}, settings_def.json default {old.get('default')!r}")
         ent['type'], ent['default'] = t, d
-        lo, hi = app_range(e)
-        for k, v in (('min', lo), ('max', hi)):
-            if k in old and (v is None or not math.isclose(v, old[k])):
-                notes.append(f"NOTE {key}: firmware {k} {v}, app {k} {old[k]} (the app value stays)")
-            elif k not in old and v is not None and 'values' not in old and 'choices' not in old and t in ('int', 'float'):
-                notes.append(f"NOTE {key}: firmware {k} {v}, no app {k}")
+        # The range is the firmware's (0.6.26, operator): the app, the settings page and the programmer take it from
+        # this file, so no other program keeps its own range.
+        if t in ('int', 'float') and 'values' not in old and 'choices' not in old:
+            lo, hi = app_range(e)
+            for k, v in (('min', lo), ('max', hi)):
+                if v is None:
+                    ent.pop(k, None)
+                else:
+                    ent[k] = int(v) if t == 'int' else v
         settings[key] = ent
     for key, e in table.items():  # new keys: every word from the table line
         if key in base['settings']:

@@ -3,6 +3,10 @@
 #pragma once
 
 // Change history
+//   0.6.27: settings: a number out of range takes the nearest limit (was: the default), with a note "limit". Rover ranges
+//     widened to what the code and the geometry allow (rover_bounce_min_deg up to 90, spreads up to 180, distances and
+//     speeds for large loops and vehicles). The settings definition takes every range from the firmware table: the
+//     app, the settings page and the programmer keep no range of their own. Settings definition version 14.
 //   0.6.26: the approach fit restarts only on a commanded turn, not on gyro readings over 0.05 rad/s: a real rover in
 //     straight drive reads several deg/s, so the fit never formed and every bounce took the wire as square-on.
 //   0.6.25: the Rx describes itself: the build puts its telemetry_def.json and settings_def.json, gzipped, into the
@@ -242,12 +246,12 @@
 #if defined(OTA_TEST_VERSION)
 #define ROVER_FW_VERSION OTA_TEST_VERSION  // OTA test images (envs ota_a, ota_b, ota_test_crash)
 #elif defined(BENCH_FAKE_IMU)
-#define ROVER_FW_VERSION "0.6.26+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.6.27+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #elif defined(SETTINGS_NEWKEY)
-#define ROVER_FW_VERSION "0.6.26-newkey"  // bench build: one more table line (test_new_setting)
+#define ROVER_FW_VERSION "0.6.27-newkey"  // bench build: one more table line (test_new_setting)
 #elif defined(TELEMETRY_NEWVALUE)
-#define ROVER_FW_VERSION "0.6.26-newvalue"  // bench build: the example lines of include/user_telemetry.h
+#define ROVER_FW_VERSION "0.6.27-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.6.26"
+#define ROVER_FW_VERSION "0.6.27"
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A

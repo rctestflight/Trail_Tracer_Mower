@@ -377,7 +377,7 @@ static void put_value(JsonVariant v, const SettingDef& e, const DeviceConfig& c)
 }
 
 // Values that took their default, for the USB port and the log (msc_fat_bad_value_pop). Oldest dropped when full.
-struct BadNote { uint8_t idx, src; char val[26]; };
+struct BadNote { uint8_t idx, src; bool clamped; double lim; char val[26]; };  // clamped: set to limit lim, not the default
 static BadNote s_bad[8];
 static uint8_t s_bad_head = 0, s_bad_n = 0;
 static bool    s_bad_quiet = false;  // a trial set on a copy: no note
@@ -393,6 +393,23 @@ static void note_bad(DeviceConfig& c, int idx, const char* val, uint8_t src)
     s_bad_n++;
     b.idx = (uint8_t)idx;
     b.src = src;
+    b.clamped = false;
+    snprintf(b.val, sizeof(b.val), "%s", val);
+}
+
+// 0.6.26: a number out of range takes the nearest limit (a user who asks for more gets the most the setting allows),
+// with a note; a value of the wrong type still takes the default.
+static void note_clamped(DeviceConfig& c, int idx, const char* val, uint8_t src, double lim)
+{
+    num_set(c, SETTINGS[idx], lim);
+    if (s_bad_quiet) return;
+    if (s_bad_n == 8) { s_bad_head = (s_bad_head + 1) % 8; s_bad_n--; }
+    BadNote& b = s_bad[(s_bad_head + s_bad_n) % 8];
+    s_bad_n++;
+    b.idx = (uint8_t)idx;
+    b.src = src;
+    b.clamped = true;
+    b.lim = lim;
     snprintf(b.val, sizeof(b.val), "%s", val);
 }
 
@@ -407,13 +424,14 @@ bool msc_fat_bad_value_pop(char* line, size_t cap, int* source)
     DeviceConfig* tmp = (DeviceConfig*)calloc(1, sizeof(DeviceConfig));
     char def[40] = "?";
     if (tmp) {
-        set_default(*tmp, e);
+        if (b.clamped) num_set(*tmp, e, b.lim);  // the limit now in force
+        else set_default(*tmp, e);
         put_value(d.to<JsonVariant>(), e, *tmp);
         serializeJson(d, def, sizeof(def));
         free(tmp);
     }
     static const char* const SRC[] = {"config.json", "NVS", "set", "save"};
-    snprintf(line, cap, "%s=%s from %s: default %s", e.name, b.val, SRC[b.src & 3], def);
+    snprintf(line, cap, "%s=%s from %s: %s %s", e.name, b.val, SRC[b.src & 3], b.clamped ? "limit" : "default", def);
     *source = b.src;
     return true;
 }
@@ -1052,8 +1070,8 @@ static bool config_read_json(DeviceConfig& c)
     return config_from_json_text(c, json_no_comments);
 }
 
-// One value for one table key (config.json, or a set). A value of the wrong type or out of range takes the
-// key's default, with a note. false: a bad value.
+// One value for one table key (config.json, or a set). A number out of range takes the nearest limit, a value of the
+// wrong type the key's default, each with a note. false: a bad value (default taken).
 static bool json_read_one(DeviceConfig& c, int i, JsonVariantConst v, uint8_t src)
 {
     const SettingDef& e = SETTINGS[i];
@@ -1089,6 +1107,10 @@ static bool json_read_one(DeviceConfig& c, int i, JsonVariantConst v, uint8_t sr
     if (num_ok && in_range(e, num)) { num_set(c, e, num); return true; }
     char txt[26];
     serializeJson(v, txt, sizeof(txt));
+    if (num_ok && isfinite(num) && e.type != T_CHOICE) {
+        const double lim = (!isnan(e.lo) && num < e.lo) ? e.lo : e.hi;
+        if (!isnan(lim)) { note_clamped(c, i, txt, src, lim); return true; }
+    }
     note_bad(c, i, txt, src);
     return false;
 }
