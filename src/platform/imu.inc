@@ -20,6 +20,7 @@ bool gyro_ready = false;
 void mpuReport(bool ok, unsigned status);  // main-branch MPU messages through the USB text queue and the log
 uint32_t gyro_sample_ms = 0;
 static uint8_t imu_reg_gyro = 0, imu_reg_acc = 0, imu_reg_id = 0;  // GYRO_CONFIG, ACCEL_CONFIG, WHO_AM_I after start
+static uint16_t imu_gyro_range = 500;  // deg/s full scale that the gyro scale uses (0.6.31: from the read-back)
 
 // Take one calibration sample per loop, leaving STM32 packet handling active.
 // Keep the sensor stationary until the calibration-complete message appears.
@@ -47,6 +48,11 @@ void serviceMpu() {
     imu_reg_gyro = mpu.readData(0x1B);
     imu_reg_acc = mpu.readData(0x1C);
     imu_reg_id = mpu.readData(0x75);
+    // 0.6.31: the library scale follows the range the chip reports, so a range write that the chip dropped no longer
+    // scales the turn. A value with bits outside the range field (a failed read) keeps the written range.
+    if ((imu_reg_gyro & ~0x18) == 0 && imu_reg_gyro != 0x08) mpu.setGyroConfig(imu_reg_gyro >> 3);
+    if ((imu_reg_acc & ~0x18) == 0 && imu_reg_acc != 0x00) mpu.setAccConfig(imu_reg_acc >> 3);
+    imu_gyro_range = ((imu_reg_gyro & ~0x18) == 0) ? (250 << (imu_reg_gyro >> 3)) : 500;
     mpu.setGyroOffsets(0, 0, 0);
     mpu.setAccOffsets(0, 0, 0);
     started_ms = millis();
@@ -94,7 +100,7 @@ void mpuReport(bool ok, unsigned status){
     char t[64];  // want gyro 0x08 (+-500 deg/s), acc 0x00 (+-2 g); id 0x68 for an MPU6050
     snprintf(t, sizeof(t), "offsets set; gyro reg 0x%02x acc reg 0x%02x id 0x%02x", imu_reg_gyro, imu_reg_acc, imu_reg_id);
     usbOut.println(t);
-    telemetryEvent(rec::EV_IMU, 2, 500, t);
+    telemetryEvent(rec::EV_IMU, 2, imu_gyro_range, t);
   } else {
     usbOut.printf("MPU6050 init failed: %u; sensor disabled, motors stay locked%c", status, 10);
     telemetryEvent(rec::EV_IMU, 0, 0, "absent: no gyro, motors stay locked");

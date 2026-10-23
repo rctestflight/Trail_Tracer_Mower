@@ -3,6 +3,8 @@
 #pragma once
 
 // Change history
+//   0.6.31: the gyro and accelerometer scales follow the ranges that the IMU reports after the start. A range write
+//     that the chip dropped no longer changes the turn angle. The imu event b gives the gyro range in use (deg/s).
 //   0.6.30: each setting that config.json changes (an edit on the USB drive, or at the start a file that differs from
 //     NVS) gives one USB line "SETTING changed" and one log event (setting, a 0, b 2), "config.json: <key> <old> ->
 //     <new>". Before, a value inside its range changed with no trace in the log. IMU: the gyro and accelerometer ranges
@@ -264,12 +266,12 @@
 #if defined(OTA_TEST_VERSION)
 #define ROVER_FW_VERSION OTA_TEST_VERSION  // OTA test images (envs ota_a, ota_b, ota_test_crash)
 #elif defined(BENCH_FAKE_IMU)
-#define ROVER_FW_VERSION "0.6.30+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.6.31+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #elif defined(SETTINGS_NEWKEY)
-#define ROVER_FW_VERSION "0.6.30-newkey"  // bench build: one more table line (test_new_setting)
+#define ROVER_FW_VERSION "0.6.31-newkey"  // bench build: one more table line (test_new_setting)
 #elif defined(TELEMETRY_NEWVALUE)
-#define ROVER_FW_VERSION "0.6.30-newvalue"  // bench build: the example lines of include/user_telemetry.h
+#define ROVER_FW_VERSION "0.6.31-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.6.30"
+#define ROVER_FW_VERSION "0.6.31"
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
