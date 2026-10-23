@@ -78,6 +78,11 @@ enum EventCode : uint16_t {
   EV_PREV_BOOT = 14,  // boot: the state before the reset. a reset reason (esp_reset_reason), b uptime ms, text stage, mode, heap
   EV_STM32 = 15,      // power-on STM32 handshake: a 1 HELLO answered (text: its payload in hex) 0 no answer, b payload bytes
   EV_TIME = 16,       // PC time from a monitor (MON 0x44): a unix seconds, b millis() at that time, text unix ms
+  // 17 to 20: see the event names in include/telemetry_table.h
+  EV_SETTINGS = 21,        // all settings ("list" lines), at boot and each 10 min: a part (0..), b part count, text
+                           // "key=value key=value ..." (values as "list" prints them: text in quotes)
+  EV_SETTING_CHANGE = 22,  // a setting changed (any source: app, USB, config.json, Rx STM32 effective value): a the
+                           // "list" index, text "key old -> new"
   EV_MONITOR = 17,    // a monitor heard (a 1) or no MON frame for 5 s (a 0); text its MAC
   EV_WIFI = 19,       // radio_mode "wifi" (lib/wifi_telem): a 1 associated (b RSSI dBm), 2 association lost, 3 server address
                       // learned (b port), 4 no server in 30 s (b 30); text SSID, IP, server. Never the password

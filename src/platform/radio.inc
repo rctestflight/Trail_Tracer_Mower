@@ -83,7 +83,13 @@ uint16_t espnow_busy_seq = 0;
 volatile uint8_t espnow_restart_request = 0;  // 1 normal restart, 2 restart into ROM download mode
 volatile int espnow_list_index = -1;          // >= 0 while a "list" answer is in progress
 bool espnow_list_saved = false;               // 0.6.15: the answer in progress is "list saved"
-DeviceConfig g_saved_config;                  // 0.6.15: the settings of the next start, loaded at each "list saved"
+DeviceConfig* g_saved_config = nullptr;       // 0.6.15: the settings of the next start, loaded at each "list saved"
+                                              // (0.6.33: from the heap at the first "list saved"; static RAM is full)
+DeviceConfig* savedConfigLoad(){
+  if (!g_saved_config) g_saved_config = new (std::nothrow) DeviceConfig();
+  if (g_saved_config) msc_fat_saved_config(g_saved_config);
+  return g_saved_config;
+}
 volatile bool espnow_stop_request = false;    // STOP frame received; loop() stops at its next pass
 uint8_t espnow_stop_mac[6];
 uint16_t espnow_stop_seq = 0;

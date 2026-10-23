@@ -59,6 +59,7 @@ const char* decisionName(DecisionCode c) {
     case DEC_START: return "start";
     case DEC_TURN_BACK: return "turn-back";
     case DEC_PROBE: return "probe";
+    case DEC_FOLLOW_END: return "follow-end";
   }
   return "?";
 }
@@ -75,6 +76,7 @@ void Autopilot::reset() {
   turnBacks_ = 0;
   pivTarget_ = pivTurned_ = pivT_ = 0;
   run_ = departLeft_ = reverseArm_ = 0;
+  roamT_ = followT_ = 0;
   wrongCount_ = 0;
   entrySeen_ = false;
   exitArmed_ = true;
@@ -362,6 +364,10 @@ Output Autopilot::stepStates(const Inputs& in) {
       // setting is the wrong way round (a silent inversion would bounce it out of the loop)
       if (startCheck_ && in.inside < 0) { toFault(FAULT_POL_START); return Output(); }
       if ((cfg.followOnly || in.needCharge) && state == ROAM) { state = RETURN; decide(DEC_RETURN, 0, 0); }
+      if (state == ROAM && timed()) {
+        roamT_ += in.dt;
+        if (roamT_ >= cfg.roamTimeS) { state = RETURN; followT_ = 0; decide(DEC_RETURN, 0, 0); }
+      }
       // Beacon re-arm: past the beacon re-arm distance
       if (!beaconArmed_ && in.beaconRange > cfg.beaconRearm) beaconArmed_ = true;
       switch (sub) {
@@ -534,6 +540,17 @@ Output Autopilot::stepStates(const Inputs& in) {
           return o;
         }
       }
+      // Timed roam and follow: the follow time is up (a charge return follows on to the dock)
+      if (timed() && !in.needCharge) {
+        followT_ += in.dt;
+        if (followT_ >= cfg.followTimeS) {
+          decide(DEC_FOLLOW_END, 0, 0);
+          state = DEPART;
+          sub = SUB_TURN_STOP;
+          stopT_ = 0;
+          return o;
+        }
+      }
       o.external = true;
       return o;
     }
@@ -541,6 +558,7 @@ Output Autopilot::stepStates(const Inputs& in) {
     case DOCK:
       if (in.docked) return o;
       charges++;
+      roamT_ = followT_ = 0;  // timed roam and follow: both times start again after a charge
       if (cfg.followOnly) { state = FOLLOW; sub = SUB_NONE; reverseArm_ = REVERSE_ARM; o.external = true; return o; }
       if (dockFrom_ == ROAM || dockFrom_ == RETURN) { state = dockFrom_; sub = SUB_NONE; return o; }  // not a wire dock
       state = DEPART;
@@ -562,6 +580,7 @@ Output Autopilot::stepStates(const Inputs& in) {
         if (pivotStep(in, o)) {
           state = ROAM;
           sub = SUB_NONE;
+          roamT_ = followT_ = 0;
           armed_ = joinArmed_ = false;
           dMax_ = rd.valid ? rd.df : 99;
           drivenSinceTurn_ = 0;

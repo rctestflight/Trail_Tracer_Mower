@@ -23,6 +23,10 @@ for f in flags:
     cmd += ["-D", f]
 if subprocess.run(cmd).returncode:
     env.Exit(1)  # noqa: F821
+# 0.6.32: a build with no SETTINGS_* flag also writes docs/settings_def.json, so the committed copy follows the table
+# (the one source of defaults) after each build; git shows the change for the next commit.
+if not flags and subprocess.run([sys.executable, os.path.join(proj, "tools", "gen_settings_def.py"), "--quiet"]).returncode:
+    env.Exit(1)  # noqa: F821
 tlm_path = os.path.join(build, "telemetry_def.json")
 
 

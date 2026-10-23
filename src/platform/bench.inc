@@ -380,7 +380,10 @@ void stmRawStreamTimeout(){
 }
 void rawService(){
   if ((int32_t)(millis() - raw_end_ms) >= 0) { rawStop(); return; }
-  static uint8_t b[512];
+  // 0.6.33: from the heap at the first raw stream (static RAM is full); kept for later streams
+  static const size_t RAW_B = 512;
+  static uint8_t* b = nullptr;
+  if (!b && !(b = (uint8_t*)malloc(RAW_B))) { rawStop(); return; }
   // Any USB input stops the stream early (the RAW end line then says stop=usb). An Rx STM32 stream gets one byte (it
   // ends its stream on any byte) and ends as at its time: at the end packet, or after 500 ms with no byte. The other
   // raw modes stop at once. No text goes out before the end lines: it would mix with the stream bytes.
@@ -401,28 +404,28 @@ void rawService(){
       if (off == 0) {
         memcpy(b, "RAWU", 4);
         memcpy(b + 4, &raw_seq, 4);
-        for (int k = 8; k < (int)sizeof(b); k++) b[k] = (uint8_t)(raw_seq + k);
+        for (int k = 8; k < (int)RAW_B; k++) b[k] = (uint8_t)(raw_seq + k);
       }
       const int room = Serial.availableForWrite();
       if (room <= 0) break;
-      const size_t n = (size_t)room < sizeof(b) - off ? (size_t)room : sizeof(b) - off;
+      const size_t n = (size_t)room < RAW_B - off ? (size_t)room : RAW_B - off;
       const size_t w = Serial.write(b + off, n);
       raw_out += w;
       off += w;
-      if (off >= sizeof(b)) { off = 0; raw_seq++; }
+      if (off >= RAW_B) { off = 0; raw_seq++; }
       if (w < n) break;
     }
     return;
   }
   if (raw_mode == 3) {  // loopback: keep the transmitter busy with the counter pattern
     int room = Serial1.availableForWrite();
-    if (room > (int)sizeof(b)) room = sizeof(b);
+    if (room > (int)RAW_B) room = RAW_B;
     for (int k = 0; k < room; k++) b[k] = raw_tx++;
     if (room > 0) Serial1.write(b, room);
   }
   int avail = Serial1.available();
   while (avail > 0) {
-    const size_t k = Serial1.read(b, avail < (int)sizeof(b) ? (size_t)avail : sizeof(b));
+    const size_t k = Serial1.read(b, avail < (int)RAW_B ? (size_t)avail : RAW_B);
     if (k == 0) break;
     raw_in += k;
     avail -= (int)k;
@@ -692,13 +695,18 @@ void stmRawCommand(const char* arg){
 
 uint32_t usb_rx_ms = 0;  // 0.5.104: the last USB input byte (EV_USB "no input")
 void benchSerial(){
-  static char line[1200];  // "ota w <offset> <hex of up to 512 bytes>" fits
+  // "ota w <offset> <hex of up to 512 bytes>" fits. 0.6.33: from the heap at the first USB byte (static RAM is full;
+  // a rover with no USB host never needs it).
+  static const uint16_t LINE_N = 1200;
+  static char* line = nullptr;
   static uint16_t n = 0;
-  if (Serial.available()) usb_rx_ms = millis();
+  if (!Serial.available()) return;
+  usb_rx_ms = millis();
+  if (!line && !(line = (char*)calloc(LINE_N, 1))) return;
   while (Serial.available()) {
     const char c = (char)Serial.read();
     if (c != '\n' && c != '\r') {
-      if (n < sizeof(line) - 1) line[n++] = c;
+      if (n < LINE_N - 1) line[n++] = c;
       continue;
     }
     if (n == 0) continue;
@@ -861,8 +869,10 @@ void benchSerial(){
       const uint32_t per = (rt_t0 && frames > rt_f0) ? (uint32_t)((now - rt_t0) / (frames - rt_f0))
                                                      : (isfinite(eff) && eff > 0 ? (uint32_t)eff : 10000u);
       rt_t0 = now; rt_f0 = frames;
-      static char b[1100];
-      rtprof::report(b, sizeof(b), SEC_NAMES, SEC_N, per);
+      std::unique_ptr<char[]> bp(new (std::nothrow) char[1100]);  // 0.6.33: heap for this report only
+      if (!bp) { usbOut.println("RT refused: no heap"); continue; }
+      char* const b = bp.get();
+      rtprof::report(b, 1100, SEC_NAMES, SEC_N, per);
       static uint32_t rt_sent0 = 0, rt_writes0 = 0, rt_retries0 = 0;
       const stmset::Counters& lc = stmLink.counters();
       usbOut.printf("%s | waits=%lu catchup=%lu usb_stalls=%lu usb_reconnects=%lu stm_cmds=%lu stm_writes=%lu stm_retries=%lu%c", b,
@@ -897,8 +907,10 @@ void benchSerial(){
                     rt_bench_n ? rt_ans_cyc / mhz / rt_bench_n : 0.0, rt_bench_n ? rt_post_cyc / mhz / rt_bench_n : 0.0);
       rt_read_cyc = rt_dec_cyc = rt_ans_cyc = rt_post_cyc = 0; rt_read_max = rt_dec_max = 0; rt_bench_n = 0;
       if (rt_last_ok) {
-        static stmv2::Decoder d2;
-        d2 = stmDec;  // same calibration and lanes; its counters do not touch the live decoder
+        // Same calibration and lanes; its counters do not touch the live decoder. 0.6.33: heap for this bench only
+        std::unique_ptr<stmv2::Decoder> d2p(new (std::nothrow) stmv2::Decoder(stmDec));
+        if (!d2p) { usbOut.println("RTBENCH refused: no heap"); continue; }
+        stmv2::Decoder& d2 = *d2p;
         static __StmTxPacketStruct it;
         static stmv2::Answer an;
         uint32_t mx = 0; uint64_t sum = 0;
@@ -956,7 +968,7 @@ void benchSerial(){
         (unsigned long)stmDec.st.ver_err, (unsigned long)stmDec.st.seq_lost, (unsigned long)c.refused, (unsigned long)c.stm_resets);
     } else if (!strcmp(line, "wifi") || !strncmp(line, "wifi ", 5)) {
       wifiUsbCommand(line);  // never echoes the line: it can hold the password
-      memset(line, 0, sizeof(line));  // and the line buffer keeps no copy of it
+      memset(line, 0, LINE_N);  // and the line buffer keeps no copy of it
     } else if (!strcmp(line, "list")) {
       String kv;
       int n_keys = 0;
@@ -967,10 +979,10 @@ void benchSerial(){
       usbOut.printf("CFG 0 end %d def %d\n", n_keys, SETTINGS_DEF_VERSION);  // key count; settings_def.json version
     } else if (!strcmp(line, "list saved")) {
       // 0.6.15: each setting with the value it takes at the next start (stored, else the default)
-      msc_fat_saved_config(&g_saved_config);
+      const DeviceConfig* saved = savedConfigLoad();
       String kv;
       int n_keys = 0;
-      for (; msc_fat_key_pair_at(&g_deviceConfig, &g_saved_config, n_keys, &kv); n_keys++) {
+      for (; saved && msc_fat_key_pair_at(&g_deviceConfig, saved, n_keys, &kv); n_keys++) {
         if (usbOut.room() < 200) usbOut.drain(100);
         usbOut.printf("CFG 0 %s\n", kv.c_str());
       }

@@ -1444,6 +1444,8 @@ void applyDeviceConfig(const DeviceConfig& cfg)
   rc.turnMinDeg               = cfg.rover_turn_min_deg;
   rc.turnMaxDeg               = cfg.rover_turn_max_deg;
   rc.probeLength              = cfg.rover_probe_m;
+  rc.roamTimeS                = cfg.rover_roam_time_s;
+  rc.followTimeS              = cfg.rover_follow_time_s;
   rc.noTxRoamS                = cfg.rover_no_tx_roam_s;
   rc.noTxS                    = cfg.rover_no_tx_s;
   rc.lostTimeout              = (float)cfg.rover_lost_timeout_s;

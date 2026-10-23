@@ -3,6 +3,21 @@
 #pragma once
 
 // Change history
+//   0.6.33: settings in the log. At the start and each 10 min, every "list" line goes into the log as setting dump
+//     events (21 settings, about 3 s of parts); each change from any source (app, USB, config.json, the button, the
+//     DSP values the Rx STM32 reports) gives one event (22 setting_change) "key old -> new". The fleet key and the
+//     Wi-Fi password give only "set". Sensor 2 wire radius in the log (s2_radius_mm, with enable_sensor_2 on).
+//     Rover mode: timed roam and follow (rover_roam_time_s 60 s, rover_follow_time_s 30 s; 0 = off): roam for the
+//     roam time, then find the wire, join it and follow it for the follow time, then stop, turn inward by a random
+//     angle and roam again. A charge return comes first. New decision 16 follow time end.
+//     Static RAM: 11 KB more free (bench, "list saved" and Monitor Rx report buffers now come from the heap only
+//     while in use; the static region had about 100 B free).
+//   0.6.32: new defaults for the true gyro rate (7bd3d9e): steering rate kp 0.01 (was 0.005), bounce spread 90
+//     deg (was 45), bounce minimum 65 deg (was 35), roam stop after no Tx signal 20 s (was 60). A value saved on the
+//     rover stays. include/settings_table.h is the one source of defaults: a build no longer stops when
+//     docs/settings_def.json has another default; it writes the table's default into that file.
+//     The start-check fault (polarity says outside, the Tx direction setting the wrong way) has its own halted text;
+//     before, it read "fault: wire lost too long".
 //   0.6.31: the gyro and accelerometer scales follow the ranges that the IMU reports after the start. A range write
 //     that the chip dropped no longer changes the turn angle. The imu event b gives the gyro range in use (deg/s).
 //   0.6.30: each setting that config.json changes (an edit on the USB drive, or at the start a file that differs from
@@ -266,12 +281,12 @@
 #if defined(OTA_TEST_VERSION)
 #define ROVER_FW_VERSION OTA_TEST_VERSION  // OTA test images (envs ota_a, ota_b, ota_test_crash)
 #elif defined(BENCH_FAKE_IMU)
-#define ROVER_FW_VERSION "0.6.31+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.6.33+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #elif defined(SETTINGS_NEWKEY)
-#define ROVER_FW_VERSION "0.6.31-newkey"  // bench build: one more table line (test_new_setting)
+#define ROVER_FW_VERSION "0.6.33-newkey"  // bench build: one more table line (test_new_setting)
 #elif defined(TELEMETRY_NEWVALUE)
-#define ROVER_FW_VERSION "0.6.31-newvalue"  // bench build: the example lines of include/user_telemetry.h
+#define ROVER_FW_VERSION "0.6.33-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.6.31"
+#define ROVER_FW_VERSION "0.6.33"
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A

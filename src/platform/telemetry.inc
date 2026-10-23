@@ -269,6 +269,7 @@ void telemetrySample(){
       && !WFRX_STATUS_GET_BIT(sb, WFRX_STATUS_S2_SIGNAL_DISABLED);
   s.x2_mm = s2_on ? stmPacket.items.s2_x : NAN;
   s.y2_mm = s2_on ? stmPacket.items.s2_y : NAN;
+  tlm_set(TLM_s2_radius_mm, s2_on && stmPacket.items.s2_radius > 0.0f ? stmPacket.items.s2_radius : NAN);
   for (int k = 0; k < 2; k++) {
     s.enc_pos[k] = (int32_t)lroundf(odrive_pos_rev[k] * 10000.0f);
     const uint32_t age = now - odrive_vel_millis[k];
@@ -394,7 +395,9 @@ void telemetryEvents(){
   const bool halted = rover_active && roverAp.state == rover::FAULT;
   if (halted && !telem_last_halted) {
     telemetryEvent(rec::EV_HALTED, roverAp.fault, 0, roverAp.fault == rover::FAULT_STUCK ? "fault: stuck"
-                   : roverAp.fault == rover::FAULT_NO_POLARITY ? "fault: no polarity at join" : "fault: wire lost too long");
+                   : roverAp.fault == rover::FAULT_NO_POLARITY ? "fault: no polarity at join"
+                   : roverAp.fault == rover::FAULT_POL_START ? "fault: polarity says outside at start: Tx direction"
+                   : "fault: wire lost too long");  // 0.6.32: the start check had the "wire lost" text
   }
   telem_last_halted = halted;
   for (int n = 0; n < ODRIVE_NODE_COUNT; n++) {
@@ -467,8 +470,122 @@ void telemetryDumpStep(){
   }
 }
 
+// 0.6.33 settings in the log. EV_SETTINGS: every "list" line at boot and each 10 min, as "key=value key=value ..."
+// cut into parts of the event text size (a = dump number << 16 | part, b = part count; the parts joined in order
+// give the lines; a value is JSON, so a text value is in quotes and can hold spaces). EV_SETTING_CHANGE: each line
+// that differs from the last logged state, from any source (app, USB, config.json, the DSP values the Rx STM32
+// reports): a = "list" index, b = 0 and text "key old -> new"; a longer text goes as b = 1 "key old", b = 2 "key new".
+// The fleet key (cmd_key) and the Wi-Fi password give only "set" or not (msc_fat_each_line).
+// The state is on the heap (static RAM is full): one pointer here.
+struct TelemSettings {
+  String* lines = nullptr;  // the last logged state: "key=value\n" for each "list" line
+  DeviceConfig cfg;         // the settings and DSP values of that state: a difference triggers a check
+  double eff[DSP_EFF_N];
+  uint32_t dump_ms = 0, check_ms = 0, full_ms = 0, part_ms = 0;
+  int dump_pos = -1, dump_part = 0, dump_parts = 0;
+  uint16_t dump_no = 0;
+};
+static TelemSettings* telem_set = nullptr;
+static const uint32_t SET_DUMP_MS = 600000, SET_FULL_MS = 60000, SET_CHECK_MS = 200, SET_PART_MS = 50;
+
+static void settingsLineAdd(void* ctx, int, const char* key, const char* value){
+  String& s = *(String*)ctx;
+  s += key; s += '='; s += value; s += '\n';
+}
+
+// Line i of "key=value\n" text: start and length (no newline); false past the end.
+static bool settingsLine(const String& s, int& pos, int& len){
+  if (pos >= (int)s.length()) return false;
+  const int nl = s.indexOf('\n', pos);
+  len = (nl < 0 ? (int)s.length() : nl) - pos;
+  return true;
+}
+
+// Build the lines now; log a change event for each line that differs from the last logged state; keep the new state.
+static void settingsCheck(){
+  String* now = new String();
+  now->reserve(telem_set->lines ? telem_set->lines->length() + 64 : 4096);
+  msc_fat_each_line(&g_deviceConfig, settingsLineAdd, now);
+  memcpy(&telem_set->cfg, &g_deviceConfig, sizeof(DeviceConfig));
+  memcpy(telem_set->eff, g_dsp_eff, sizeof(telem_set->eff));
+  if (telem_set->lines && *telem_set->lines != *now) {
+    int po = 0, pn = 0, lo = 0, ln = 0, idx = 0;
+    while (settingsLine(*now, pn, ln)) {
+      const String line = now->substring(pn, pn + ln);
+      const int eq = line.indexOf('=');
+      const String key = line.substring(0, eq);
+      // The old line with this key: the same index when the key list is the same, else a search
+      String old;
+      if (settingsLine(*telem_set->lines, po, lo) && telem_set->lines->substring(po, po + eq + 1) == key + "=")
+        old = telem_set->lines->substring(po + eq + 1, po + lo);
+      else {
+        const int k = telem_set->lines->startsWith(key + "=") ? 0 : telem_set->lines->indexOf("\n" + key + "=");
+        if (k >= 0) {
+          const int vs = k + (k ? 1 : 0) + key.length() + 1, ve = telem_set->lines->indexOf('\n', vs);
+          old = telem_set->lines->substring(vs, ve < 0 ? telem_set->lines->length() : ve);
+        } else old = "(none)";
+      }
+      const String val = line.substring(eq + 1);
+      if (old != val) {
+        const String text = key + " " + old + " -> " + val;
+        if ((int)text.length() <= rec::EVENT_MAX - 11) telemetryEvent(rec::EV_SETTING_CHANGE, idx, 0, text.c_str());
+        else {
+          telemetryEvent(rec::EV_SETTING_CHANGE, idx, 1, (key + " " + old).c_str());
+          telemetryEvent(rec::EV_SETTING_CHANGE, idx, 2, (key + " " + val).c_str());
+        }
+      }
+      pn += ln + 1;
+      if (po < (int)telem_set->lines->length()) po += lo + 1;
+      idx++;
+    }
+    if (telem_set->dump_pos >= 0) telem_set->dump_ms = 0;  // a dump in progress starts again with the new state
+  }
+  delete telem_set->lines;
+  telem_set->lines = now;
+}
+
+static void telemetrySettingsStep(){
+  if (safe_mode) return;
+  const uint32_t ms = millis();
+  if (!telem_set) {  // first pass after boot: the state, then the first dump
+    telem_set = new TelemSettings();
+    settingsCheck();
+    telem_set->full_ms = ms;
+    telem_set->dump_ms = 0;
+  }
+  if (ms - telem_set->check_ms >= SET_CHECK_MS) {  // a settings or DSP value change: check at once
+    telem_set->check_ms = ms;
+    if (memcmp(&telem_set->cfg, &g_deviceConfig, sizeof(DeviceConfig)) || memcmp(telem_set->eff, g_dsp_eff, sizeof(telem_set->eff)))
+      settingsCheck();
+  }
+  if (ms - telem_set->full_ms >= SET_FULL_MS) {  // values not in DeviceConfig (the Wi-Fi network): each minute
+    telem_set->full_ms = ms;
+    settingsCheck();
+  }
+  if (telem_set->dump_ms == 0 || (telem_set->dump_pos < 0 && ms - telem_set->dump_ms >= SET_DUMP_MS)) {
+    telem_set->dump_ms = ms ? ms : 1;
+    telem_set->dump_pos = 0;
+    telem_set->dump_part = 0;
+    const int room = rec::EVENT_MAX - 11;
+    telem_set->dump_parts = ((int)telem_set->lines->length() + room - 1) / room;
+    telem_set->dump_no++;
+  }
+  if (telem_set->dump_pos >= 0 && ms - telem_set->part_ms >= SET_PART_MS) {  // one part each 50 ms: about 3 s for the list
+    telem_set->part_ms = ms;
+    const int room = rec::EVENT_MAX - 11;
+    String text = telem_set->lines->substring(telem_set->dump_pos, telem_set->dump_pos + room);
+    text.replace('\n', ' ');
+    telemetryEvent(rec::EV_SETTINGS, ((int32_t)telem_set->dump_no << 16) | telem_set->dump_part, telem_set->dump_parts,
+                   text.c_str());
+    telem_set->dump_pos += room;
+    telem_set->dump_part++;
+    if (telem_set->dump_pos >= (int)telem_set->lines->length()) telem_set->dump_pos = -1;
+  }
+}
+
 void telemetryService(){
   telemetryEvents();
+  telemetrySettingsStep();  // 0.6.33: settings dump at boot and each 10 min; a record for each setting change
   tlm::service(millis(), rec::rateNearest(g_deviceConfig.telemetry_rate_hz));  // table value records (lib/tlm)
   if (millis() - telem_status_ms >= 1000) {
     telem_status_ms = millis();

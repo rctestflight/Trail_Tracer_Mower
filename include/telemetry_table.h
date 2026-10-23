@@ -184,7 +184,7 @@ TLF(BINS,   coils[8][4],     I24,     19, 1,    "LSB",   0,  VALUE, -8388608, "B
 
 // Event, body 0x30.
 TLF(EVENT,  code,            U16,     0,  1,    "",      0,  VALUE, -,      "Event",     "Event code",                                "")
-TLF(EVENT,  event,           U16,     0,  1,    "",      0,  ENUM,  -,      "Event",     "Event",                                     "1=boot|2=mode|3=ap_state|4=stuck|5=charge_step|6=odrive_error|7=halted|8=setting|9=stall|10=bad_key|11=run|12=imu|13=restart_refused|14=prev_boot|15=stm32|16=time|17=monitor|18=stm32_cmd|19=wifi|20=usb|*=?")
+TLF(EVENT,  event,           U16,     0,  1,    "",      0,  ENUM,  -,      "Event",     "Event",                                     "1=boot|2=mode|3=ap_state|4=stuck|5=charge_step|6=odrive_error|7=halted|8=setting|9=stall|10=bad_key|11=run|12=imu|13=restart_refused|14=prev_boot|15=stm32|16=time|17=monitor|18=stm32_cmd|19=wifi|20=usb|21=settings|22=setting_change|*=?")
 TLF(EVENT,  a,               I32,     2,  1,    "",      0,  VALUE, -,      "Event",     "Event value a",                             "")
 TLF(EVENT,  b,               I32,     6,  1,    "",      0,  VALUE, -,      "Event",     "Event value b",                             "")
 TLF(EVENT,  text,            TEXT,    10, 1,    "",      0,  TEXT,  -,      "Event",     "Event text",                                "")

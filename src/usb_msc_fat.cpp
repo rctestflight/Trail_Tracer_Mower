@@ -1564,6 +1564,24 @@ bool msc_fat_key_at(const DeviceConfig* cfg, int index, String* line)
     return false;
 }
 
+// 0.6.33 settings in the log: every "list" line in one pass (one JSON build), key and value as "list" prints them.
+// cmd_key gives only 0 or "set": the fleet key never goes in the log.
+int msc_fat_each_line(const DeviceConfig* cfg, void (*fn)(void* ctx, int index, const char* key, const char* value),
+                      void* ctx)
+{
+    JsonDocument doc;
+    config_to_doc(*cfg, doc, true);
+    int i = 0;
+    String value;
+    for (JsonPair kv : doc.as<JsonObject>()) {
+        value = "";
+        if (!strcmp(kv.key().c_str(), "cmd_key")) value = cfg->cmd_key ? "\"set\"" : "0";
+        else serializeJson(kv.value(), value);
+        fn(ctx, i++, kv.key().c_str(), value.c_str());
+    }
+    return i;
+}
+
 // 0.6.15: the settings the board takes at its next start: the defaults, then the values stored in NVS.
 void msc_fat_saved_config(DeviceConfig* out)
 {

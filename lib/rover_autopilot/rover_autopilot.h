@@ -16,6 +16,9 @@
 //            RETURN goes back to that state.
 //   DEPART   follow a random distance (depart minimum to maximum) after the dock contacts open, stop, pivot inward by
 //            a random angle, ROAM with the bounce disarmed.
+// Timed roam and follow (roam time and follow time both over 0, not follow-only): after the roam time in ROAM,
+// RETURN; in FOLLOW after the follow time: stop, pivot inward by a random angle, ROAM with the bounce disarmed (the
+// end of DEPART). A charge return comes first; both times start again at each new roam.
 //   FAULT    stopped until the drive mode is entered again: stuck detector (signal not lost), or lost longer than the
 //            lost timeout in JOIN, FOLLOW or DEPART, or no polarity at a join with "join without polarity" = stop.
 // No Tx signal -> stop and wait (the state holds): ROAM and RETURN after rover_no_tx_roam_s, others after rover_no_tx_s.
@@ -50,7 +53,7 @@ enum FaultCode : uint8_t { FAULT_NONE, FAULT_STUCK, FAULT_LOST, FAULT_NO_POLARIT
 // outside before the first turn in rover mode (the rover starts inside): the Tx direction setting is the wrong way
 enum DecisionCode : uint8_t { DEC_NONE, DEC_BOUNCE, DEC_CHECK_FLIP, DEC_JOIN, DEC_FOLLOW, DEC_REVERSE, DEC_BEACON,
                               DEC_DOCK, DEC_DEPART, DEC_RETURN, DEC_FAULT, DEC_TX_OFF, DEC_TX_ON, DEC_START,
-                              DEC_TURN_BACK, DEC_PROBE };
+                              DEC_TURN_BACK, DEC_PROBE, DEC_FOLLOW_END };
 
 struct Config {
   float sensorHeight = 0.15f;      // m
@@ -75,6 +78,8 @@ struct Config {
   float departMin = 0.5f, departMax = 3.0f;   // m
   float turnMinDeg = 60, turnMaxDeg = 140;     // inward turn after depart, deg
   float probeLength = 0.5f;        // m: the straight drive of the probe at the start in range (0 = no probe)
+  float roamTimeS = 60;            // s of roam before a timed return and follow (0 = off)
+  float followTimeS = 30;          // s of follow after a timed return, then turn inward and roam (0 = off)
   float noTxRoamS = 60;            // s without Tx signal before ROAM and RETURN stop
   float noTxS = 2;                 // s without Tx signal before the other states stop
   float lostTimeout = 30;          // s in JOIN, FOLLOW or DEPART (0 = never)
@@ -174,6 +179,8 @@ class Autopilot {
   int8_t planSide_ = 1, planDir_ = 1, planInside_ = 1;
   bool planPolKnown_ = false;
   float run_ = 0, departLeft_ = 0, reverseArm_ = 0, dMinOpen_ = 0;
+  float roamT_ = 0, followT_ = 0;  // s in ROAM, s in FOLLOW (timed roam and follow)
+  bool timed() const { return cfg.roamTimeS > 0 && cfg.followTimeS > 0 && !cfg.followOnly; }
   int turnBacks_ = 0;
   State dockFrom_ = FOLLOW;
   int wrongCount_ = 0;

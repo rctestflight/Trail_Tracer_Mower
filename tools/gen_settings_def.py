@@ -4,7 +4,8 @@ include/settings_table.h.
 From the table: the keys, their order of first appearance in the app file, type, default, and every word of a new
 key (unit, group, label, help). First step (version 13): a key that the committed settings_def.json already has
 keeps its words (label, description, group, unit, flags such as live or advanced) and its app range from that file;
-the table gives its type and default, and the script stops if they differ from the file. Read-only keys (dsp_*_eff,
+the table gives its type and default, and the script stops if the type differs from the file. The default always
+comes from the table (0.6.32): the table is the one source of defaults. Read-only keys (dsp_*_eff,
 wifi_ssid, wifi_password) are not in the table and stay as they are.
 
 Checks: no double name or NVS key, NVS keys of 15 characters at most, each default inside its range. A range of the
@@ -181,9 +182,8 @@ def generate(defines):
         t = TYPES[e['type']]
         if old.get('type') != t:
             sys.exit(f"{key}: table type {t}, settings_def.json type {old.get('type')}")
+        # 0.6.32: the table is the one source of each default; a changed default goes into this file, no stop
         d = json_default(e, old.get('default'))
-        if d != old.get('default') or type(d) is not type(old.get('default')):
-            sys.exit(f"{key}: table default {d!r}, settings_def.json default {old.get('default')!r}")
         ent['type'], ent['default'] = t, d
         # The range is the firmware's (0.6.26, operator): the app, the settings page and the programmer take it from
         # this file, so no other program keeps its own range.

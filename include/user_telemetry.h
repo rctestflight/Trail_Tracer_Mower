@@ -54,9 +54,11 @@ TLM(wire_inside,       I8,  1,   "",    0, 10HZ, "Polarity detection", "Inside t
 TLM(wire_heading,      I8,  1,   "",    0, 10HZ, "Polarity detection", "Heading round the loop (+1 clockwise, -1 counterclockwise, 0 not known)")
 // 0.6.28: the rover's last decision (lib/rover_autopilot, Decision), set in src/main.cpp; a new decision: a new seq
 TLM(rover_dec_seq,     U16, 1,   "",    0, 10HZ, "Rover decisions", "Decision number (mod 65536): changes at each decision")
-TLM(rover_dec_code,    U8,  1,   "",    0, 10HZ, "Rover decisions", "Decision: 1 bounce, 3 join, 4 follow, 5 reverse, 6 beacon, 7 dock, 8 depart, 9 return, 10 fault, 11 Tx off, 12 Tx on, 13 start, 14 turn back, 15 probe")
+TLM(rover_dec_code,    U8,  1,   "",    0, 10HZ, "Rover decisions", "Decision: 1 bounce, 3 join, 4 follow, 5 reverse, 6 beacon, 7 dock, 8 depart, 9 return, 10 fault, 11 Tx off, 12 Tx on, 13 start, 14 turn back, 15 probe, 16 follow time end")
 TLM(rover_dec_side,    I8,  1,   "",    0, 10HZ, "Rover decisions", "Wire side used (+1 left, -1 right)")
 TLM(rover_dec_psi_deg, I16, 0.1, "deg", 1, 10HZ, "Rover decisions", "Fitted wire heading at the decision (0: no fit)")
 TLM(rover_dec_turn_deg, I16, 0.1, "deg", 1, 10HZ, "Rover decisions", "Planned turn (+ left)")
 TLM(rover_fault,       U8,  1,   "",    0, 10HZ, "Rover decisions", "Fault: 0 none, 1 stuck, 2 lost, 3 no polarity at a join, 4 polarity says outside at the start (set tx_dir the other way)")
 TLM(rover_dec_d_mm,    U16, 1,   "mm",  0, 10HZ, "Rover decisions", "Distance to the wire at the decision")
+// 0.6.33: sensor 2 wire radius from the Rx STM32 (set in telemetrySample). Sensor 2 sends only with enable_sensor_2 on.
+TLM(s2_radius_mm,      U16, 1,   "mm",  0, LOG,  "Position", "Wire radius, sensor 2 (no value: sensor 2 off or no wire)")

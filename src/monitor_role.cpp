@@ -40,6 +40,7 @@
 // The PC tells senders apart by MAC: the vehicle ID is 1 on every shipped unit.
 #include "cpu_prof.h"
 #include <Arduino.h>
+#include <memory>  // 0.6.33: report buffers from the heap (static RAM is full)
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_timer.h>
@@ -438,9 +439,11 @@ void handle_line(char* line) {
       print_error("time: usage time <unix ms>");
     }
   } else if (!strcmp(line, "cpu")) {  // CPU share per FreeRTOS task since the last "cpu" (lib/cpu_prof)
-    static char b[700];
-    cpuprof::report(b, sizeof(b), nullptr, 0);
-    out("I %lld %s\n", esp_timer_get_time(), b);
+    std::unique_ptr<char[]> b(new (std::nothrow) char[700]);
+    if (b) {
+      cpuprof::report(b.get(), 700, nullptr, 0);
+      out("I %lld %s\n", esp_timer_get_time(), b.get());
+    } else print_error("cpu: no heap");
   } else if (!strcmp(line, "monitor")) {
     usb_guard::set_reconnect(true);  // the PC program connected
     out("I %lld monitor role already on\n", esp_timer_get_time());
@@ -607,8 +610,9 @@ void loop() {
   const bool open_now = host_open();
   if (open_now && !host_was_open) {
     print_banner();
-    static char saved[900];
-    if (usb_guard::take_saved(saved, sizeof(saved))) out("I %lld %s (input stop, before the last restart)\n", esp_timer_get_time(), saved);
+    std::unique_ptr<char[]> saved(new (std::nothrow) char[900]);
+    if (saved && usb_guard::take_saved(saved.get(), 900))
+      out("I %lld %s (input stop, before the last restart)\n", esp_timer_get_time(), saved.get());
   }
   STEP(3);
   if (!open_now) host_pinged = false;
@@ -616,11 +620,13 @@ void loop() {
     out("I %lld restart: no PC input for %lu s after pings (USB input stopped?)\n", esp_timer_get_time(),
         (unsigned long)(HOST_SILENT_MS / 1000));
     {
-      static char regs[1200];
+      std::unique_ptr<char[]> regs(new (std::nothrow) char[1200]);
       usb_guard::snapshot();
-      usb_guard::format_snapshot(regs, sizeof(regs));
-      usb_guard::save_for_next_boot(regs);  // the line below can be lost in the restart
-      out("I %lld %s (input stop)\n", esp_timer_get_time(), regs);
+      if (regs) {
+        usb_guard::format_snapshot(regs.get(), 1200);
+        usb_guard::save_for_next_boot(regs.get());  // the line below can be lost in the restart
+        out("I %lld %s (input stop)\n", esp_timer_get_time(), regs.get());
+      }
       delay(200);
     }
     delay(100);
@@ -699,9 +705,11 @@ void loop() {
           esp_timer_get_time(), (unsigned long)seen_stalls, (unsigned long)snap.r_lines, (unsigned long)snap.out_bytes,
           (unsigned long)snap.waits, (unsigned long)snap.cuts, (unsigned long)snap.uart_bytes, (unsigned long)snap.loop_max_us,
           (unsigned long)ESP.getFreeHeap(), (unsigned long)usb_guard::kicks());
-      static char regs[1200];
-      usb_guard::format_snapshot(regs, sizeof(regs));
-      out("I %lld %s (output stop)\n", esp_timer_get_time(), regs);
+      std::unique_ptr<char[]> regs(new (std::nothrow) char[1200]);
+      if (regs) {
+        usb_guard::format_snapshot(regs.get(), 1200);
+        out("I %lld %s (output stop)\n", esp_timer_get_time(), regs.get());
+      }
     }
   }
   STEP(7);

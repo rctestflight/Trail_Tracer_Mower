@@ -201,6 +201,9 @@ bool msc_fat_save_all(const DeviceConfig* cfg);
 bool msc_fat_get_key(const DeviceConfig* cfg, const char* key, String* value_json);
 int  msc_fat_set_key(DeviceConfig* cfg, const char* key, const char* value_json, String* why = nullptr);
 bool msc_fat_key_at(const DeviceConfig* cfg, int index, String* line);
+// Settings in the log: fn once per "list" line, in "list" order (cmd_key: 0 or "set" only). Returns the line count.
+int msc_fat_each_line(const DeviceConfig* cfg, void (*fn)(void* ctx, int index, const char* key, const char* value),
+                      void* ctx);
 void msc_fat_saved_config(DeviceConfig* out);  // 0.6.15: the settings of the next start (defaults, then NVS)
 bool msc_fat_key_pair_at(const DeviceConfig* active, const DeviceConfig* saved, int index, String* line);  // "list saved"
 

@@ -14,6 +14,9 @@ Commands:
   csv     <file> --def telemetry_def.json [--def ...] [--out file.csv]
                          the table values (bodies 0x34, 0x35, 0x36) as CSV: one row per sample, one column per
                          value; the definition file of each build is chosen by the table hash in the record
+  settings <file> [--def telemetry_def.json ...]
+                         the setting dumps (Rx 0.6.33+, at the start and each 10 min) as one JSON line each with
+                         every setting, and each setting change (key, old, new)
   usbdump <bench daemon url or COM port> [--stream S] [--from N] [--count C] [--out file]
                          ask the rover for "log dump" (through a bench daemon, or a COM port
                          directly: needs pyserial and tools/directport.py) and decode it
@@ -395,6 +398,59 @@ def cmd_decode(a):
         out.write(json.dumps({"src": src, **decode_frame(fr)}) + "\n")
 
 
+EV_SETTINGS, EV_SETTING_CHANGE = 21, 22  # Rx 0.6.33+: setting dump parts and setting changes
+
+
+def settings_from_text(text):
+    """The "key=value key=value ..." text of a joined setting dump -> {key: value}. A value is JSON (a text value
+    is in quotes and can hold spaces); an unreadable value stays as its raw text."""
+    dec, out, i, n = json.JSONDecoder(), {}, 0, len(text)
+    while i < n:
+        eq = text.find("=", i)
+        if eq < 0:
+            break
+        key = text[i:eq].strip()
+        try:
+            val, j = dec.raw_decode(text, eq + 1)
+        except ValueError:
+            j = text.find(" ", eq + 1)
+            j = n if j < 0 else j
+            val = text[eq + 1:j]
+        out[key] = val
+        i = j + 1
+    return out
+
+
+def cmd_settings(a):
+    """Setting dumps (one JSON line per dump: boot_id, ms of the first part, dump number, complete, settings) and
+    setting changes (one JSON line each: boot_id, ms, index, key, old, new) from the log events."""
+    load_defs(a.defs)
+    out = open(a.out, "w") if a.out else sys.stdout
+    dumps = {}  # (boot_id, dump number) -> {"ms", "count", "parts": {part: text}}
+    for src, fr in frames_from_lines(open(a.file, encoding="utf-8", errors="replace")):
+        d = decode_frame(fr)
+        code = d.get("code")
+        if code == EV_SETTINGS:
+            k = (d["boot_id"], (d["a"] >> 16) & 0xFFFF)
+            e = dumps.setdefault(k, {"ms": d["ms"], "count": d["b"], "parts": {}})
+            e["parts"][d["a"] & 0xFFFF] = d.get("text", "")
+        elif code == EV_SETTING_CHANGE:
+            t = d.get("text", "")
+            key, _, rest = t.partition(" ")
+            old, sep, new = rest.partition(" -> ")
+            row = {"type": "change", "boot_id": d["boot_id"], "ms": d["ms"], "index": d["a"], "key": key}
+            if d["b"] == 0 and sep:
+                row.update(old=old, new=new)
+            else:  # a long text: b 1 the old value, b 2 the new value, in two events
+                row["old" if d["b"] == 1 else "new"] = rest
+            out.write(json.dumps(row) + "\n")
+    for (boot, no), e in sorted(dumps.items(), key=lambda kv: (kv[1]["ms"], kv[0])):
+        complete = len(e["parts"]) == e["count"] and all(p in e["parts"] for p in range(e["count"]))
+        text = "".join(e["parts"].get(p, "") for p in range(e["count"]))
+        out.write(json.dumps({"type": "dump", "boot_id": boot, "ms": e["ms"], "dump": no, "complete": complete,
+                              "settings": settings_from_text(text) if complete else {}}) + "\n")
+
+
 def cmd_csv(a):
     """Table values as CSV: src, boot_id, stream, seq, rate, ms, then one column per value name (every name of the
     loaded definitions, in file order; empty where a row has no such value or the value is "no value")."""
@@ -499,6 +555,10 @@ def main():
     c.add_argument("file")
     c.add_argument("--def", dest="defs", action="append", required=True, help="telemetry_def.json (one per build)")
     c.add_argument("--out")
+    st = sub.add_parser("settings")
+    st.add_argument("file")
+    st.add_argument("--def", dest="defs", action="append", default=[], help="telemetry_def.json")
+    st.add_argument("--out")
     pl = sub.add_parser("polar")
     pl.add_argument("file")
     pl.add_argument("--out")
@@ -509,7 +569,7 @@ def main():
     u.add_argument("--count", type=int, default=1000000)
     u.add_argument("--out")
     a = ap.parse_args()
-    sys.exit({"decode": cmd_decode, "csv": cmd_csv, "polar": cmd_polar, "usbdump": cmd_usbdump}[a.cmd](a))
+    sys.exit({"decode": cmd_decode, "csv": cmd_csv, "polar": cmd_polar, "settings": cmd_settings, "usbdump": cmd_usbdump}[a.cmd](a))
 
 
 if __name__ == "__main__":

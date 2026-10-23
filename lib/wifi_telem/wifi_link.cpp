@@ -288,7 +288,8 @@ static void blastService(uint32_t now_ms) {
     s_bl_sec_ok = s_bl_ok;
     s_bl_sec_fail = s_bl_fail;
   }
-  static uint8_t d[1472];
+  static uint8_t* d = nullptr;  // 0.6.33: from the heap at the first blast (static RAM is full)
+  if (!d && !(d = (uint8_t*)malloc(1472))) return;
   const uint32_t due = (uint64_t)t * s_bl_rate / 1000 + 1;
   for (int i = 0; i < 16 && s_bl_seq < due; i++) {  // at most 16 sends a pass: a catch-up never holds loop() long
     d[0] = 'T'; d[1] = 'B';

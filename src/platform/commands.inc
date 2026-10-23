@@ -47,7 +47,7 @@ void espnowCommands(){
   if (espnow_list_index >= 0 && millis() - espnow_list_ms >= 5) {  // one key every 5 ms
     espnow_list_ms = millis();
     String line;
-    if (espnow_list_saved ? msc_fat_key_pair_at(&g_deviceConfig, &g_saved_config, espnow_list_index, &line)
+    if (espnow_list_saved ? g_saved_config && msc_fat_key_pair_at(&g_deviceConfig, g_saved_config, espnow_list_index, &line)
                           : msc_fat_key_at(&g_deviceConfig, espnow_list_index, &line)) {
       espnowSendAck(espnow_cmd_mac, espnow_cmd_seq, 0, line.c_str());
       espnow_list_index = espnow_list_index + 1;
@@ -66,7 +66,7 @@ void espnowCommands(){
   // A retry (same sender, same seq: the ACK was lost) gets the cached ACK and does not run again.
   if (!strcmp(espnow_cmd_text, "list") || !strcmp(espnow_cmd_text, "list saved")) {
     espnow_list_saved = espnow_cmd_text[4] != 0;  // 0.6.15: "list saved": each key with its value of the next start
-    if (espnow_list_saved) msc_fat_saved_config(&g_saved_config);
+    if (espnow_list_saved) savedConfigLoad();  // no heap: the list ends at once ("end 0")
     espnow_list_index = 0;  // the CMD's mac and seq stay in hand until "end"
     espnow_list_ms = 0;
   } else if (have_last && espnow_cmd_seq == last_seq && !memcmp(espnow_cmd_mac, last_mac, 6)
@@ -387,8 +387,9 @@ uint8_t configCommandRun(const char* t, bool over_espnow, String& reply){
       return 4;
     }
     {  // 0.5.103: the update period must suit the link mode (a change of the period, radio_mode or the radio keys)
-      static DeviceConfig next;
-      next = g_deviceConfig;
+      std::unique_ptr<DeviceConfig> next_p(new (std::nothrow) DeviceConfig(g_deviceConfig));  // 0.6.33: heap
+      if (!next_p) { reply = String(key) + "=busy"; return 4; }
+      DeviceConfig& next = *next_p;
       const bool period_key = !strcmp(key, "dsp_frame_period_us");
       char* num_end = nullptr;
       const long asked_num = strtol(value, &num_end, 10);

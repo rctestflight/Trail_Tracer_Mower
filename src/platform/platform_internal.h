@@ -3,6 +3,7 @@
 #pragma once
 #include <Arduino.h>
 #include <math.h>
+#include <memory>        // 0.6.33: std::unique_ptr for bench buffers from the heap
 #include <Wire.h>
 #include <MPU6050_light.h>
 #include "rt_prof.h"       // real-time path timing: STM32 frame -> control -> CAN (lib/rt_prof; bench "rt")
@@ -192,7 +193,8 @@ extern uint16_t espnow_busy_seq;
 extern volatile uint8_t espnow_restart_request;
 extern volatile int espnow_list_index;
 extern bool espnow_list_saved;
-extern DeviceConfig g_saved_config;
+extern DeviceConfig* g_saved_config;  // nullptr until the first "list saved"
+DeviceConfig* savedConfigLoad();      // load the settings of the next start into g_saved_config; nullptr: no heap
 extern volatile bool espnow_stop_request;
 extern uint8_t espnow_stop_mac[6];
 extern uint16_t espnow_stop_seq;
