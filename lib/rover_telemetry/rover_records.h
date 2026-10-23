@@ -70,7 +70,8 @@ enum EventCode : uint16_t {
   EV_BOOT = 1, EV_MODE = 2, EV_AP_STATE = 3, EV_STUCK = 4, EV_CHARGE_STEP = 5, EV_ODRIVE_ERROR = 6,
   EV_HALTED = 7, EV_SETTING = 8, EV_STALL = 9, EV_BAD_KEY = 10,
   // EV_SETTING: a result (0 ok, 1 unknown key, 2 bad value, 4 refused), b source (0 USB, 1 ESP-NOW, 2 config.json or NVS:
-  // a value that took its default, 0.5.112-settings), text the command and its answer
+  // a value that took its default, 0.5.112-settings; with a 0 from 0.6.30: a key that config.json changed), text the
+  // command and its answer
   EV_RUN = 11,  // run start / run stop / STOP frame: a 1 start 0 stop, b result, text reason
   EV_IMU = 12,  // boot: a accelerometer range in g (0 = no IMU), b gyro range in deg/s, text offsets
   EV_RESTART_REFUSED = 13,  // restart or ROM-mode request while the vehicle moves: a 1 restart 2 ROM, b source (0 USB 1 ESP-NOW)

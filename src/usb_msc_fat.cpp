@@ -495,6 +495,46 @@ static void field_text(const DeviceConfig& c, const SettingDef& e, char* out, si
     serializeJson(d, out, cap);
 }
 
+// 0.6.30: each key that a config.json read changes, for the USB port and the log (msc_fat_change_pop). Oldest dropped
+// when full; the next line gives the count dropped. On the heap at the first change: static RAM has no room.
+struct ChangeNote { uint8_t idx; char was[26], now[26]; };
+static ChangeNote* s_chg = nullptr;
+static uint8_t  s_chg_head = 0, s_chg_n = 0;
+static uint16_t s_chg_lost = 0;
+
+static void note_changes(const DeviceConfig& was, const DeviceConfig& now)
+{
+    for (int i = 0; i < N_SETTINGS; i++) {
+        const SettingDef& e = SETTINGS[i];
+        char a[26], b[26];
+        field_text(was, e, a, sizeof(a));
+        field_text(now, e, b, sizeof(b));
+        if (!strcmp(a, b)) continue;
+        if (!s_chg && !(s_chg = (ChangeNote*)calloc(16, sizeof(ChangeNote)))) { s_chg_lost++; continue; }
+        if (s_chg_n == 16) { s_chg_head = (s_chg_head + 1) % 16; s_chg_n--; s_chg_lost++; }
+        ChangeNote& c = s_chg[(s_chg_head + s_chg_n) % 16];
+        s_chg_n++;
+        c.idx = (uint8_t)i;
+        memcpy(c.was, a, sizeof(a));
+        memcpy(c.now, b, sizeof(b));
+    }
+}
+
+bool msc_fat_change_pop(char* line, size_t cap)
+{
+    if (s_chg_lost) {
+        snprintf(line, cap, "config.json: %u more changes not listed", (unsigned)s_chg_lost);
+        s_chg_lost = 0;
+        return true;
+    }
+    if (!s_chg_n) return false;
+    const ChangeNote& c = s_chg[s_chg_head];
+    snprintf(line, cap, "config.json: %s %s -> %s", SETTINGS[c.idx].name, c.was, c.now);
+    s_chg_head = (s_chg_head + 1) % 16;
+    s_chg_n--;
+    return true;
+}
+
 // Each key in its range (else its default, with a note), then the special rules.
 static void settings_check(DeviceConfig& c, uint8_t src)
 {
@@ -1296,6 +1336,7 @@ void msc_fat_init(DeviceConfig* cfg)
                 settings_check(file_cfg, SRC_JSON);
                 // NVS only when config.json differs from it (a user edit): no NVS write at every boot.
                 const bool changed = memcmp(&file_cfg, cfg, sizeof(file_cfg)) != 0;
+                if (changed) note_changes(*cfg, file_cfg);
                 *cfg = file_cfg;
                 if (changed) prefs_save(*cfg);
                 if (s_rate_config_missing) config_write_json(*cfg);
@@ -1384,6 +1425,7 @@ bool msc_fat_loop(DeviceConfig* cfg)
         settings_check(new_cfg, SRC_JSON);
         record_config_stamp();
         fatfs_unmount();
+        note_changes(*cfg, new_cfg);
         *cfg = new_cfg;
         prefs_save(new_cfg);
         return true;

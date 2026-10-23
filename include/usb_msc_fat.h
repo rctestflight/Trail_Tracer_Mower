@@ -228,6 +228,12 @@ bool msc_fat_erase(DeviceConfig* cfg, bool wifi, bool keep_link);
  */
 bool msc_fat_bad_value_pop(char* line, size_t cap, int* source);
 
+/**
+ * A setting that config.json changed (a USB drive edit, or at the start a file that differs from NVS): one line of
+ * text per key, "config.json: <key> <old> -> <new>", oldest first, for the USB port and the log. false: none waiting.
+ */
+bool msc_fat_change_pop(char* line, size_t cap);
+
 #ifdef SETTINGS_SELFTEST
 /** Self-check build: the old settings code against the table code (USB "cfgselftest"). Returns the difference count. */
 int msc_fat_selftest(void (*print)(const char* line));

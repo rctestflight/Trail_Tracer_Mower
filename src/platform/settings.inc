@@ -65,7 +65,8 @@ bool settingsFileChanged(){
   return loop_svc_due && msc_fat_loop(&g_deviceConfig);
 }
 
-// A value from config.json or NVS that took its default: one USB line and one event each
+// A value from config.json or NVS that took its default or a limit, and (0.6.30) a key that config.json changed: one
+// USB line and one event each
 void settingsBadValues(){
   if (loop_svc_due) {
     char bad[96];
@@ -73,6 +74,10 @@ void settingsBadValues(){
     while (msc_fat_bad_value_pop(bad, sizeof(bad), &src)) {
       usbOut.printf("SETTING bad value %s\n", bad);
       if (src != 2) telemetryEvent(rec::EV_SETTING, 2, 2, (String("bad value ") + bad).c_str());
+    }
+    while (msc_fat_change_pop(bad, sizeof(bad))) {
+      usbOut.printf("SETTING changed %s\n", bad);
+      telemetryEvent(rec::EV_SETTING, 0, 2, bad);
     }
   }
 }

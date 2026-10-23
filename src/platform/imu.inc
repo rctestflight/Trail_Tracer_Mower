@@ -19,6 +19,7 @@ bool imu_halt = false;  // retired at the merge of f10cd31: the main-branch gyro
 bool gyro_ready = false;
 void mpuReport(bool ok, unsigned status);  // main-branch MPU messages through the USB text queue and the log
 uint32_t gyro_sample_ms = 0;
+static uint8_t imu_reg_gyro = 0, imu_reg_acc = 0, imu_reg_id = 0;  // GYRO_CONFIG, ACCEL_CONFIG, WHO_AM_I after start
 
 // Take one calibration sample per loop, leaving STM32 packet handling active.
 // Keep the sensor stationary until the calibration-complete message appears.
@@ -39,6 +40,13 @@ void serviceMpu() {
       state = State::Failed;
       return;
     }
+    // 0.6.30: the ranges again after the wake (begin() writes them while the chip sleeps; a chip that drops those
+    // writes stays at +-250 deg/s, read as +-500: 2 x the turn), and the registers read back for the log.
+    mpu.setGyroConfig(1);
+    mpu.setAccConfig(0);
+    imu_reg_gyro = mpu.readData(0x1B);
+    imu_reg_acc = mpu.readData(0x1C);
+    imu_reg_id = mpu.readData(0x75);
     mpu.setGyroOffsets(0, 0, 0);
     mpu.setAccOffsets(0, 0, 0);
     started_ms = millis();
@@ -83,7 +91,10 @@ void serviceMpu() {
 void mpuReport(bool ok, unsigned status){
   if (ok) {
     usbOut.println("MPU6050 calibration complete");
-    telemetryEvent(rec::EV_IMU, 2, 250, "serviceMpu: library ranges, gyro and acc offsets");
+    char t[64];  // want gyro 0x08 (+-500 deg/s), acc 0x00 (+-2 g); id 0x68 for an MPU6050
+    snprintf(t, sizeof(t), "offsets set; gyro reg 0x%02x acc reg 0x%02x id 0x%02x", imu_reg_gyro, imu_reg_acc, imu_reg_id);
+    usbOut.println(t);
+    telemetryEvent(rec::EV_IMU, 2, 500, t);
   } else {
     usbOut.printf("MPU6050 init failed: %u; sensor disabled, motors stay locked%c", status, 10);
     telemetryEvent(rec::EV_IMU, 0, 0, "absent: no gyro, motors stay locked");

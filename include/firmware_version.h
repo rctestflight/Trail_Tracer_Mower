@@ -3,6 +3,11 @@
 #pragma once
 
 // Change history
+//   0.6.30: each setting that config.json changes (an edit on the USB drive, or at the start a file that differs from
+//     NVS) gives one USB line "SETTING changed" and one log event (setting, a 0, b 2), "config.json: <key> <old> ->
+//     <new>". Before, a value inside its range changed with no trace in the log. IMU: the gyro and accelerometer ranges
+//     are written again after the wake and read back into the imu event ("gyro reg 0x08 acc reg 0x00 id 0x68" wanted;
+//     b 500, the gyro range the library uses). A rover nose-up test read the yaw gyro 2.3 x the gravity angle.
 //   0.6.29: "stm raw" works again: since 0.5.128 the send paths held back the idle mode and CID 42 commands of the
 //     request, so no stream started and every later Rx STM32 command waited until a restart. A request with no
 //     answer in 2 s now ends with a refusal. After the CID 42 frame no byte goes to the Rx STM32 (one byte at the
@@ -259,12 +264,12 @@
 #if defined(OTA_TEST_VERSION)
 #define ROVER_FW_VERSION OTA_TEST_VERSION  // OTA test images (envs ota_a, ota_b, ota_test_crash)
 #elif defined(BENCH_FAKE_IMU)
-#define ROVER_FW_VERSION "0.6.29+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.6.30+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #elif defined(SETTINGS_NEWKEY)
-#define ROVER_FW_VERSION "0.6.29-newkey"  // bench build: one more table line (test_new_setting)
+#define ROVER_FW_VERSION "0.6.30-newkey"  // bench build: one more table line (test_new_setting)
 #elif defined(TELEMETRY_NEWVALUE)
-#define ROVER_FW_VERSION "0.6.29-newvalue"  // bench build: the example lines of include/user_telemetry.h
+#define ROVER_FW_VERSION "0.6.30-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.6.29"
+#define ROVER_FW_VERSION "0.6.30"
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
