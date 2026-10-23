@@ -1121,14 +1121,18 @@ void buttonLogic(){
 	if(bttn_counter < 0){
     // Falling edge
     ESP_LOGI(TAG, "btn: release (held %ld cycles)", bttn_long_counter);
+    bool acted = bttn_6s_state;  // the 6 s action logged its event when it ran
     if(bttn_3s_armed && !bttn_6s_state && bttn_long_counter < BUTTON_CAL_MAX_PRESS){
       button3sPressEvent();
+      acted = true;
     }
 		bttn_state = 0;
 		bttn_counter = 0;
     if(bttn_click_counter <= BUTTON_CLICK_MAX_LENGTH){
       buttonClickEvent();
+      acted = true;
     }
+    if(!acted) buttonEvent(BTN_NONE, (uint32_t)bttn_long_counter * 10u, "no action");  // 0.4 s to 2 s, or 4 s to 6 s
 	}
 
 	if(bttn_counter > BUTTON_DEBOUNCE_PERIODS){
@@ -1166,6 +1170,7 @@ void buttonClickEvent(){
     case2_use_cruise = !case2_use_cruise; // Toggle case 2 output
     btx_user_override_until_ms = millis() + 2000;
     ESP_LOGI(TAG, "btn: click (mode2 cruise->%d)", case2_use_cruise);
+    buttonEvent(BTN_CRUISE, (uint32_t)bttn_long_counter * 10u, case2_use_cruise ? "cruise on" : "cruise off");
   }else{
     drive_mode_status = 2; // Enter autonomous wire-following mode
     case2_use_cruise = true;
@@ -1174,6 +1179,8 @@ void buttonClickEvent(){
     case2_aux_entry_is_manual = (aux_pwm > 500 && aux_pwm < 1500);
     case2_aux_changed = false;
     ESP_LOGI(TAG, "btn: click -> mode2 (auto)");
+    buttonEvent(BTN_AUTO_ON, (uint32_t)bttn_long_counter * 10u,
+                rover_enabled ? "drive mode auto (rover)" : "drive mode auto (wire follow)");
   }
 }
 
@@ -1186,6 +1193,7 @@ void button3sPressEvent(){
   espPacketFifo_addCmdInt32(5 | 0x80000000, 0);  // Write S2 calibrate center
   espPacketFifo_addCmdInt32(3 | 0x80000000, 0);  // Save new calibration
 
+  buttonEvent(BTN_CENTRE_CAL, (uint32_t)bttn_long_counter * 10u, "centre calibration, saved");
   longpress_flash_cycles = 0;
   config_saved_led_until_ms = millis() + 2000;  // Solid LED feedback for 2 seconds
   digitalWrite(nLED, 0);  // Low = ON
@@ -1196,9 +1204,13 @@ void button6sPressEvent(){
   steeringPID.SetControllerDirection(pid_direction);
   g_deviceConfig.pid_direction = pid_direction;
   ESP_LOGI(TAG, "btn: 6s press -> pid_direction=%d", pid_direction);
-  if (!msc_fat_save_all(&g_deviceConfig)) {
+  const bool saved = msc_fat_save_all(&g_deviceConfig);
+  if (!saved) {
     usbOut.println("Warning: failed to persist pid_direction to config file");
   }
+  buttonEvent(BTN_STEER_DIR, (uint32_t)bttn_long_counter * 10u,
+              pid_direction == DIRECT ? (saved ? "steering direction normal, saved" : "steering direction normal, save failed")
+                                      : (saved ? "steering direction reversed, saved" : "steering direction reversed, save failed"));
 }
 
 void chargeControl(){
@@ -1446,6 +1458,7 @@ void applyDeviceConfig(const DeviceConfig& cfg)
   rc.probeLength              = cfg.rover_probe_m;
   rc.roamTimeS                = cfg.rover_roam_time_s;
   rc.followTimeS              = cfg.rover_follow_time_s;
+  rc.followExitDeg            = cfg.rover_follow_exit_deg;
   rc.noTxRoamS                = cfg.rover_no_tx_roam_s;
   rc.noTxS                    = cfg.rover_no_tx_s;
   rc.lostTimeout              = (float)cfg.rover_lost_timeout_s;

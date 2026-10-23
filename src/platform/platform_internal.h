@@ -238,6 +238,7 @@ bool telemetryEraseAllowed();
 uint8_t telemetryApByte();
 bool telemetrySend(const uint8_t mac[6], const uint8_t* buf, size_t len);
 void telemetryEvent(uint16_t code, int32_t a, int32_t b, const char* text);
+bool telemetryLogStarted();  // 0.6.34: the log takes events (after the boot event)
 void telemetryBegin();
 void telemetrySample();
 void telemetryUsbCommand(const char* line);

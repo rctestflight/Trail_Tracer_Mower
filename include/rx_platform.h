@@ -164,6 +164,14 @@ void radioService();
 void logService();
 
 /**
+ * @brief 0.6.34 (operator 2026-10-23): one log event for each button press, with the action it started (event 23:
+ * a = action, b = press length in ms, text = the action in words). Setting and mode changes keep their own events.
+ */
+enum ButtonAction { BTN_NONE = 0, BTN_AUTO_ON = 1, BTN_CRUISE = 2, BTN_CENTRE_CAL = 3, BTN_STEER_DIR = 4,
+                    BTN_ERASE_START = 5, BTN_ERASE_CANCEL = 6, BTN_ERASE_DONE = 7 };
+void buttonEvent(ButtonAction action, uint32_t held_ms, const char* text);
+
+/**
  * @brief USB serial commands, USB link events and the heartbeat line each second.
  */
 void benchService();

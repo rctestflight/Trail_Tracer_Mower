@@ -622,8 +622,12 @@ void espPacketFifo_sendCmd(){
   }
   uint32_t id = cid & 0x7FFFFF;
   const bool w = (cid & stmset::WRITE) != 0;
-  if (id == STM_RUN_CMD) {  // the run command goes as CID 1 (layout 2 meaning)
-    stmLink.rewrite(1 | stmset::WRITE, raw, 0);
+  // The run command goes as CID 1 (layout 2 meaning). 0.6.34: the rewritten command keeps a run mark, so a retry (no
+  // answer in time) sends the run again. Up to 0.6.33 a retry came back as a plain CID 1 write, the wire channel
+  // command below: it set the sensor 1 wire bin to 1 and the rover read the wrong Tx frequency (no signal) until restart.
+  const uint32_t RUN_ON_CID1 = 0x40000000u;  // outside the command id bits (stmset idOf: 0x7FFFFF)
+  if (id == STM_RUN_CMD || (cid & RUN_ON_CID1)) {
+    stmLink.rewrite(1 | stmset::WRITE | RUN_ON_CID1, raw, 0);
     stmTx(stmLink.seq(), 1 | ESP_CID_WRITE, 0, raw);
     return;
   }

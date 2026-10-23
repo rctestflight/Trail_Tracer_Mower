@@ -36,6 +36,7 @@ int buttonEraseGesture(uint8_t gpio_state){
     erase_hold = true;
     erase_hold_ms = millis();
     usbOut.printf("BUTTON erase gesture: hold 5 s to erase every setting and the Wi-Fi details\n");
+    buttonEvent(BTN_ERASE_START, 0, "erase hold start (power-on press)");
   }
   if (erase_window && millis() >= 3000 && !erase_hold) erase_window = false;
   if (erase_hold) {
@@ -43,10 +44,12 @@ int buttonEraseGesture(uint8_t gpio_state){
       erase_hold = false;
       erase_window = false;
       usbOut.printf("BUTTON erase gesture: released after %lu ms, nothing erased\n", (unsigned long)(millis() - erase_hold_ms));
+      buttonEvent(BTN_ERASE_CANCEL, millis() - erase_hold_ms, "erase cancelled: released before 5 s");
       return ERASE_RELEASED;
     }
     digitalWrite(nLED, (millis() / 50) & 1);  // 10 Hz flash during the hold
     if (millis() - erase_hold_ms >= 5000) {
+      buttonEvent(BTN_ERASE_DONE, millis() - erase_hold_ms, "erase: every setting and the Wi-Fi details; restart");  // can be lost in the restart
       usbOut.drain(100);
       const bool ok = msc_fat_erase(&g_deviceConfig, true, false);
       usbOut.printf("BUTTON erase: every setting and the Wi-Fi details at defaults%s; restart\n",

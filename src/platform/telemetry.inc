@@ -206,6 +206,8 @@ void telemetryBegin(){
   telemetryEvent(rec::EV_BOOT, (int32_t)rr, (int32_t)li.prev_boot_id, text);  // b: previous boot_id (warm reset), else 0
 }
 
+bool telemetryLogStarted(){ return telem_decim != nullptr; }
+
 void telemetrySample(){
   if (safe_mode) return;
   const uint32_t sb = stmPacket.items.status_bits;
@@ -368,6 +370,10 @@ void webTelemetryCopy(tlmpage::Snapshot* s){
   tlmpage::take_status_log(s);
   tlmpage::take_sample(s, telem_block.body(), telem_block.ms());
   tlmpage::take_values(s);
+}
+
+void buttonEvent(ButtonAction action, uint32_t held_ms, const char* text){
+  telemetryEvent(rec::EV_BUTTON, (int32_t)action, (int32_t)held_ms, text);
 }
 
 void telemetryEvents(){
@@ -583,8 +589,33 @@ static void telemetrySettingsStep(){
   }
 }
 
+// 0.6.34: the wire bin and the calibration of each sensor that the ESP32 decoder uses (EV_STM32, a = 2), at each Rx
+// STM32 start and after each change: a value that holds 3 s goes in the log. Field case 2026-10-23: a wrong wire bin
+// gave "signal lost" with a strong signal, and no log value showed it.
+static void stmCalLogService(){
+  static uint32_t ms0 = 0;
+  static char logged[72] = "", seen[72] = "";
+  static int same = 0;
+  if (safe_mode || stm_link_ver != 2 || millis() - ms0 < 1000) return;
+  ms0 = millis();
+  char t[72];
+  const int b0 = stmDec.wireBin(0), b1 = stmDec.wireBin(1);
+  const stmv2::Cal& c = stmDec.cal;
+  snprintf(t, sizeof(t), "cal bin %d,%d R %.4g,%.4g phi %.3f,%.3f g %.4g,%.4g", b0, b1,
+           c.have_radius[0] ? c.radius[0] : -1.0f, c.have_radius[1] ? c.radius[1] : -1.0f,
+           c.have_angle[0] ? c.angle[0] : -1.0f, c.have_angle[1] ? c.angle[1] : -1.0f,
+           (b0 >= 0 && b0 < (int)WFRX_BINS) ? c.gain[0][b0] : 0.0f, (b1 >= 0 && b1 < (int)WFRX_BINS) ? c.gain[1][b1] : 0.0f);
+  same = strcmp(t, seen) ? 0 : same + 1;
+  strcpy(seen, t);
+  if (same == 2 && strcmp(t, logged)) {
+    strcpy(logged, t);
+    telemetryEvent(rec::EV_STM32, 2, 0, t);
+  }
+}
+
 void telemetryService(){
   telemetryEvents();
+  stmCalLogService();
   telemetrySettingsStep();  // 0.6.33: settings dump at boot and each 10 min; a record for each setting change
   tlm::service(millis(), rec::rateNearest(g_deviceConfig.telemetry_rate_hz));  // table value records (lib/tlm)
   if (millis() - telem_status_ms >= 1000) {

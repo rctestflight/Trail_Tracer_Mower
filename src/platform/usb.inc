@@ -9,13 +9,15 @@ bool usb_verbose = false;  // USB "verbose on": the bench lines each second (rov
 void usbEventService(){
   {
     static uint32_t usb_ev_ms = 0, st0 = 0, re0 = 0, tx0 = 0, rx_quiet_n = 0;
-    static int dtr0 = -1;
+    static int dtr0 = -1, mounted0 = -1;
+    static uint32_t mount_n = 0, unmount_n = 0;
     static bool rx_quiet = false;
     const uint32_t rx_ms = usb_rx_ms;
     if (millis() - usb_ev_ms >= 1000) {
       usb_ev_ms = millis();
       const uint32_t st = usb_guard::stalls(), re = usb_guard::restarts(), tx = usb_guard::tx_events();
       const int dtr = tud_cdc_connected() ? 1 : 0;
+      int mounted = tud_mounted() ? 1 : 0;
       char t[80];  // an event body holds 73 B of text
       snprintf(t, sizeof(t), "stalls=%lu reconn=%lu tx/s=%lu q=%u drop=%lu dtr=%d rx_age=%lus",
                (unsigned long)st, (unsigned long)re, (unsigned long)(tx - tx0), (unsigned)usbOut.queued(),
@@ -23,10 +25,16 @@ void usbEventService(){
       if (st != st0) telemetryEvent(rec::EV_USB, 1, (int32_t)st, t);
       if (re != re0) telemetryEvent(rec::EV_USB, 2, (int32_t)re, t);
       if (dtr0 >= 0 && dtr != dtr0) telemetryEvent(rec::EV_USB, dtr ? 3 : 4, 0, t);
+      // 0.6.34 (operator 2026-10-23): USB connect and disconnect (the host enumerated the board, or the bus went away),
+      // and the state at the first check after the start (b 0), so each log shows whether USB was in
+      // (the first check waits for the log start: an event before it is lost)
+      if (mounted0 < 0 && !telemetryLogStarted()) mounted = -1;
+      else if (mounted != mounted0) telemetryEvent(rec::EV_USB, mounted ? 7 : 8,
+                                                   mounted0 < 0 ? 0 : (int32_t)(mounted ? ++mount_n : ++unmount_n), t);
       const bool quiet = dtr && millis() - rx_ms >= 60000;
       if (quiet && !rx_quiet) telemetryEvent(rec::EV_USB, 5, (int32_t)++rx_quiet_n, t);
       rx_quiet = quiet;
-      st0 = st; re0 = re; tx0 = tx; dtr0 = dtr;
+      st0 = st; re0 = re; tx0 = tx; dtr0 = dtr; mounted0 = mounted;
     }
   }
 }

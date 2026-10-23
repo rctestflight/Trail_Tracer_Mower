@@ -3,6 +3,16 @@
 #pragma once
 
 // Change history
+//   0.6.34: the turn at a follow end (timed roam and follow) leaves the wire at the new follow end leave angle
+//     (rover_follow_exit_deg, 90 deg = straight into the loop), plus the bounce spread, kept at least the bounce
+//     minimum from the wire, as at a bounce. Before, it used the inward turn (60 to 140 deg), which ignored the bounce
+//     settings. The inward turn now applies only after a charge.
+//     Fix: a retry of the Rx STM32 run command (no answer in 35 ms) went out as the wire channel command and set
+//     the sensor 1 wire bin to 1 (55.3 kHz): signal lost and "Tx off" with a strong wire signal until a restart
+//     (field case 2026-10-23). The retry now sends the run again.
+//     Log: each button press and its action (event 23 button); USB connect and disconnect (event 20 usb, a 7 and 8,
+//     and the state after the start); the wire bin and calibration of each sensor at each Rx STM32 start (event 15
+//     stm32, a 2).
 //   0.6.33: settings in the log. At the start and each 10 min, every "list" line goes into the log as setting dump
 //     events (21 settings, about 3 s of parts); each change from any source (app, USB, config.json, the button, the
 //     DSP values the Rx STM32 reports) gives one event (22 setting_change) "key old -> new". The fleet key and the
@@ -281,12 +291,12 @@
 #if defined(OTA_TEST_VERSION)
 #define ROVER_FW_VERSION OTA_TEST_VERSION  // OTA test images (envs ota_a, ota_b, ota_test_crash)
 #elif defined(BENCH_FAKE_IMU)
-#define ROVER_FW_VERSION "0.6.33+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.6.34+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #elif defined(SETTINGS_NEWKEY)
-#define ROVER_FW_VERSION "0.6.33-newkey"  // bench build: one more table line (test_new_setting)
+#define ROVER_FW_VERSION "0.6.34-newkey"  // bench build: one more table line (test_new_setting)
 #elif defined(TELEMETRY_NEWVALUE)
-#define ROVER_FW_VERSION "0.6.33-newvalue"  // bench build: the example lines of include/user_telemetry.h
+#define ROVER_FW_VERSION "0.6.34-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.6.33"
+#define ROVER_FW_VERSION "0.6.34"
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A

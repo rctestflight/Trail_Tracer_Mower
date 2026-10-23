@@ -3,6 +3,32 @@
 Newest first. Each release gives what changed for the user, the settings that the user must set or check, and what
 is not tested. The full change history for developers is in `include/firmware_version.h`.
 
+## 0.6.34
+
+### Changes
+
+- **Fix: the rover does nothing after the button press.** At the start, the rover could lock on the wrong Tx
+  frequency until the next restart. It then saw no wire signal and waited. It now keeps the right frequency.
+- **The turn at the end of a timed follow uses the bounce settings.** The rover leaves the wire at the follow end leave
+  angle, plus or minus the bounce spread. The angle to the wire is never less than the bounce minimum leave angle.
+- New setting: follow end leave angle `rover_follow_exit_deg`, default 90° (straight into the loop).
+- The inward turn minimum and maximum now apply only when the rover leaves the charger.
+- **Button presses in the log.** Each press gives one event with its action: drive mode auto, cruise on or off, centre
+  calibration, steering direction, settings erase (start, cancelled, done), or no action.
+- **USB in the log.** USB connect and disconnect, and the USB state at each start.
+- **Sensor frequency and calibration in the log** at each start of the Rx STM32.
+
+### Settings to set or check
+
+- None. All changes work with the defaults.
+
+### Not tested
+
+- The frequency fix was tested on a bench board: the old firmware locked on the wrong frequency when the start command
+  had to be sent again; the new firmware kept the right frequency at 3 of 3 starts. Not tested on a rover.
+- The follow end turn was tested in the PC emulator only: 35 turns in 80 min, all from 65° to 115°, no escape.
+- Button events: each action needs one real press. The USB and calibration events were read on a bench board.
+
 ## 0.6.33
 
 ### Changes
@@ -13,7 +39,6 @@ is not tested. The full change history for developers is in `include/firmware_ve
   - Each setting change gives one log event with the old and the new value. This applies to all sources: the app,
     the USB port, config.json, the button, and the DSP values that the Rx STM32 reports.
   - The fleet key (`cmd_key`) and the Wi-Fi password show only "set" or "not set". Their values never go into the log.
-  - To read the settings from a log file: `python tools/rover_log.py settings <log file>`.
 - **Timed roam and follow** (Rover mode).
   - The rover roams for the roam time. Then it finds the wire, joins it and follows it for the follow time. Then it
     stops, turns inward by a random angle (inward turn minimum to maximum) and roams again.
@@ -43,8 +68,8 @@ is not tested. The full change history for developers is in `include/firmware_ve
 
 ### Not tested
 
-- The setting dump and the change events were not tested on a rover. The main build is good. A bench or field log
-  from this release is the first test: `python tools/rover_log.py settings <log file>` must show one complete dump
-  at the start.
+- The setting dump and the change events were tested on a bench board only, through the PC telemetry station: one
+  complete dump (149 settings) 5.4 s after the start, and one change event for each USB setting change. The repeat
+  every 10 minutes was not tested.
 - The timed cycle was tested in the PC emulator only, on its 12 m circle: roam 60 s, follow 30 s,
   turn inward, roam again; 4 charges in 40 min with no escape; roam time 0 gives roam only.

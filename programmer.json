@@ -1,1 +1,1 @@
-{"title": "Rx test build 0.6.24", "description": "Rx firmware 0.6.24 with the matching Rx STM32 app", "esp32": {"env": "lolin_s2_mini", "label": "ESP32 Rx firmware 0.6.24"}, "stm32": "latest"}
+{"title": "Rx test build", "description": "Rx firmware with the matching Rx STM32 app", "esp32": {"env": "lolin_s2_mini", "label": "ESP32 Rx firmware"}, "stm32": "latest"}

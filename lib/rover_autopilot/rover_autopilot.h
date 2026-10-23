@@ -80,6 +80,8 @@ struct Config {
   float probeLength = 0.5f;        // m: the straight drive of the probe at the start in range (0 = no probe)
   float roamTimeS = 60;            // s of roam before a timed return and follow (0 = off)
   float followTimeS = 30;          // s of follow after a timed return, then turn inward and roam (0 = off)
+  float followExitDeg = 90;        // leave angle to the wire at a follow end, before the bounce spread (operator
+                                   // 2026-10-23: 90 = straight into the loop, adjustable)
   float noTxRoamS = 60;            // s without Tx signal before ROAM and RETURN stop
   float noTxS = 2;                 // s without Tx signal before the other states stop
   float lostTimeout = 30;          // s in JOIN, FOLLOW or DEPART (0 = never)
@@ -180,6 +182,7 @@ class Autopilot {
   bool planPolKnown_ = false;
   float run_ = 0, departLeft_ = 0, reverseArm_ = 0, dMinOpen_ = 0;
   float roamT_ = 0, followT_ = 0;  // s in ROAM, s in FOLLOW (timed roam and follow)
+  bool followEnd_ = false;         // DEPART from a follow end: the turn uses the bounce rule, not the inward turn
   bool timed() const { return cfg.roamTimeS > 0 && cfg.followTimeS > 0 && !cfg.followOnly; }
   int turnBacks_ = 0;
   State dockFrom_ = FOLLOW;

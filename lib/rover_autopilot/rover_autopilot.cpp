@@ -77,6 +77,7 @@ void Autopilot::reset() {
   pivTarget_ = pivTurned_ = pivT_ = 0;
   run_ = departLeft_ = reverseArm_ = 0;
   roamT_ = followT_ = 0;
+  followEnd_ = false;
   wrongCount_ = 0;
   entrySeen_ = false;
   exitArmed_ = true;
@@ -547,6 +548,7 @@ Output Autopilot::stepStates(const Inputs& in) {
           decide(DEC_FOLLOW_END, 0, 0);
           state = DEPART;
           sub = SUB_TURN_STOP;
+          followEnd_ = true;
           stopT_ = 0;
           return o;
         }
@@ -571,8 +573,17 @@ Output Autopilot::stepStates(const Inputs& in) {
     case DEPART: {
       if (sub == SUB_TURN_STOP) {
         if (!stopped(in)) return o;
-        const float tmin = cfg.turnMinDeg * D2R, tmax = fmaxf(cfg.turnMaxDeg, cfg.turnMinDeg) * D2R;
-        startPivot(tmin + (tmax - tmin) * rnd(), cfg.goalCW ? -1 : 1);  // goal clockwise: the inside is on the right
+        float turn;
+        if (followEnd_) {  // follow end: the follow end leave angle, then the bounce spread and minimum as at a bounce
+          const float mn = cfg.bounceMinDeg * D2R;
+          turn = cfg.followExitDeg * D2R + (2 * rnd() - 1) * cfg.bounceSpreadDeg * D2R;
+          turn = fmaxf(mn, fminf(PI_F - mn, turn));
+          followEnd_ = false;
+        } else {  // after a charge: the inward turn
+          const float tmin = cfg.turnMinDeg * D2R, tmax = fmaxf(cfg.turnMaxDeg, cfg.turnMinDeg) * D2R;
+          turn = tmin + (tmax - tmin) * rnd();
+        }
+        startPivot(turn, cfg.goalCW ? -1 : 1);  // goal clockwise: the inside is on the right
         sub = SUB_TURN;
         return o;
       }

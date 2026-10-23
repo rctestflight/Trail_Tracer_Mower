@@ -77,6 +77,8 @@ enum EventCode : uint16_t {
   EV_RESTART_REFUSED = 13,  // restart or ROM-mode request while the vehicle moves: a 1 restart 2 ROM, b source (0 USB 1 ESP-NOW)
   EV_PREV_BOOT = 14,  // boot: the state before the reset. a reset reason (esp_reset_reason), b uptime ms, text stage, mode, heap
   EV_STM32 = 15,      // power-on STM32 handshake: a 1 HELLO answered (text: its payload in hex) 0 no answer, b payload bytes
+                      // 0.6.34: a 2: the wire bin, radius, angle and wire-bin gain of each sensor in use (text), at each
+                      // Rx STM32 start and change
   EV_TIME = 16,       // PC time from a monitor (MON 0x44): a unix seconds, b millis() at that time, text unix ms
   // 17 to 20: see the event names in include/telemetry_table.h
   EV_SETTINGS = 21,        // all settings ("list" lines), at boot and each 10 min: a part (0..), b part count, text
@@ -89,7 +91,11 @@ enum EventCode : uint16_t {
   EV_STM32_CMD = 18,  // STM32 command link (lib/stm_settings, 0.5.25): a kind (stmset::Kind), b command ID, gap ms or HELLO/BOOT result; text
   EV_USB = 20,        // 0.5.104: USB link state change: a 1 output stop seen, 2 guard reconnect, 3 host port opened, 4 host port
                       // closed, 5 no USB input for 60 s with the port open, 6 port closed 60 s with the bus up (text: stack counters);
-                      // b the count of that kind; text the counters
+                      // b the count of that kind; text the counters. 0.6.34: 7 USB connected (the host enumerated the
+                      // board), 8 USB disconnected; b 0 at the first check after the start (the state then), else the count
+  EV_BUTTON = 23,     // 0.6.34: a button press: a action (ButtonAction, include/rx_platform.h: 0 none, 1 auto drive mode on,
+                      // 2 cruise toggle, 3 centre calibration, 4 steering direction, 5 erase hold start, 6 erase cancelled,
+                      // 7 erase done), b press length ms, text the action and its result
 };
 
 // One sample, in engineering units; packSample() quantises it.
