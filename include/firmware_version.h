@@ -3,6 +3,13 @@
 #pragma once
 
 // Change history
+//   0.6.35: each change from follow to roam (the end of a timed follow, and after a charge) turns to the wire leave
+//     angle (rover_follow_exit_deg, label "Wire leave angle"), plus the bounce spread, at least the bounce minimum
+//     (operator 2026-10-23). The inward turn minimum and maximum are not used.
+//     Bounce re-arm (operator 2026-10-23): after any turn the bounce arms when the 0.3 s radius falls by the new
+//     re-arm radius fall (rover_rearm_fall_mm, 30 mm) below its peak since the turn; the 0.5 m drive rule, the
+//     re-arm distance and the approach-fit closing test go. The bounce distance comes from the radius and the height
+//     setting, not the offset x. rover_rearm_drop_m now sets only the outside turn-back repeat.
 //   0.6.34: the turn at a follow end (timed roam and follow) leaves the wire at the new follow end leave angle
 //     (rover_follow_exit_deg, 90 deg = straight into the loop), plus the bounce spread, kept at least the bounce
 //     minimum from the wire, as at a bounce. Before, it used the inward turn (60 to 140 deg), which ignored the bounce
@@ -291,12 +298,12 @@
 #if defined(OTA_TEST_VERSION)
 #define ROVER_FW_VERSION OTA_TEST_VERSION  // OTA test images (envs ota_a, ota_b, ota_test_crash)
 #elif defined(BENCH_FAKE_IMU)
-#define ROVER_FW_VERSION "0.6.34+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.6.35+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #elif defined(SETTINGS_NEWKEY)
-#define ROVER_FW_VERSION "0.6.34-newkey"  // bench build: one more table line (test_new_setting)
+#define ROVER_FW_VERSION "0.6.35-newkey"  // bench build: one more table line (test_new_setting)
 #elif defined(TELEMETRY_NEWVALUE)
-#define ROVER_FW_VERSION "0.6.34-newvalue"  // bench build: the example lines of include/user_telemetry.h
+#define ROVER_FW_VERSION "0.6.35-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.6.34"
+#define ROVER_FW_VERSION "0.6.35"
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A

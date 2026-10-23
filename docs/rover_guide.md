@@ -53,7 +53,9 @@ Three ways, all with the same keys:
 | rover_bounce_m | 0.5 | Distance to the wire of the bounce reading, stop and pivot |
 | rover_bounce_spread_deg | 45 | Random +- spread on the mirror bounce |
 | rover_bounce_min_deg | 35 | Least leave angle to the wire; the fitted heading must be better than it, else the probe first |
-| rover_rearm_m, rover_rearm_drop_m | 1.0, 0.3 | The next bounce arms at this distance, or when the distance falls this much below its highest value since the bounce |
+| rover_rearm_fall_mm | 30 | After any turn, the bounce arms again when the wire radius falls this much below its highest value since the turn |
+| rover_rearm_drop_m | 0.3 | Outside the loop: the rover turns round again each time its distance grows this much since the last turn-back |
+| rover_rearm_m | 1.0 | Not used from Rx 0.6.35 |
 | rover_beacon_bounce | true | Turn round at a beacon in roam and return |
 | rover_beacon_m, rover_beacon_rearm_m | 0.15, 0.25 | Beacon distance of the turn; the beacon counts again past the re-arm distance |
 | rover_beacon_spread_deg | 30 | Random +- spread on the 180 deg beacon turn |

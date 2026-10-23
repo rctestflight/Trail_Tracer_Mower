@@ -3,6 +3,36 @@
 Newest first. Each release gives what changed for the user, the settings that the user must set or check, and what
 is not tested. The full change history for developers is in `include/firmware_version.h`.
 
+## 0.6.35
+
+### Changes
+
+- **Every change from follow to roam uses the wire leave angle.** This applies at the end of a timed follow and after
+  a charge. The rover turns to the wire leave angle (default 90°), plus or minus the bounce spread, and never less than
+  the bounce minimum leave angle from the wire.
+- The setting `rover_follow_exit_deg` now has the label "Wire leave angle". Its value stays.
+- The inward turn minimum and maximum (`rover_turn_min_deg`, `rover_turn_max_deg`) are no longer used.
+- **Fix: repeated bounces near the wire.** After a turn, the rover bounced again after 0.5 m of drive, often while it
+  still drove away from the wire. Now, after any turn, the bounce arms again only when the rover closes on the wire:
+  the wire radius passes its highest value since the turn and then falls by the re-arm radius fall.
+  - New setting: re-arm radius fall `rover_rearm_fall_mm`, default 30 mm.
+  - The re-arm distance `rover_rearm_m` is no longer used.
+  - The re-arm drop `rover_rearm_drop_m` now sets only how often the rover turns round outside the loop.
+- **The bounce distance comes from the wire radius.** The lateral offset reads high near the wire, so the distance
+  from it could read 0.25 m at any point inside about 0.5 m. A wire depth or height setting error of 120 mm now moves
+  the bounce point by less than 6 cm.
+
+### Settings to set or check
+
+- None. The new setting works at its default.
+
+### Not tested
+
+- PC emulator only. Bounce re-arm: 648 missions of 10 min, 6 track shapes, wire depth up to 120 mm off the height
+  setting and a depth that changes round the loop. False bounces 2254 -> 246; the longest chain of false bounces
+  7 -> 3. Crossings of the wire in roam rose from 83 to 189, most of them with a sensor at the rover centre and
+  shallow leave angles, and in a 2.5 m wide loop.
+
 ## 0.6.34
 
 ### Changes

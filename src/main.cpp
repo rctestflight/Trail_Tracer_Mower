@@ -1443,6 +1443,7 @@ void applyDeviceConfig(const DeviceConfig& cfg)
   rc.bounceMinDeg             = cfg.rover_bounce_min_deg;
   rc.rearmDistance            = cfg.rover_rearm_m;
   rc.rearmDrop                = cfg.rover_rearm_drop_m;
+  rc.rearmFall                = cfg.rover_rearm_fall_mm * 0.001f;
   rc.beaconBounce             = cfg.rover_beacon_bounce;
   rc.beaconDistance           = cfg.rover_beacon_m;
   rc.beaconRearm              = cfg.rover_beacon_rearm_m;

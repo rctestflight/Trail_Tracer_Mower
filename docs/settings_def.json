@@ -1679,6 +1679,17 @@
       "group": "Rover mode",
       "description": "At the end of a timed follow: the angle between the wire and the new heading, before the bounce spread. 90 = straight into the loop. The bounce spread and the bounce minimum leave angle apply as at a bounce",
       "label": "Follow end leave angle"
+    },
+    "rover_rearm_fall_mm": {
+      "type": "float",
+      "unit": "mm",
+      "min": 5.0,
+      "max": 500.0,
+      "default": 30.0,
+      "live": false,
+      "group": "Rover mode",
+      "description": "After any turn, the bounce arms again when the wire radius falls this much below its highest value since the turn: the rover closes on the wire again. 30 mm is 3 x the radius noise. More delays the bounce; less lets noise arm it",
+      "label": "Re-arm radius fall"
     }
   }
 }

@@ -14,10 +14,10 @@
 //            180 deg on the wire, follow on. Lost: stop; after rover_no_tx_s one 30 deg turn in place. Dock contacts -> DOCK.
 //   DOCK     hold still while charging; charge end -> DEPART (follow-only: FOLLOW). A dock reached from ROAM or
 //            RETURN goes back to that state.
-//   DEPART   follow a random distance (depart minimum to maximum) after the dock contacts open, stop, pivot inward by
-//            a random angle, ROAM with the bounce disarmed.
+//   DEPART   follow a random distance (depart minimum to maximum) after the dock contacts open, stop, pivot inward to
+//            the leave angle (plus the bounce spread, at least the bounce minimum), ROAM with the bounce disarmed.
 // Timed roam and follow (roam time and follow time both over 0, not follow-only): after the roam time in ROAM,
-// RETURN; in FOLLOW after the follow time: stop, pivot inward by a random angle, ROAM with the bounce disarmed (the
+// RETURN; in FOLLOW after the follow time: stop, pivot inward to the leave angle, ROAM with the bounce disarmed (the
 // end of DEPART). A charge return comes first; both times start again at each new roam.
 //   FAULT    stopped until the drive mode is entered again: stuck detector (signal not lost), or lost longer than the
 //            lost timeout in JOIN, FOLLOW or DEPART, or no polarity at a join with "join without polarity" = stop.
@@ -65,8 +65,9 @@ struct Config {
   float bounceDistance = 0.5f;     // m
   float bounceSpreadDeg = 45;      // +- deg on the mirror bounce leave angle
   float bounceMinDeg = 35;         // least leave angle to the wire, deg
-  float rearmDistance = 1.0f;      // m
-  float rearmDrop = 0.3f;          // m
+  float rearmDistance = 1.0f;      // m, not used from 0.6.35 (the radius re-arm applies)
+  float rearmDrop = 0.3f;          // m: outside the loop, the next turn-back after this much more distance
+  float rearmFall = 0.03f;         // m: the bounce re-arms when the radius falls this much below its peak since the turn
   bool beaconBounce = true;
   float beaconDistance = 0.15f;    // m
   float beaconRearm = 0.25f;       // m
@@ -76,12 +77,12 @@ struct Config {
   float approachAngleDeg = 30;     // deg
   bool wrongDirCheck = true;
   float departMin = 0.5f, departMax = 3.0f;   // m
-  float turnMinDeg = 60, turnMaxDeg = 140;     // inward turn after depart, deg
+  float turnMinDeg = 60, turnMaxDeg = 140;     // not used from 0.6.35 (the leave angle applies), deg
   float probeLength = 0.5f;        // m: the straight drive of the probe at the start in range (0 = no probe)
   float roamTimeS = 60;            // s of roam before a timed return and follow (0 = off)
   float followTimeS = 30;          // s of follow after a timed return, then turn inward and roam (0 = off)
-  float followExitDeg = 90;        // leave angle to the wire at a follow end, before the bounce spread (operator
-                                   // 2026-10-23: 90 = straight into the loop, adjustable)
+  float followExitDeg = 90;        // leave angle to the wire at each change from follow to roam, before the bounce
+                                   // spread (operator 2026-10-23: 90 = straight into the loop, adjustable)
   float noTxRoamS = 60;            // s without Tx signal before ROAM and RETURN stop
   float noTxS = 2;                 // s without Tx signal before the other states stop
   float lostTimeout = 30;          // s in JOIN, FOLLOW or DEPART (0 = never)
@@ -115,6 +116,7 @@ struct Reading {
   bool valid = false;
   float X = 0, d = 0;              // this packet
   float Xf = 0, df = 0;            // low-pass, 0.05 s
+  float Rf = 0, Rs = 0;            // radius: low-pass 0.05 s, and 0.3 s for the bounce re-arm
 };
 
 struct Decision {
@@ -160,7 +162,7 @@ class Autopilot {
   void planBounce();
   void planJoin();
   bool fitGood(float limitDeg) const;
-  bool fitClosing() const;
+  void rearmStart();
   void planFromFit(const Inputs& in);
   void probeBegin(ProbeFor why, Output& o, float speed);
   void bounceNow(const Inputs& in);
@@ -171,18 +173,16 @@ class Autopilot {
   float lostT_ = 0, stopT_ = 0, startT_ = 0;
   // pivot
   float pivTarget_ = 0, pivTurned_ = 0, pivNet_ = 0, pivT_ = 0;
-  float drivenSinceTurn_ = 0;
   bool startCheck_ = true;      // until the first bounce, join or follow: polarity outside = wrong Tx direction   // m of straight drive since the last bounce, beacon or depart turn
   int8_t pivDir_ = 1;
   // bounce and join plan
   bool armed_ = true, beaconArmed_ = true, joinArmed_ = true;
-  float dMax_ = 0, dMin_ = 0, dRef_ = 0;
+  float rMax_ = 0, dMin_ = 0, dRef_ = 0;   // rMax_: the highest slow radius since the last turn
   float planPsi_ = 0, planX_ = 0, planLeave_ = 0, planRot_ = 0, planTurn_ = 0;
   int8_t planSide_ = 1, planDir_ = 1, planInside_ = 1;
   bool planPolKnown_ = false;
   float run_ = 0, departLeft_ = 0, reverseArm_ = 0, dMinOpen_ = 0;
   float roamT_ = 0, followT_ = 0;  // s in ROAM, s in FOLLOW (timed roam and follow)
-  bool followEnd_ = false;         // DEPART from a follow end: the turn uses the bounce rule, not the inward turn
   bool timed() const { return cfg.roamTimeS > 0 && cfg.followTimeS > 0 && !cfg.followOnly; }
   int turnBacks_ = 0;
   State dockFrom_ = FOLLOW;

@@ -12,13 +12,13 @@ const float CAPTURE_OFFSET = 0.10f;   // m: |X| at which the open-loop join hand
 const float RUN_LIMIT = 3.0f;         // open-loop join: hand over after this many times the expected run
 const float STOP_SPEED = 0.02f;       // m/s
 const float STOP_YAW = 0.25f;         // rad/s: stopped under this (a driving rover's gyro reads up to ~0.2 rad/s)
-const float REARM_DRIVE = 0.5f;       // m of straight drive after a bounce turn: the next bounce arms
 const float STOP_TIME = 1.5f;         // s: stopped at the latest after this
 const float YAW_ACCEL = 3.0f;         // rad/s^2: the pivot brakes in time for this
 const float PIVOT_MIN = 0.3f;         // part of the full yaw rate at the end of a pivot
 const float WRONG_FRAMES = 20;        // packets of wrong direction in a row before the reversal
 const float REVERSE_ARM = 1.0f;       // m of FOLLOW after a reversal before the check acts again
 const float FILTER_TAU = 0.05f;       // s, reading low-pass
+const float REARM_TAU = 0.3f;         // s, radius low-pass for the bounce re-arm: a rover log reads 1 cm radius noise (95 %)
 
 float wrapPi(float a) {
   while (a > PI_F) a -= 2 * PI_F;
@@ -77,7 +77,6 @@ void Autopilot::reset() {
   pivTarget_ = pivTurned_ = pivT_ = 0;
   run_ = departLeft_ = reverseArm_ = 0;
   roamT_ = followT_ = 0;
-  followEnd_ = false;
   wrongCount_ = 0;
   entrySeen_ = false;
   exitArmed_ = true;
@@ -104,16 +103,6 @@ void Autopilot::decide(DecisionCode c, float turnDeg, int8_t side) {
     fit_.solve(dec.fit, polNow_);
   }
   dec.psiDeg = dec.fit.valid ? dec.fit.psiDeg : 0;
-}
-
-// The fit shows the rover closing on the wire: the fitted distance falls over the span by more than 3 x its scatter.
-bool Autopilot::fitClosing() const {
-  FitResult f;
-  if (!fit_.solve(f, polNow_)) return false;
-  // At least the probe length of straight drive (the configured confident span): a pivot leaves a few frames of creep
-  if (f.span < cfg.probeLength) return false;
-  const float fall = sinf(fabsf(f.psiDeg) * D2R) * f.span;
-  return f.psiDeg * f.dNow > 0 && fall > 3 * f.residual;   // toward the wire: heading and side agree
 }
 
 // The approach fit is good enough when its uncertainty is under the limit.
@@ -166,7 +155,6 @@ void Autopilot::joinNow(const Inputs& in) {
 void Autopilot::feedFit(const Inputs& in) {
   if (last_.external || last_.w != 0.0f) { fit_.reset(); return; }
   fit_.advance(in.v * in.dt);
-  drivenSinceTurn_ += fabsf(in.v) * in.dt;
   if (in.inRange && in.R > 0) fit_.add(in.x, in.y, in.R, cfg.sensorHeight, in.inside);
 }
 
@@ -223,11 +211,18 @@ void Autopilot::read(const Inputs& in) {
       d = fabsf(r0 - d1) < fabsf(r1 - d1) ? r0 : r1;
     }
   }
-  const float k = 1 - expf(-in.dt / FILTER_TAU);
-  if (!rd.valid) { rd.Xf = X; rd.df = d; }
-  else { rd.Xf += k * (X - rd.Xf); rd.df += k * (d - rd.df); }
+  const float k = 1 - expf(-in.dt / FILTER_TAU), kr = 1 - expf(-in.dt / REARM_TAU);
+  if (!rd.valid) { rd.Xf = X; rd.df = d; rd.Rf = rd.Rs = R; }
+  else { rd.Xf += k * (X - rd.Xf); rd.df += k * (d - rd.df); rd.Rf += k * (R - rd.Rf); rd.Rs += kr * (R - rd.Rs); }
   rd.X = X; rd.d = d;
   rd.valid = true;
+}
+
+// The end of a turn: the bounce re-arm starts from the radius here (the slow radius restarts, so its lag through the
+// turn does not read as a fall)
+void Autopilot::rearmStart() {
+  rd.Rs = rd.Rf;
+  rMax_ = rd.valid ? rd.Rs : 99;
 }
 
 bool Autopilot::stopped(const Inputs& in) {
@@ -387,8 +382,7 @@ Output Autopilot::stepStates(const Inputs& in) {
           if (pivotStep(in, o)) {
             sub = SUB_NONE;
             armed_ = joinArmed_ = false;  // as after a bounce turn
-            dMax_ = rd.valid ? rd.df : 99;
-            drivenSinceTurn_ = 0;
+            rearmStart();
             o = Output();
           }
           return o;
@@ -401,8 +395,7 @@ Output Autopilot::stepStates(const Inputs& in) {
           if (pivotStep(in, o)) {
             sub = SUB_NONE;
             armed_ = joinArmed_ = false;
-            dMax_ = rd.valid ? rd.df : 99;
-            drivenSinceTurn_ = 0;
+            rearmStart();
             startCheck_ = false;
             bounces++;
             o = Output();
@@ -433,13 +426,12 @@ Output Autopilot::stepStates(const Inputs& in) {
       if (!armed_ || !joinArmed_) {
         if (!rd.valid) armed_ = joinArmed_ = true;
         else {
-          dMax_ = fmaxf(dMax_, rd.df);
-          // Closing on the wire since the pivot (the fit: the distance falls by more than 3 x its scatter): the turn did
-          // not take the rover away; it must bounce (or join) again before the wire, at any distance
-          // ... or a short straight drive since the turn: still inside the bounce distance, it bounces again before the wire
-          const bool dropped = rd.df < dMax_ - cfg.rearmDrop || fitClosing() || drivenSinceTurn_ >= REARM_DRIVE;
-          if (rd.df >= cfg.rearmDistance || dropped) armed_ = true;
-          if (rd.df > cfg.approachDistance + 0.1f || dropped) joinArmed_ = true;  // the join starts on entry: closing in
+          // The radius passes its highest value since the turn and falls by the re-arm fall: the rover closes on the
+          // wire again. The radius only: no height, no fixed distance, so any track shape, leave angle or wire depth
+          rMax_ = fmaxf(rMax_, rd.Rs);
+          const bool closing = rd.Rs < rMax_ - cfg.rearmFall;
+          if (closing) armed_ = true;
+          if (rd.df > cfg.approachDistance + 0.1f || closing) joinArmed_ = true;  // the join starts on entry: closing in
         }
       }
       if (state == RETURN && joinArmed_ && rd.valid && rd.df <= cfg.approachDistance) {
@@ -450,7 +442,10 @@ Output Autopilot::stepStates(const Inputs& in) {
         o.v = approachV;
         return o;
       }
-      if (armed_ && rd.valid && rd.d <= cfg.bounceDistance) {
+      // Bounce distance from the radius and the height setting. The offset x reads high near the wire (the rest of the
+      // loop adds field); the radius does not. A height error of 120 mm moves the bounce point by under 6 cm at 0.5 m.
+      const float dR = rd.valid ? sqrtf(fmaxf(0.0f, rd.Rf * rd.Rf - cfg.sensorHeight * cfg.sensorHeight)) : 99;
+      if (armed_ && rd.valid && dR <= cfg.bounceDistance) {
         bounceNow(in);  // the fitted heading, or square-on with no fit
         return o;
       }
@@ -548,7 +543,6 @@ Output Autopilot::stepStates(const Inputs& in) {
           decide(DEC_FOLLOW_END, 0, 0);
           state = DEPART;
           sub = SUB_TURN_STOP;
-          followEnd_ = true;
           stopT_ = 0;
           return o;
         }
@@ -573,16 +567,11 @@ Output Autopilot::stepStates(const Inputs& in) {
     case DEPART: {
       if (sub == SUB_TURN_STOP) {
         if (!stopped(in)) return o;
-        float turn;
-        if (followEnd_) {  // follow end: the follow end leave angle, then the bounce spread and minimum as at a bounce
-          const float mn = cfg.bounceMinDeg * D2R;
-          turn = cfg.followExitDeg * D2R + (2 * rnd() - 1) * cfg.bounceSpreadDeg * D2R;
-          turn = fmaxf(mn, fminf(PI_F - mn, turn));
-          followEnd_ = false;
-        } else {  // after a charge: the inward turn
-          const float tmin = cfg.turnMinDeg * D2R, tmax = fmaxf(cfg.turnMaxDeg, cfg.turnMinDeg) * D2R;
-          turn = tmin + (tmax - tmin) * rnd();
-        }
+        // Each change from follow to roam (a follow end, or after a charge): the leave angle, then the bounce spread and
+        // minimum as at a bounce (operator 2026-10-23)
+        const float mn = cfg.bounceMinDeg * D2R;
+        float turn = cfg.followExitDeg * D2R + (2 * rnd() - 1) * cfg.bounceSpreadDeg * D2R;
+        turn = fmaxf(mn, fminf(PI_F - mn, turn));
         startPivot(turn, cfg.goalCW ? -1 : 1);  // goal clockwise: the inside is on the right
         sub = SUB_TURN;
         return o;
@@ -593,8 +582,7 @@ Output Autopilot::stepStates(const Inputs& in) {
           sub = SUB_NONE;
           roamT_ = followT_ = 0;
           armed_ = joinArmed_ = false;
-          dMax_ = rd.valid ? rd.df : 99;
-          drivenSinceTurn_ = 0;
+          rearmStart();
           o = Output();
         }
         return o;
