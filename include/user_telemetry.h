@@ -62,3 +62,5 @@ TLM(rover_fault,       U8,  1,   "",    0, 10HZ, "Rover decisions", "Fault: 0 no
 TLM(rover_dec_d_mm,    U16, 1,   "mm",  0, 10HZ, "Rover decisions", "Distance to the wire at the decision")
 // 0.6.33: sensor 2 wire radius from the Rx STM32 (set in telemetrySample). Sensor 2 sends only with enable_sensor_2 on.
 TLM(s2_radius_mm,      U16, 1,   "mm",  0, LOG,  "Position", "Wire radius, sensor 2 (no value: sensor 2 off or no wire)")
+// 0.6.36: the inside filter's belief (src/main.cpp insideFilter); wire_inside changes at 95 % and 5 %.
+TLM(wire_inside_pct,   U8,  1,   "%",   0, 10HZ, "Polarity detection", "Inside filter: chance that the sensor is inside the loop (wire_inside changes at 95 % and 5 %)")

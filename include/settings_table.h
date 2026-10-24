@@ -49,7 +49,10 @@ S(steering_rate_ki,      steering_rate_ki,      T_F64,    0.00,  0,     NOLIM,  
 S(steering_rate_kd,      steering_rate_kd,      T_F64,    0.0001,   0,     NOLIM,  "",        "rateKd",   0,          "", "", "", "")
 S(steering_rate_pid_direction, steering_rate_pid_direction, T_IBOOL, 0, 0, 1,    "",        "rateDir",  0,          "", "", "", "")
 S(steering_rate_max_dps, steering_rate_max_dps, T_F64,    90.0,  0.001, 500,    "",        "rateMax",  0,          "", "", "", "")
-S(enable_sensor_2,       enable_sensor_2,       T_BOOL,   0,     NOLIM, NOLIM,  "",        "enS2",     0,          "", "", "", "")
+S(enable_sensor_2,       enable_sensor_2,       T_BOOL,   0,     NOLIM, NOLIM,  "",        "enS2",     0,          "", "Wire and sensors", "Sensor 2", "On: the sensor board reads both sensors, and the rover shows and logs the sensor 2 data (position, radius, polarity, spectrum). Off: the board reads sensor 1 only and gives it all its processing time, for the best sensor 1 signal. Sensor 2 always listens on Tx channel 1. Sensor 2 data changes no rover behaviour unless Use sensor 2 for control is also on")
+// 0.6.36: sensor 2 for behaviour (operator 2026-10-24: one setting for the data, one for the control). Default off: sensor 2
+// can be fitted anywhere (for example the rear bumper) and with any sign; only a sensor 2 set up like sensor 1 may steer decisions.
+SF(use_sensor_2, bool, T_BOOL, 0, NOLIM, NOLIM, "", "useS2", 0, "", "Wire and sensors", "Use sensor 2 for control", "On (with Sensor 2 on): the inside/outside value, the heading round the loop and the follow direction come from the sensor nearest the wire. Off: sensor 2 is data only (log and app), and every rover decision uses sensor 1. Turn it on only when sensor 2 faces the same way as sensor 1 and has the same sign: a sensor 2 with the opposite sign gives the wrong side")
 S(stuck_threshold_mm,    stuck_threshold_mm,    T_F32,    15.0,  1,     NOLIM,  "",        "stThresh", 0,          "", "", "", "")
 S(stuck_timeout_ms,      stuck_timeout_ms,      T_F32,    18000, 1000,  NOLIM,  "",        "stTout",   0,          "", "", "", "")
 S(BTxFollowChannel,      BTxFollowChannel,      T_U8,     0,     0,     2,      "",        "btxCh",    0,          "", "", "", "")
@@ -81,6 +84,7 @@ SF(rover_bounce_min_deg, float, T_F32, 65, 0, 90, "", "rvBncMin", 0, "deg", "Rov
 SF(rover_rearm_m, float, T_F32, 1.0, 0.05, 50, "", "rvRearm", 0, "m", "Rover mode", "Re-arm distance", "Not used from Rx 0.6.35: the re-arm radius fall applies")
 SF(rover_rearm_drop_m, float, T_F32, 0.3, 0.01, 20, "", "rvRearmDr", 0, "m", "Rover mode", "Turn-back repeat distance", "Outside the loop: the rover turns round again each time its distance from the wire grows this much since the last turn-back")
 SF(rover_rearm_fall_mm, float, T_F32, 30, 5, 500, "", "rvRearmFall", 0, "mm", "Rover mode", "Re-arm radius fall", "After any turn, the bounce arms again when the wire radius falls this much below its highest value since the turn: the rover closes on the wire again. 30 mm is 3 x the radius noise. More delays the bounce; less lets noise arm it")
+SF(wire_max_depth_mm, float, T_F32, 120, 0, 1000, "", "rvWireDep", 0, "mm", "Rover mode", "Wire extra depth, maximum", "The most the wire lies deeper than the sensor height setting, anywhere round the loop. The inside/outside value changes side only when the sensor comes this near the wire: deeper wire is seen farther out. 120 mm takes a wire buried 120 mm deeper than the setting. Too small: a real crossing at deep wire shows late; too large: a false polarity reading near the wire can change the side")
 SF(rover_beacon_bounce, bool, T_BOOL, 1, NOLIM, NOLIM, "", "rvBcnBnc", 0, "", "Beacons", "Beacon bounce", "Roam and return: turn round at a beacon")
 SF(rover_beacon_m, float, T_F32, 0.15, 0.01, 10, "", "rvBcnM", 0, "m", "Beacons", "Beacon bounce distance", "Beacon distance at which the rover stops and turns round")
 SF(rover_beacon_rearm_m, float, T_F32, 0.25, 0.01, 20, "", "rvBcnRearm", 0, "m", "Beacons", "Beacon re-arm distance", "After a beacon turn, the beacon counts again past this distance")
@@ -106,7 +110,9 @@ S(espnow_tx_power_dbm,   espnow_tx_power_dbm,   T_F64,    19.5,  2,     19.5,   
 S(cmd_key,               cmd_key,               T_LONG,   0,     NOLIM, NOLIM,  "",        "cmdKey",   0,          "", "", "", "")
 S(imu_required,          imu_required,          T_BOOL,   1,     NOLIM, NOLIM,  "",        "imuReq",   0,          "", "", "", "")
 S(dsp_frame_period_us,   dsp_frame_period_us,   T_I32,    10000, DSP_FRAME_PERIOD_MIN_US, 655350, "", "dspPer", 0,    "", "", "", "")
-S(dsp_sensors,           dsp_sensors,           T_I32,    2,     1,     2,      "",        "dspSens",  0,          "", "", "", "")
+// 0.6.36: dsp_sensors and dsp_lanes are no user settings: "Sensor 2" (enable_sensor_2) sets both (rx_link.inc dspApply). F_LEGACY:
+// an older config.json with these keys loads with no error, and the values have no effect.
+S(dsp_sensors,           dsp_sensors,           T_I32,    2,     1,     2,      "",        "dspSens",  F_LEGACY,   "", "", "", "")
 S(dsp_bin_hz_0,          dsp_bin_hz[0],         T_F64,    53333.3, 42500, 120000, "",      "dspBin0",  F_ZERO_OFF, "", "", "", "")
 S(dsp_bin_hz_1,          dsp_bin_hz[1],         T_F64,    55315.5, 42500, 120000, "",      "dspBin1",  F_ZERO_OFF, "", "", "", "")
 S(dsp_bin_hz_2,          dsp_bin_hz[2],         T_F64,    51323.2, 42500, 120000, "",      "dspBin2",  F_ZERO_OFF, "", "", "", "")
@@ -118,7 +124,7 @@ S(dsp_bin_hz_7,          dsp_bin_hz[7],         T_F64,    0.0,     42500, 120000
 S(dsp_xy_mask,           dsp_xy_mask,           T_I32,    0,     0,     255,    "",        "dspXy",    0,          "", "", "", "")
 S(dsp_slow_adc,          dsp_slow_adc,          T_I32,    1,     0,     1,      "",        "dspSlow",  0,          "", "", "", "")
 S(dsp_pga,               dsp_pga,               T_I32,    -1,    -1,    2,      "",        "dspPga",   0,          "", "", "", "")
-S(dsp_lanes,             dsp_lanes,             T_I32,    2,     0,     3,      "",        "dspLanes", 0,          "", "", "", "")
+S(dsp_lanes,             dsp_lanes,             T_I32,    2,     0,     3,      "",        "dspLanes", F_LEGACY,   "", "", "", "")
 S(dsp_sweep_bins,        dsp_sweep_bins,        T_CHOICE, 255,   NOLIM, NOLIM,  "off|1|2|3|4|5|6|7|8|auto=255", "dspSweep", F_CHOICE_INT, "", "", "", "")
 SF(dt_channels,          uint8_t,               T_U8,     255,   0,     255,    "",        "dtCh",     F_LIVE,     "", "Polarity detection", "Decoded Tx channels", "255 = auto: every Tx channel with a position bin within 30 Hz of its carrier. Else a mask: 1 = CH1, 2 = CH2, 4 = CH3, 8 = CH4, 16 = CH5 (add them; 31 = all five); 0 = polarity detection off. Rx STM32 2.1.134+")
 SF(dt_side_a_ch1,        uint8_t,               T_U8,     0,     0,     2,      "",        "dtSideA1",  F_LIVE,     "", "Polarity detection", "Side A of Tx channel 1", "0 = not set, 1 = inside the perimeter, 2 = outside")

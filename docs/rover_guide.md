@@ -45,6 +45,7 @@ Three ways, all with the same keys:
 | rover_mode | rover | Autonomous mode: rover (full mission), follow only (find the wire, join, follow), or position follower (expert: the plain wire follower, which circles off the wire) |
 | rover_goal_cw | true | Goal direction along the wire, clockwise seen from above |
 | rover_sensor_height_mm | 150 | Height of the sensor centre above the wire |
+| wire_max_depth_mm | 120 | The most the wire lies deeper than the sensor height setting; the inside/outside value changes side only this near the wire |
 | rx_channel | 1 | The followed Tx channel |
 | tx_dir_ch1 to 5 | 0 | Current direction of each Tx channel, for polarity (0 not set, 1 clockwise, 2 counterclockwise) |
 | dt_spread_limit_deg | 45 | Sign spread limit: the Rx sets the polarity only at or under it |
@@ -87,6 +88,7 @@ Three ways, all with the same keys:
 | `rx_channel`, `enable_sensor_2`, `CHARGE_VBATT_STOP`, `CHARGE_MAX_CURRENT`, `CHARGE_MAX_SECONDS` | The STM32 changes at once: the wire is lost until the channel matches, and a charge limit changes. `rx_channel` also causes one STM32 flash write |
 | `pid_direction`, `PWM_OUT_1..4_DEFAULT/MIN/MAX` | A jump of the steering sign, a servo centre or a limit |
 | `rover_mode`, `rover_goal_cw`, `rover_sensor_height_mm`, `rover_roam_speed_mps`, `rover_entry_btx`, `rover_exit_btx`, `BTxFollowChannel` | A step of the drive command, or a change of mission |
+| `use_sensor_2` | The inside/outside value can change its sensor, so a side decision can change |
 | `espnow_enabled`, `telemetry_enabled` | Starting Wi-Fi stops the control loop for about 220 ms |
 
 All other keys are live. Every `set` and `save`, applied or refused, is an event in the vehicle log. Beacon placement for the wrong-direction check: `lib/rover_autopilot/README.md`.
@@ -96,7 +98,8 @@ All other keys are live. Every `set` and `save`, applied or refused, is an event
 | Key | Default | Range | What the STM32 does |
 |---|---|---|---|
 | `rx_channel` | 1 | 1 to 5 | Sensor 1 listens to this transmitter channel |
-| `enable_sensor_2` | false | | Sensor 2 on or off. Sensor 2 always listens to transmitter channel 1. From 0.5.25 a change applies with no restart |
+| `enable_sensor_2` | false | | "Sensor 2". On: the STM32 reads both sensors, and the rover shows and logs the sensor 2 data. Off: the STM32 reads sensor 1 only, with all its processing time, for the best sensor 1 signal. Sensor 2 always listens to transmitter channel 1. A change applies with no restart. From 0.6.36 this setting also sets the STM32 sensor count and lanes; `dsp_sensors` and `dsp_lanes` are no longer settings (an older config.json with them loads with no error) |
+| `use_sensor_2` | false | | "Use sensor 2 for control" (0.6.36, ESP32 only). On, with `enable_sensor_2` on: the inside/outside value, the heading round the loop and the follow direction come from the sensor nearest the wire. Off: sensor 2 is data only, and every rover decision uses sensor 1. Turn it on only when sensor 2 faces the same way as sensor 1 and has the same sign |
 | `CHARGE_VBATT_STOP` | 11.9 | 6 to 16 V | Ends the charge when the battery voltage is above this value. STM32 limit 16.0 V |
 | `CHARGE_MAX_CURRENT` | 6.0 | 0.1 to 6 A | Stops the charge above this current, then waits 10 s. STM32 limit 6.0 A |
 | `CHARGE_MAX_SECONDS` | 180 | 5 to 1800 s | Stops a charge after **2 x** this value: 360 s with the default. STM32 limit 3600 s. Shipped units (V1.0) send 2 x the value too |

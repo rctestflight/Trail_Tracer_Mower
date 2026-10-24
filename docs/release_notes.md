@@ -3,6 +3,47 @@
 Newest first. Each release gives what changed for the user, the settings that the user must set or check, and what
 is not tested. The full change history for developers is in `include/firmware_version.h`.
 
+## 0.6.36
+
+### Changes
+
+- **Fix: the rover starts the follow far from the wire.** A short false "outside" polarity reading 1 m from the wire made
+  the join start the follow there: the rover turned in a circle for the follow time. The same reading stopped some starts
+  with the fault "polarity says outside". Now the inside/outside value changes side only when the readings show a
+  crossing, and a crossing needs the sensor near the wire. Near the wire one clear reading changes the side; far from
+  the wire it takes 3 clear readings in a row.
+  - New setting: wire extra depth, maximum `wire_max_depth_mm`, default 120 mm: the most the wire lies deeper than the
+    sensor height setting anywhere round the loop.
+  - New log value `wire_inside_pct`: how sure the rover is that it is inside the loop, 0 to 100 %.
+- **Fix: a second bounce right after a turn.** In a pivot the sensor swings round the rover centre, so its distance to
+  the wire changes with no drive. After turns over about 90 deg, the swing back read as closing on the wire, and the
+  rover bounced again 0.3 s after the turn, often out over the wire. Now the rover stops turning at the end of each
+  pivot before anything can act, and the bounce re-arm starts from that stopped reading.
+- **Fix: new settings missing from config.json.** After an update, config.json kept its old list of settings: new
+  settings, such as the roam time and the follow time, showed in the app and the USB list but not in the file. Now, at
+  the first start after an update, the rover writes config.json again with every setting. The values in the file stay;
+  the new settings show at their defaults.
+- **Sensor 2: two settings.**
+  - "Sensor 2" (`enable_sensor_2`): on, the sensor board reads both sensors, and the rover shows and logs sensor 2 data.
+    Off (default), the board reads sensor 1 only, for the best sensor 1 signal.
+  - New: "Use sensor 2 for control" (`use_sensor_2`, default off). Only with both on do the inside/outside value, the
+    heading round the loop and the follow direction use the sensor nearest the wire.
+  - The sensor board settings `dsp_sensors` and `dsp_lanes` are no longer settings: "Sensor 2" sets them. An older
+    config.json with them loads with no error.
+
+### Settings to set or check
+
+- `rover_sensor_height_mm` must be the sensor height above the wire. If parts of the wire lie more than 120 mm deeper,
+  set `wire_max_depth_mm` to that depth.
+- **Sensor 2 data now needs "Sensor 2" on.** Before, the sensor board read sensor 2 with `enable_sensor_2` off, and
+  the log had its spectrum and signal level. To keep sensor 2 in the log, set `enable_sensor_2` to true.
+- Set "Use sensor 2 for control" on only when sensor 2 faces the same way as sensor 1 and has the same sign.
+
+### Not tested
+
+- Replay of 2 rover logs (2026-10-24): side changes far from the wire 62 -> 0; 22 of 26 real crossings found within
+  0.4 s, the other 4 were bad readings or over the wire. PC emulator: see the next update of these notes.
+
 ## 0.6.35
 
 ### Changes

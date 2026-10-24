@@ -163,6 +163,7 @@ class Autopilot {
   void planJoin();
   bool fitGood(float limitDeg) const;
   void rearmStart();
+  void settleStart();
   void planFromFit(const Inputs& in);
   void probeBegin(ProbeFor why, Output& o, float speed);
   void bounceNow(const Inputs& in);
@@ -176,7 +177,7 @@ class Autopilot {
   bool startCheck_ = true;      // until the first bounce, join or follow: polarity outside = wrong Tx direction   // m of straight drive since the last bounce, beacon or depart turn
   int8_t pivDir_ = 1;
   // bounce and join plan
-  bool armed_ = true, beaconArmed_ = true, joinArmed_ = true;
+  bool armed_ = true, beaconArmed_ = true, joinArmed_ = true, settle_ = false;  // settle_: after a pivot, wait for the stop (settleStart)
   float rMax_ = 0, dMin_ = 0, dRef_ = 0;   // rMax_: the highest slow radius since the last turn
   float planPsi_ = 0, planX_ = 0, planLeave_ = 0, planRot_ = 0, planTurn_ = 0;
   int8_t planSide_ = 1, planDir_ = 1, planInside_ = 1;

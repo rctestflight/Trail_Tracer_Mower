@@ -72,6 +72,7 @@ void Autopilot::reset() {
   txWait = false;
   lostT_ = stopT_ = startT_ = 0;
   armed_ = beaconArmed_ = joinArmed_ = true;
+  settle_ = false;
   startCheck_ = true;
   turnBacks_ = 0;
   pivTarget_ = pivTurned_ = pivT_ = 0;
@@ -223,6 +224,15 @@ void Autopilot::read(const Inputs& in) {
 void Autopilot::rearmStart() {
   rd.Rs = rd.Rf;
   rMax_ = rd.valid ? rd.Rs : 99;
+}
+
+// 0.6.36: the end of a pivot that goes on to roam. A pivot ends while the rover still turns, and in a pivot the sensor
+// swings round the rover centre: its radius and side change with no drive (rover log 2026-10-24: after turns of 65 to
+// 115 deg the swing-back read as closing on the wire, and the rover bounced 0.3 s after the turn). So nothing acts on
+// a pivot (operator 2026-10-24): the rover stops turning first, and the re-arm starts from the stopped reading.
+void Autopilot::settleStart() {
+  settle_ = true;
+  stopT_ = 0;
 }
 
 bool Autopilot::stopped(const Inputs& in) {
@@ -382,7 +392,7 @@ Output Autopilot::stepStates(const Inputs& in) {
           if (pivotStep(in, o)) {
             sub = SUB_NONE;
             armed_ = joinArmed_ = false;  // as after a bounce turn
-            rearmStart();
+            settleStart();
             o = Output();
           }
           return o;
@@ -395,7 +405,7 @@ Output Autopilot::stepStates(const Inputs& in) {
           if (pivotStep(in, o)) {
             sub = SUB_NONE;
             armed_ = joinArmed_ = false;
-            rearmStart();
+            settleStart();
             startCheck_ = false;
             bounces++;
             o = Output();
@@ -403,6 +413,12 @@ Output Autopilot::stepStates(const Inputs& in) {
           return o;
         default:
           break;
+      }
+      // After a pivot: stop turning before anything acts (settleStart)
+      if (settle_) {
+        if (!stopped(in)) return o;
+        settle_ = false;
+        rearmStart();
       }
       // Driving straight. Polarity says outside the loop: no bounce until inside again.
       // Outside: turn round, and again each time the distance grows by the re-arm drop since the last turn
@@ -582,7 +598,7 @@ Output Autopilot::stepStates(const Inputs& in) {
           sub = SUB_NONE;
           roamT_ = followT_ = 0;
           armed_ = joinArmed_ = false;
-          rearmStart();
+          settleStart();
           o = Output();
         }
         return o;

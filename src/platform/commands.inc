@@ -97,7 +97,7 @@ void espnowCommands(){
 // a Wi-Fi start that stops loop() for about 220 ms (espnow_enabled, telemetry_enabled).
 // docs/rover_guide.md, "Settings", has the same list.
 static const char* const STATIONARY_KEYS[] = {
-  "rx_channel", "enable_sensor_2", "pid_direction",
+  "rx_channel", "enable_sensor_2", "use_sensor_2", "pid_direction",
   "drive_output", "steer_output", "throttle_output", "steer_center_us", "steer_min_us", "steer_max_us",
   "throttle_center_us", "throttle_min_us", "throttle_max_us",
   "PWM_OUT_3_DEFAULT", "PWM_OUT_3_MIN", "PWM_OUT_3_MAX", "PWM_OUT_4_DEFAULT", "PWM_OUT_4_MIN", "PWM_OUT_4_MAX",

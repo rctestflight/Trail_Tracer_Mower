@@ -16,6 +16,7 @@ extern uint8_t vehicleID;
 extern uint8_t rx_channel;
 extern int PWM_OUT_2_DEFAULT;
 extern bool enable_sensor_2;
+bool sensor2Control();  // 0.6.36: sensor 2 acts on behaviour ("Sensor 2" and "Use sensor 2 for control" both on)
 extern StuckVehicle stuckDetector;
 extern bool odrive_rc_active;
 extern float odrive_drive_command;
@@ -26,6 +27,7 @@ extern bool lapFlag;
 extern int vehicleStatus;
 extern int8_t drive_mode_status;
 extern int8_t world_inside;
+extern float world_inside_p;
 extern int8_t world_heading;
 extern bool case2_use_cruise;
 extern bool case2_aux_entry_is_manual;

@@ -3,6 +3,21 @@
 #pragma once
 
 // Change history
+//   0.6.36: inside/outside from the new inside filter (operator 2026-10-24), not the held polarity. Every raw sign
+//     read (Rx STM32 items 9 and 10) goes into a belief, weighted by its spread; a side change needs a crossing, and
+//     a crossing needs the sensor near the wire (height setting + the new setting wire_max_depth_mm, 120 mm, and the
+//     roam speed). Field case 2026-10-24: "outside" bursts at 1 m from the wire started the follow away from the
+//     wire and faulted starts. New log value wire_inside_pct (the belief).
+//     config.json: a setting that the file does not hold (new in an update) makes the file be written again at the
+//     start, with its values kept: every setting shows in config.json (field case 2026-10-24: no roam and follow time
+//     in the file after the 0.6.33 update). Before, only a "save" added new keys.
+//     Pivot settle (operator 2026-10-24): after each pivot that goes on to roam (bounce, turn-back, beacon, follow end)
+//     the rover stops turning before any rule acts; the bounce re-arm starts from the stopped reading. Field case
+//     2026-10-24: the sensor swing-back after turns of 65-115 deg armed a bounce 0.3 s after the turn.
+//     Sensor 2 as two settings (operator 2026-10-24): enable_sensor_2 ("Sensor 2") sets the Rx STM32 sensor count
+//     (CID 38: 2 or 1) and lanes (CID 13: 0x02 or 0x00) and the sensor 2 data; new use_sensor_2 ("Use sensor 2 for
+//     control") lets sensor 2 act on the nearest-sensor choice (worldFacts, follow_dir). dsp_sensors and dsp_lanes
+//     are F_LEGACY.
 //   0.6.35: each change from follow to roam (the end of a timed follow, and after a charge) turns to the wire leave
 //     angle (rover_follow_exit_deg, label "Wire leave angle"), plus the bounce spread, at least the bounce minimum
 //     (operator 2026-10-23). The inward turn minimum and maximum are not used.
@@ -298,12 +313,12 @@
 #if defined(OTA_TEST_VERSION)
 #define ROVER_FW_VERSION OTA_TEST_VERSION  // OTA test images (envs ota_a, ota_b, ota_test_crash)
 #elif defined(BENCH_FAKE_IMU)
-#define ROVER_FW_VERSION "0.6.35+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.6.36+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #elif defined(SETTINGS_NEWKEY)
-#define ROVER_FW_VERSION "0.6.35-newkey"  // bench build: one more table line (test_new_setting)
+#define ROVER_FW_VERSION "0.6.36-newkey"  // bench build: one more table line (test_new_setting)
 #elif defined(TELEMETRY_NEWVALUE)
-#define ROVER_FW_VERSION "0.6.35-newvalue"  // bench build: the example lines of include/user_telemetry.h
+#define ROVER_FW_VERSION "0.6.36-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.6.35"
+#define ROVER_FW_VERSION "0.6.36"
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A

@@ -154,14 +154,93 @@ bool sine_wave_force_disabled = false;
 double target_x_pos = 0;  // target x distance from wire
 double live_position = 0;
 
-// 0.6.21: world facts from the polarity (Rx STM32 2.2.0+), at the sensor nearest the wire, for the followed Tx channel
+// 0.6.36: sensor 2 acts on behaviour only with both "Sensor 2" (enable_sensor_2: the data) and "Use sensor 2 for control"
+// (use_sensor_2) on. Else every decision uses sensor 1, and sensor 2 is data for the log and the app only.
+bool sensor2Control(){ return enable_sensor_2 && g_deviceConfig.use_sensor_2; }
+
+// 0.6.21: world facts from the polarity (Rx STM32 2.2.0+), at the sensor nearest the wire (0.6.36: sensor 1 only, unless
+// sensor2Control()), for the followed Tx channel
 // (rx_channel). world_inside: +1 inside the loop, -1 outside. world_heading: +1 clockwise round the loop, -1
 // counterclockwise (seen from above). 0: not known. With D = the current direction setting of the channel (+1
 // clockwise, -1 counterclockwise): inside = polarity x sign(x) x D; heading = polarity x sign(y) x D. Each fact
 // counts only away from its blind line (|x|, or |y|, at least 25 % of the radius: above the wire x is near 0, square
 // to the wire y is near 0); else, and while the polarity is 0, the last value holds. No sensor in range for 2 s,
 // no fresh polarity item for 1 s, or no current direction set: both 0.
+// 0.6.36: world_inside comes from the inside filter below, not from the held polarity.
 int8_t world_inside = 0, world_heading = 0;
+float world_inside_p = 0.5f;  // the inside filter's belief that the sensor is inside the loop, 0..1
+
+// 0.6.36: the inside filter. The sensor can change sides only by a crossing, and a crossing needs the sensor near the
+// wire. A rover log (2026-10-24) had "outside" polarity bursts of 0.1-0.3 s at 1 m from the wire: the join then started
+// the follow 1 m from the wire, and starts faulted. The filter mixes every raw sign read (Rx STM32 extension items 9
+// sign and 10 sign spread, about 5 per s) into a belief, by Bayes' rule, in 2 steps per new read:
+// 1. Crossing chance since the last read: INSIDE_FLIP_MAX / (1 + (rNear / rCross)^12) + INSIDE_FLIP_MIN. rNear is the
+//    least radius seen, grown since then at the roam speed (the top speed): the nearest the sensor can have been to
+//    the wire. rCross is the farthest radius at the first usable read after a crossing: worst case the deepest wire
+//    (height setting + wire_max_depth_mm) and a square approach. The sensor is then past the wire by the blind line
+//    (|x| < 25 % of the radius: 0.26 x the depth), plus one read at the top speed, plus 0.1 m for field distortion.
+//    A soft edge, not a gate: at 1.25 x rCross the chance is 1/8 of its value at rCross, so a radius error moves the
+//    edge but never stops a crossing.
+// 2. The read: a sign at its spread, weighted by the wrong-read rate at that spread (Rx STM32 sign reads against the
+//    true side in 2 rover logs, 2026-10-24: 0 in 1345 under 25 deg, 0.8 % at 25-35, 2.3 % at 35-45, 13 % at 45-55).
+// The value changes at a belief of 95 % (one read under 25 deg near the wire, or 2-3 far from it). No sensor in
+// range for 2 s, or no read for 1 s: the value is unknown (0), but the belief stays, because the side cannot change
+// far from the wire. While no sensor is in range, the nearest radius falls at the roam speed from the last radius
+// seen: the sensor can close on the wire unseen. A change of the current direction setting starts the belief again
+// at 50 %.
+const float INSIDE_READ_S = 0.2f;       // s, time between two Rx sign reads (rover logs: about 5 per s)
+const float INSIDE_DISTORT = 0.1f;      // m, margin on rCross for field distortion near the wire
+const float INSIDE_FLIP_MAX = 0.5f;     // crossing chance per read right over the wire: either side is as likely, so
+                                        // the reads alone decide (one read under 25 deg). Log replay: 0 false side
+                                        // changes far from the wire, median delay 0 s (0.05: 0.1 s, 1 crossing lost)
+const float INSIDE_FLIP_MIN = 1e-6f;    // crossing chance per read far from the wire: 3 reads under 25 deg still
+                                        // change the value (a crossing during a signal loss)
+const float INSIDE_SURE = 0.95f;        // belief at which the value changes
+float insideReadErr(float spread_deg){
+  if (spread_deg < 25) return 0.002f;   // 0 wrong in 1345: the rate is at most this
+  if (spread_deg < 35) return 0.008f;
+  if (spread_deg < 45) return 0.023f;
+  if (spread_deg < 55) return 0.126f;
+  if (spread_deg < 70) return 0.3f;     // estimate between the measured 13 % and no information
+  return 0.5f;                          // no information
+}
+void insideFilter(int s, int c, int D, float rs, bool seen, bool gone, uint32_t now){
+  static float r_near = 99, r_last = 99;
+  static int d_last = 0;
+  static uint32_t last_ms = 0;
+  static uint16_t last_t10[2] = {};
+  const float v = g_deviceConfig.rover_roam_speed_mps;
+  const float dt = last_ms ? (now - last_ms) * 0.001f : 0;
+  last_ms = now;
+  r_last = seen ? rs : fmaxf(0, r_last - v * dt);
+  r_near = fminf(r_near + v * dt, r_last);
+  if (D != d_last) { d_last = D; world_inside_p = 0.5f; world_inside = 0; }
+  const uint16_t now10 = (uint16_t)(now / 10u);
+  const unsigned sl = (unsigned)s * 8u + (unsigned)c;
+  const uint16_t t = stmDec.ext_t10[8][sl], tp = stmDec.ext_t10[9][sl];
+  const bool fresh = t && tp && (uint16_t)(now10 - t) <= 100u;
+  if (D == 0 || !fresh || gone) { world_inside = 0; return; }
+  if (t == last_t10[s]) return;  // no new read
+  last_t10[s] = t;
+  const int sign = stmDec.ext_val[8][sl];
+  const float x = s == 0 ? stmPacket.items.s1_x : stmPacket.items.s2_x;
+  float p = world_inside_p;
+  if (seen && sign != 0 && fabsf(x) >= 0.25f * rs) {  // over the wire x says nothing about the side
+    const float h = (float)(g_deviceConfig.rover_sensor_height_mm + g_deviceConfig.wire_max_depth_mm) * 0.001f;
+    const float r_cross = hypotf(h, 0.26f * h + v * INSIDE_READ_S + INSIDE_DISTORT);
+    const float q = r_near / r_cross, q2 = q * q, q4 = q2 * q2;
+    const float flip = INSIDE_FLIP_MAX / (1 + q4 * q4 * q4) + INSIDE_FLIP_MIN;
+    p = p * (1 - flip) + (1 - p) * flip;
+    const float e = insideReadErr(stmDec.ext_val[9][sl] * 0.1f);
+    const bool says_in = sign * (x > 0 ? 1 : -1) * D > 0;
+    const float pin = p * (says_in ? 1 - e : e), pout = (1 - p) * (says_in ? e : 1 - e);
+    p = fminf(fmaxf(pin / (pin + pout), 1e-6f), 1 - 1e-6f);
+    world_inside_p = p;
+  }
+  if (p >= INSIDE_SURE) world_inside = 1;
+  else if (p <= 1 - INSIDE_SURE) world_inside = -1;
+}
+
 void worldFacts(){
   const int c = (int)rx_channel - 1;
   const uint8_t dirs[5] = {g_deviceConfig.tx_dir_ch1, g_deviceConfig.tx_dir_ch2, g_deviceConfig.tx_dir_ch3,
@@ -170,21 +249,22 @@ void worldFacts(){
   const uint32_t now = millis();
   const bool fresh = stmDec.pol_t10 && (uint16_t)((uint16_t)(now / 10u) - stmDec.pol_t10) <= 100u;
   static uint32_t seen_ms = 0;
+  static int s_last = 0;
   int s = -1;
   float rs = 0;
-  for (int k = 0; k < 2; k++) {
+  for (int k = 0; k < (sensor2Control() ? 2 : 1); k++) {
     if (stmDec.lost[k]) continue;
     const float r = k == 0 ? stmPacket.items.s1_radius : stmPacket.items.s2_radius;
     if (s < 0 || r < rs) { s = k; rs = r; }
   }
-  if (s >= 0) seen_ms = now;
-  if (D == 0 || !fresh || now - seen_ms > 2000u) { world_inside = world_heading = 0; return; }
+  if (s >= 0) { seen_ms = now; s_last = s; }
+  const bool gone = now - seen_ms > 2000u;
+  insideFilter(s_last, c < 0 ? 0 : c, D, rs, s >= 0, gone, now);
+  if (D == 0 || !fresh || gone) { world_heading = 0; return; }
   if (s < 0) return;
   const int p = stmDec.pol[s][c];
   if (p == 0) return;
-  const float x = s == 0 ? stmPacket.items.s1_x : stmPacket.items.s2_x;
   const float y = s == 0 ? stmPacket.items.s1_y : stmPacket.items.s2_y;
-  if (fabsf(x) >= 0.25f * rs) world_inside = (int8_t)(p * (x > 0 ? 1 : -1) * D);
   if (fabsf(y) >= 0.25f * rs) world_heading = (int8_t)(p * (y > 0 ? 1 : -1) * D);
 }
 // PID Initialization

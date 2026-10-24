@@ -818,7 +818,12 @@ void dspApply(){
   const DeviceConfig& c = g_deviceConfig;
   for (double& v : g_dsp_eff) v = NAN;
   stmLink.pushInt(STM_RUN_CMD | 0x80000000, 0);
-  stmLink.pushInt(38 | 0x80000000, c.dsp_sensors);
+  // 0.6.36: the setting "Sensor 2" (enable_sensor_2) sets the sensor count (CID 38) and the lanes (CID 13): on, 2 sensors,
+  // lane 1 sensor 1 and lane 2 sensor 2 (0x02); off, 1 sensor, lane 1 sensor 1 (0x00), so that the Rx STM32 gives sensor 1
+  // all its processing time. dsp_sensors and dsp_lanes are no user settings from 0.6.36.
+  const bool s2 = c.enable_sensor_2;
+  stmDec.setWireBin(1, s2 ? 0 : -1);
+  stmLink.pushInt(38 | 0x80000000, s2 ? 2 : 1);
   stmLink.pushInt(39 | 0x80000000, c.dsp_slow_adc);
   int period_us = safe_mode ? 10000 : c.dsp_frame_period_us;  // safe mode: the default period
   const int link_m = linkModeOf(c, radio_wifi);
@@ -828,8 +833,8 @@ void dspApply(){
   }
   stmLink.pushInt(18 | 0x80000000, period_us);
   for (int b = 0; b < 8; b++) stmLink.pushFloat(20 | 0x80000000, (bin_ram_mask >> b & 1) ? bin_ram_hz[b] : (float)c.dsp_bin_hz[b], (uint8_t)b);
-  stm_v2_lanes = (uint8_t)c.dsp_lanes;
-  stmLink.pushInt(13 | 0x80000000, c.dsp_lanes);
+  stm_v2_lanes = s2 ? 0x02 : 0x00;
+  stmLink.pushInt(13 | 0x80000000, stm_v2_lanes);
   stmLink.pushInt(29 | 0x80000000, pga_ram_on ? pga_ram : c.dsp_pga);
   stmLink.pushInt(25 | 0x80000000, c.dsp_xy_mask);
   // Bin sweep (CID 43 index 0, Rx STM32 2.0.51+; an older app answers unknown CID and sends no sweep page). Sent at
@@ -891,7 +896,6 @@ void dspOnAnswer(const stmv2::Answer& a){
 
 void stmV2Config(){
   stmDec.setWireBin(0, (int)rx_channel - 1);
-  stmDec.setWireBin(1, enable_sensor_2 ? 0 : -1);
   for (int sn = 0; sn < 2; sn++) { stmLink.push(27, 0, (uint8_t)sn); stmLink.push(28, 0, (uint8_t)sn); }
   dsp_apply_reason = "Rx STM32 start";
   dspApply();  // lanes, the DSP settings, then run
@@ -1084,9 +1088,9 @@ void dspSettingsCheck(const DeviceConfig& cfg){
   static bool dsp_known = false;
   static DeviceConfig dsp_last;
   const bool dsp_changed = !dsp_known || dsp_last.dsp_frame_period_us != cfg.dsp_frame_period_us
-      || dsp_last.dsp_sensors != cfg.dsp_sensors || memcmp(dsp_last.dsp_bin_hz, cfg.dsp_bin_hz, sizeof(cfg.dsp_bin_hz))
+      || dsp_last.enable_sensor_2 != cfg.enable_sensor_2 || memcmp(dsp_last.dsp_bin_hz, cfg.dsp_bin_hz, sizeof(cfg.dsp_bin_hz))
       || dsp_last.dsp_xy_mask != cfg.dsp_xy_mask || dsp_last.dsp_slow_adc != cfg.dsp_slow_adc
-      || dsp_last.dsp_pga != cfg.dsp_pga || dsp_last.dsp_lanes != cfg.dsp_lanes
+      || dsp_last.dsp_pga != cfg.dsp_pga
       || dsp_last.dsp_sweep_bins != cfg.dsp_sweep_bins || dsp_last.dt_channels != cfg.dt_channels
       || dsp_last.rx_regain_wait_ms != cfg.rx_regain_wait_ms || dsp_last.dt_spread_limit_deg != cfg.dt_spread_limit_deg
       || rxThresholdsDiffer(dsp_last, cfg);

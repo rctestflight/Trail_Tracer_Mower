@@ -154,8 +154,8 @@
       "default": false,
       "live": false,
       "group": "Wire and sensors",
-      "description": "Use sensor 2 (it always listens on transmitter channel 1)",
-      "label": "Use sensor 2"
+      "description": "On: the sensor board reads both sensors, and the rover shows and logs the sensor 2 data (position, radius, polarity, spectrum). Off: the board reads sensor 1 only and gives it all its processing time, for the best sensor 1 signal. Sensor 2 always listens on Tx channel 1. Sensor 2 data changes no rover behaviour unless Use sensor 2 for control is also on",
+      "label": "Sensor 2"
     },
     "CRUISE_THROTTLE": {
       "type": "int",
@@ -595,25 +595,12 @@
       "description": "The value that the sensor board uses now (its answer). Empty until the board answers; it can differ from the setting when the board rounds or limits it.",
       "unit": "us"
     },
-    "dsp_sensors": {
-      "type": "int",
-      "values": [
-        1,
-        2
-      ],
-      "default": 2,
-      "live": false,
-      "group": "Signal processing",
-      "label": "Sensors on the board",
-      "description": "Number of wire sensors that the sensor board reads: 1 or 2. With 1 sensor, the board reads it faster.",
-      "effect": "dsp_sensors_eff"
-    },
     "dsp_sensors_eff": {
       "type": "int",
       "readonly": true,
       "group": "Signal processing",
       "label": "Sensors on the board (in effect)",
-      "description": "The value that the sensor board uses now (its answer). Empty until the board answers; it can differ from the setting when the board rounds or limits it."
+      "description": "The number of sensors the sensor board reads now (its answer): 2 with the setting Sensor 2 on, 1 with it off. Empty until the board answers."
     },
     "dsp_bin_hz_0": {
       "type": "float",
@@ -817,17 +804,6 @@
       "label": "Input gain (in effect)",
       "description": "The value that the sensor board uses now (its answer). Empty until the board answers; it can differ from the setting when the board rounds or limits it."
     },
-    "dsp_lanes": {
-      "type": "int",
-      "min": 0,
-      "max": 3,
-      "default": 2,
-      "live": false,
-      "group": "Signal processing: advanced",
-      "label": "Sensor lanes",
-      "description": "Which sensor feeds which data lane: 2 (default) = lane 1 sensor 1, lane 2 sensor 2. With 1 sensor, bit 0 selects the sensor.",
-      "effect": "dsp_lanes_eff"
-    },
     "dsp_sweep_bins": {
       "type": "choice",
       "values": [
@@ -853,7 +829,7 @@
       "readonly": true,
       "group": "Signal processing: advanced",
       "label": "Sensor lanes (in effect)",
-      "description": "The value that the sensor board uses now (its answer). Empty until the board answers; it can differ from the setting when the board rounds or limits it."
+      "description": "The sensor of each data lane on the sensor board now (its answer): 2 = lane 1 sensor 1, lane 2 sensor 2 (Sensor 2 on); 0 = sensor 1 only (Sensor 2 off). Empty until the board answers."
     },
     "dsp_xy_mask": {
       "type": "int",
@@ -1690,6 +1666,25 @@
       "group": "Rover mode",
       "description": "After any turn, the bounce arms again when the wire radius falls this much below its highest value since the turn: the rover closes on the wire again. 30 mm is 3 x the radius noise. More delays the bounce; less lets noise arm it",
       "label": "Re-arm radius fall"
+    },
+    "wire_max_depth_mm": {
+      "type": "float",
+      "unit": "mm",
+      "min": 0.0,
+      "max": 1000.0,
+      "default": 120.0,
+      "live": false,
+      "group": "Rover mode",
+      "description": "The most the wire lies deeper than the sensor height setting, anywhere round the loop. The inside/outside value changes side only when the sensor comes this near the wire: deeper wire is seen farther out. 120 mm takes a wire buried 120 mm deeper than the setting. Too small: a real crossing at deep wire shows late; too large: a false polarity reading near the wire can change the side",
+      "label": "Wire extra depth, maximum"
+    },
+    "use_sensor_2": {
+      "type": "bool",
+      "default": false,
+      "live": false,
+      "group": "Wire and sensors",
+      "description": "On (with Sensor 2 on): the inside/outside value, the heading round the loop and the follow direction come from the sensor nearest the wire. Off: sensor 2 is data only (log and app), and every rover decision uses sensor 1. Turn it on only when sensor 2 faces the same way as sensor 1 and has the same sign: a sensor 2 with the opposite sign gives the wrong side",
+      "label": "Use sensor 2 for control"
     }
   }
 }
