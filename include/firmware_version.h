@@ -3,6 +3,9 @@
 #pragma once
 
 // Change history
+//   0.7.1: Join then leave: every vehicle joins by a stop and a turn on the spot. The car check is removed (1 s of
+//     the turn command with under 5 deg of turn marked the vehicle a car until power-off; one slow pivot on grass
+//     took 0.84 s in field logs). A car is not supported in this build.
 //   0.7.0: two roam modes for the field test. The Roam mode setting (stored key and values of the
 //     bounce style) chooses Bounce (the default; the wire position solve measures the wire's distance and direction,
 //     the rover stops and turns on the spot) or Join then leave (join at the approach angle, short follow, depart on
@@ -361,12 +364,12 @@
 #if defined(OTA_TEST_VERSION)
 #define ROVER_FW_VERSION OTA_TEST_VERSION  // OTA test images (envs ota_a, ota_b, ota_test_crash)
 #elif defined(BENCH_FAKE_IMU)
-#define ROVER_FW_VERSION "0.7.0+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.7.1+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #elif defined(SETTINGS_NEWKEY)
-#define ROVER_FW_VERSION "0.7.0-newkey"  // bench build: one more table line (test_new_setting)
+#define ROVER_FW_VERSION "0.7.1-newkey"  // bench build: one more table line (test_new_setting)
 #elif defined(TELEMETRY_NEWVALUE)
-#define ROVER_FW_VERSION "0.7.0-newvalue"  // bench build: the example lines of include/user_telemetry.h
+#define ROVER_FW_VERSION "0.7.1-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.7.0"
+#define ROVER_FW_VERSION "0.7.1"
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A

@@ -3,6 +3,26 @@
 Newest first. Each release gives what changed for the user, the settings that the user must set or check, and what
 is not tested. The full change history for developers is in `include/firmware_version.h`.
 
+## 0.7.1
+
+This release follows 0.7.0.
+
+### Changes
+
+- **Join then leave: every vehicle turns on the spot at the wire.** 0.7.0 marked a vehicle as a car when it turned
+  less than 5 deg in 1 s of the turn command, and kept the mark until power-off. A slow turn on grass can take
+  almost 1 s, so a skid steer could get the car mark by mistake. 0.7.1 removes this check.
+- A car is not supported in this build.
+
+### Settings to set or check
+
+- None. The settings are the same as in 0.7.0.
+
+### Update
+
+- Stop the rover before an update. An update during a run can fail with the page message "ESP32 firmware
+  refused: begin No Error". Stop the run and install again.
+
 ## 0.7.0
 
 This release follows 0.6.36. It also holds the 0.6.37 changes below.

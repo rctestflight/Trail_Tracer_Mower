@@ -261,8 +261,6 @@ class Autopilot {
 
   // Bounce style basics (basicsStep)
   bool basics() const { return cfg.bounceStyle == 1; }
-  // The wire position solve runs: Bounce mode, and Join then leave on a vehicle not found to be a car (bLock_)
-  bool solveOn() const { return !basics() || bLock_ != 1; }
   void basicsSide(const Inputs& in);
   void basicsJoin(const Inputs& in, Output& o);
   Output basicsStep(const Inputs& in);
@@ -281,8 +279,6 @@ class Autopilot {
   float bJoinSpeed() const;
   float bJoinRoom() const;
   float bJoinRadius() const;
-  void bJoinMeasure(const Inputs& in);
-  void bJoinEnd();
   bool bThreePoint(const Inputs& in, float xs);
   float bRate(float xs, float dt);
   bool bGuard(const Inputs& in, float xs);
@@ -301,11 +297,7 @@ class Autopilot {
   bool bOnLine_ = false, bHavePrev_ = false, bStopped_ = false;
   bool bPivot_ = false;             // estimator join: a pivot on the spot
   float bWMeas_ = 0;                // measured full turn rate in the depart, rad/s (0: none yet)
-  float bRJoin_ = 0;                // measured join turn radius, m (0: none yet)
   bool bRev_ = false;               // in the reverse leg of a three-point turn
-  int8_t bLock_ = -1;               // the vehicle turns at its steering lock: 1 yes, 0 no, -1 not known yet
-  float bWJoinSum_ = 0;             // this join's yaw rate readings (bJoinEnd)
-  int bWJoinN_ = 0;
   bool bClosed_ = false;            // the join closed on the wire since its start or its last reverse leg
   float bGuardTurnT_ = 0, bGuardPeakR_ = 0;
   bool bYShot_ = false, bYActive_ = false, bGuardWas_ = false;

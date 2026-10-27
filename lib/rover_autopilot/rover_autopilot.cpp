@@ -569,9 +569,8 @@ Output Autopilot::stepStates(const Inputs& in) {
   Output o;
   read(in);
 #ifdef ROVER_WIRE_SOLVE
-  // Every frame in Bounce mode, and in Join then leave on a vehicle that can turn on the spot (its join pivots by the
-  // solve's angle, basicsJoin); one solve per buffer sample (10 Hz)
-  if (solveOn()) {
+  // Every frame in both roam modes (the join pivots by the solve's angle, basicsJoin); one solve per buffer sample (10 Hz)
+  {
     if (!wfb_) {   // the first frame of a run that uses the solve: its memory from the heap
       wfb_ = new (std::nothrow) wirefit::WireFitBounce();
       if (!wfb_) { toFault(FAULT_NO_MEMORY); return Output(); }
@@ -1051,13 +1050,10 @@ float Autopilot::bMedian() const {
 // full-rate departs: gyro median 52 deg/s against 90 commanded; the emulator 53).
 float Autopilot::bYawRate() const { return bWMeas_ > 0 ? bWMeas_ : cfg.maxYawRate; }
 
-// The join turn radius: measured in the join (bJoinMeasure); before that from the join speed and the full turn rate
-// The join turn radius. A vehicle at its steering lock (a car) keeps the measured radius at any speed. A skid steer's
-// radius is the join speed over the full turn rate: the measured radius belongs to the speed of the join that measured
-// it, and the first join of a run (before the depart measures the turn rate) runs faster (the reference rover: 90 deg/s set,
-// 52 deg/s true, radius 0.32 m against 0.185 m; the next join started 1 m from the wire on the 8 m loop, emulator)
+// The join turn radius: the join speed over the full turn rate (a skid steer). The first join of a run (before the
+// depart measures the turn rate) runs faster (the reference rover: 90 deg/s set, 52 deg/s true, radius 0.32 m against
+// 0.185 m)
 float Autopilot::bJoinRadius() const {
-  if (bLock_ == 1 && bRJoin_ > 0) return bRJoin_;
   const float w = bYawRate();
   return w > 1e-3f ? bJoinSpeed() / w : 1e3f;
 }
@@ -1072,11 +1068,8 @@ float Autopilot::bTurnRadius() const {
 // fits inside the follow inset): the speed whose turn radius at the full turn rate is half the follow inset, so the
 // worst join turn (nearly 180 deg) spans the inset; at most the approach speed. A least radius of 5 cm keeps the rover
 // moving with a follow inset of 0
-// A vehicle whose turn rate at the lower join speed falls under 0.8 of its rate in the depart turns at its steering
-// lock (a car): a lower speed does not tighten its turn, so it joins at the approach speed (bJoinEnd decides it).
 float Autopilot::bJoinSpeed() const {
   const float v = cfg.approachFraction * cfg.roamSpeed;
-  if (bLock_ == 1) return v;
   const float vj = bYawRate() * 0.5f * bJoinRoom();
   return vj < v ? vj : v;
 }
@@ -1097,25 +1090,6 @@ void Autopilot::bTurnMeasure(const Inputs& in) {
   bWMeas_ = bWMeas_ > 0 ? bWMeas_ + 0.1f * (w - bWMeas_) : w;
 }
 
-// In the forward join turn, from 0.3 s in (the speed has settled): radius = measured speed / measured yaw rate (wheels
-// and gyro), low-passed over about 10 readings. A pivot gives nothing (the estimator's pivot)
-void Autopilot::bJoinMeasure(const Inputs& in) {
-  const float w = fabsf(in.yawRate);
-  if (bPivot_ || bRev_ || bT_ < 0.3f || w < 0.02f || in.v < 0.02f) return;
-  const float r = in.v / w;
-  bRJoin_ = bRJoin_ > 0 ? bRJoin_ + 0.1f * (r - bRJoin_) : r;
-  bWJoinSum_ += w;
-  bWJoinN_++;
-}
-
-// At the end of a join: once the depart rate is measured, the first join at the lower speed with 10 or more readings
-// decides whether the vehicle turns at its steering lock (bJoinSpeed)
-void Autopilot::bJoinEnd() {
-  if (bLock_ < 0 && bWMeas_ > 0 && bWJoinN_ >= 10) bLock_ = bWJoinSum_ / bWJoinN_ < 0.8f * bWMeas_ ? 1 : 0;
-  bWJoinSum_ = 0;
-  bWJoinN_ = 0;
-}
-
 // Three-point turn (a car may reverse when needed): when the rest of the join turn does
 // not fit before the follow line, reverse with the turn the same way round (a car: the opposite steering), until it
 // fits, then forward into the join again. The rest of the turn closes R (1 - cos a) with the goal direction and R (1 +
@@ -1123,7 +1097,8 @@ void Autopilot::bJoinEnd() {
 // speed; with or against from the wire side of the heading (square-on, not readable: R). The forward leg starts again
 // once the room exceeds the need by the closing in the rate filter delay. A skid steer joins on a turn of half the
 // follow inset from a start at the inset + 2 radii, so it never needs it. Returns true in the reverse leg
-// 0.7.0: a skid steer joins on the spot (basicsJoin), so only a car takes the arc join and this reverse leg
+// 0.7.1: every vehicle joins on the spot (basicsJoin); the arc join and this reverse leg run only in a build without
+// the wire solve
 bool Autopilot::bThreePoint(const Inputs& in, float xs) {
   const float sp = fabsf(in.v);
   if (sp < 0.05f) return bRev_;   // the speed changes sign: no closing angle reading
@@ -1231,8 +1206,6 @@ void Autopilot::basicsJoin(const Inputs& in, Output& o) {
   bPlanned_ = bLeaveDeg();
   bOnLine_ = bHavePrev_ = bStopped_ = false;
   bRev_ = bClosed_ = false;
-  bWJoinSum_ = 0;
-  bWJoinN_ = 0;
   bRate_ = -bJoinSpeed();   // the rover closes at the join: the turn runs until the rate says it no longer does
   bMinXs_ = 1e9f;
   bGuardTurnT_ = 0;
@@ -1244,8 +1217,8 @@ void Autopilot::basicsJoin(const Inputs& in, Output& o) {
   // Join then leave on a skid steer (0.7.0): the join stops and turns on the spot by the
   // solve's angle, as the Bounce mode join. An arc join of an arrival against the goal direction turns through
   // square-on near the wire, where the reading is lost or flat, and it ended over the wire (emulator, the reference settings:
-  // 3 escapes in 72 runs). A car cannot turn on the spot: bLock_ 1 keeps the arc (basicsStep finds it)
-  if (solveOn()) {
+  // 3 escapes in 72 runs). Every vehicle joins this way in this build: a car (no turn on the spot) is not supported
+  {
     solveDebug("join", in);
     wirefit::BounceResult ws;
     const int8_t s = bWireSide(in);
@@ -1338,11 +1311,6 @@ Output Autopilot::basicsStep2(const Inputs& in) {
     case JOIN: {
       if (lost) { state = FOLLOW; bStopped_ = true; decide(DEC_FOLLOW, 0, bP_); return o; }
       const float xs = bRate(bP_ * in.x, in.dt);
-#ifdef ROVER_WIRE_SOLVE
-      // A vehicle that does not turn at zero speed is a car (it turns at its steering lock): 1 s of the pivot command
-      // with under 5 deg of turn. It joins on the arc from here on
-      if (bPivot_ && basics() && bT_ > 1.0f && bTurned_ < 5 * D2R) { bLock_ = 1; bPivot_ = false; bTurnDeg_ = 180; }
-#endif
       if (!bPivot_ && bThreePoint(in, xs)) {   // reverse leg of a three-point turn, at the approach speed
         o.v = -v;
         o.w = bSteer_ * w;
@@ -1350,9 +1318,8 @@ Output Autopilot::basicsStep2(const Inputs& in) {
       }
       // the join turn ends once the rover no longer closes on the wire (it runs along it), or at 180 deg; the pivot
       // on its angle. After a reverse leg the rover first closes again
-      bJoinMeasure(in);
       if (bRate_ < 0) bClosed_ = true;
-      if ((!bPivot_ && bHavePrev_ && bClosed_ && bRate_ >= 0) || bTurnDone(in)) { bJoinEnd(); state = FOLLOW; bT_ = 0; bHavePrev_ = false; decide(DEC_FOLLOW, 0, bP_); }
+      if ((!bPivot_ && bHavePrev_ && bClosed_ && bRate_ >= 0) || bTurnDone(in)) { state = FOLLOW; bT_ = 0; bHavePrev_ = false; decide(DEC_FOLLOW, 0, bP_); }
       o.v = bPivot_ ? 0 : bJoinSpeed();
       o.w = bSteer_ * w;
       return o;
