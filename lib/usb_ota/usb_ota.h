@@ -75,5 +75,12 @@ bool push_end(char* err, size_t cap);
 void push_abort(const char* why);  // the client went away: the writer stops, the boot slot stays
 void push_restart();
 uint32_t push_got();
+// The update page's pair order (an Rx STM32 file and an ESP32 image in one form post): the Rx STM32 update runs after
+// the ESP32 image is in its slot, and the restart only after it. push_hold, after a good push_end: the ESP32 image
+// waits in its selected slot, busy() is false (loop() runs the Rx STM32 update), and no other ESP32 writer starts.
+// Then push_restart restarts into it, or push_unselect sets the boot slot back to the running image (the Rx STM32
+// update failed: the Rx keeps its old pair). From loop() only (push_unselect runs the image check of the boot slot).
+bool push_hold();
+bool push_unselect(char* err, size_t cap);
 
 }  // namespace usb_ota

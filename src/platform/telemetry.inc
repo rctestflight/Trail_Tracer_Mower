@@ -404,6 +404,7 @@ void telemetryEvents(){
     telemetryEvent(rec::EV_HALTED, roverAp.fault, 0, roverAp.fault == rover::FAULT_STUCK ? "fault: stuck"
                    : roverAp.fault == rover::FAULT_NO_POLARITY ? "fault: no polarity at join"
                    : roverAp.fault == rover::FAULT_POL_START ? "fault: polarity says outside at start: Tx direction"
+                   : roverAp.fault == rover::FAULT_NO_MEMORY ? "fault: no memory for the Bounce mode wire solve"
                    : "fault: wire lost too long");  // 0.6.32: the start check had the "wire lost" text
   }
   telem_last_halted = halted;

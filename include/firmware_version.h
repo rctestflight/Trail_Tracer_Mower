@@ -3,7 +3,55 @@
 #pragma once
 
 // Change history
-//   0.6.36: inside/outside from the new inside filter (operator 2026-10-24), not the held polarity. Every raw sign
+//   0.7.0: two roam modes for the field test. The Roam mode setting (stored key and values of the
+//     bounce style) chooses Bounce (the default; the wire position solve measures the wire's distance and direction,
+//     the rover stops and turns on the spot) or Join then leave (join at the approach angle, short follow, depart on
+//     an arc). The rover settings show in three groups: both roam modes, Bounce mode only, Join then leave only.
+//     Depart angle spread default 25 deg (90 put 72 % of departs at the limits). The solve runs in a background task
+//     with its memory from the heap only during a Bounce mode run (no RAM change outside it); the bounce decision
+//     comes at the stop, with the solve's direction profile (perturb when it is over the depart angle limit).
+//     The bounce log carries the solve (rover_dec_solve_deg, rover_dec_solve_mm). Return distance is gone: a charge
+//     falls due by battery voltage only. Older choice names in a config.json (estimator, basics, pivot) still load.
+//     Join then leave fixes (emulator, the reference skid steer, follow inset 0): the join distance is at least sensor
+//     height + wire extra depth (nearer, a square-on arrival reads the wire lost: 14 escapes in 132 runs before); a
+//     skid steer's join radius is the join speed over the turn rate, not the radius measured at the faster first
+//     join; the join ends once the rover no longer closes, with no wire side check. The three-point turn stays (a car).
+//     Outside the loop (both modes): a depart that ends outside counts as the turn toward the wire, and no distance
+//     rise counts in the square-on null band (a false rise there turned the rover back 6 cm short of the wire every
+//     4.6 s; emulator: 178 turn-backs in 144 runs before, 0 after).
+//     Join then leave on a skid steer: the join stops and turns on the spot by the wire solve's angle (the Bounce mode
+//     join); a vehicle that does not turn at zero speed in 1 s is a car and joins on the arc. An arc join of an
+//     arrival against the goal direction turned through square-on near the wire and could end over it (emulator: 3
+//     escapes in 72 runs with spread 90 before, 0 after; no reverse legs).
+//   0.6.41: settings cleanup (two bounce modes). The bounce
+//     style setting is the bounce mode: basics or estimator (the pivot bounce, same stored values). Removed, used by
+//     neither mode: rover_rearm_m, rover_join_pivot_m, rover_turn_min_deg, rover_turn_max_deg. Each rover setting's
+//     help says which mode uses it; the depart settings read as the depart angle target, spread and limit.
+//   0.6.40: update page pair order. In one form post the Rx STM32 file goes to flash and waits; the ESP32 image goes
+//     to its slot and waits; the Rx STM32 update runs only after both arrive, and the restart only after it passes.
+//     A failed part changes neither: the Rx STM32 file is not used, or the boot slot goes back to the running image.
+//     Before, a failed ESP32 part after the Rx STM32 update left a new Rx STM32 with the old ESP32. The parts can
+//     come in either order.
+//   0.6.39: bounce style basics fixes (emulator, the reference rover and 8 m loop). The square-on guard acts only within
+//     15 deg of square-on, where the field null loses the wire; at the 45 deg approach angle it fired near parallel
+//     and made each short follow 25-30 s. Near the follow line the follow steers fully to parallel. The roam join
+//     needs the side reading to fall as well as the radius (in a small loop the radius falls on the way to the
+//     middle). The bounce follow time starts only at the follow line.
+//   0.6.38: bounce style basics (the basics loop of the PC simulation), new setting
+//     rover_bounce_style, default basics. At the wire the rover no longer stops and turns on the spot. It joins
+//     toward the inside at the approach angle, and starts the turn early enough that its turning circle (approach
+//     speed and full steering rate) fits before the follow line. It follows the wire for the new bounce follow time
+//     (3 s) at the new follow inset (0.30 m inside), with its closing speed limited so it never meets the wire
+//     square-on. Once parallel it drives an arc back into the loop by the wire leave angle, the bounce spread and
+//     minimum, planned at the join. The return to the wire uses the same join. Lost signal in the join or follow:
+//     stop and wait. Approach angle default 45 deg (was 30); a stored value is kept. pivot keeps the 0.6.37 bounce.
+//   0.6.37: the pivot rule (no event of any kind on pivot turns). While the rover turns on the
+//     spot (a commanded pivot, or a measured one: yaw rate over 0.25 rad/s about a point within 0.15 m of the rover
+//     centre), and until a pivot that has ended stops turning, no decision or fault triggers. It covers every pivot
+//     (bounce, beacon, turn-back, join, wrong-direction reverse, follow-end and depart turn, lost search) and replaces
+//     the 0.6.36 stop after a pivot. The side filter still reads in a turn. USB "wifi test [seconds]": join the stored
+//     network and find the telemetry server, two results with progress lines, in either radio mode (setup page).
+//   0.6.36: inside/outside from the new inside filter, not the held polarity. Every raw sign
 //     read (Rx STM32 items 9 and 10) goes into a belief, weighted by its spread; a side change needs a crossing, and
 //     a crossing needs the sensor near the wire (height setting + the new setting wire_max_depth_mm, 120 mm, and the
 //     roam speed). Field case 2026-10-24: "outside" bursts at 1 m from the wire started the follow away from the
@@ -11,17 +59,17 @@
 //     config.json: a setting that the file does not hold (new in an update) makes the file be written again at the
 //     start, with its values kept: every setting shows in config.json (field case 2026-10-24: no roam and follow time
 //     in the file after the 0.6.33 update). Before, only a "save" added new keys.
-//     Pivot settle (operator 2026-10-24): after each pivot that goes on to roam (bounce, turn-back, beacon, follow end)
+//     Pivot settle: after each pivot that goes on to roam (bounce, turn-back, beacon, follow end)
 //     the rover stops turning before any rule acts; the bounce re-arm starts from the stopped reading. Field case
 //     2026-10-24: the sensor swing-back after turns of 65-115 deg armed a bounce 0.3 s after the turn.
-//     Sensor 2 as two settings (operator 2026-10-24): enable_sensor_2 ("Sensor 2") sets the Rx STM32 sensor count
+//     Sensor 2 as two settings: enable_sensor_2 ("Sensor 2") sets the Rx STM32 sensor count
 //     (CID 38: 2 or 1) and lanes (CID 13: 0x02 or 0x00) and the sensor 2 data; new use_sensor_2 ("Use sensor 2 for
 //     control") lets sensor 2 act on the nearest-sensor choice (worldFacts, follow_dir). dsp_sensors and dsp_lanes
 //     are F_LEGACY.
 //   0.6.35: each change from follow to roam (the end of a timed follow, and after a charge) turns to the wire leave
-//     angle (rover_follow_exit_deg, label "Wire leave angle"), plus the bounce spread, at least the bounce minimum
-//     (operator 2026-10-23). The inward turn minimum and maximum are not used.
-//     Bounce re-arm (operator 2026-10-23): after any turn the bounce arms when the 0.3 s radius falls by the new
+//     angle (rover_follow_exit_deg, label "Wire leave angle"), plus the bounce spread, at least the bounce minimum.
+//     The inward turn minimum and maximum are not used.
+//     Bounce re-arm: after any turn the bounce arms when the 0.3 s radius falls by the new
 //     re-arm radius fall (rover_rearm_fall_mm, 30 mm) below its peak since the turn; the 0.5 m drive rule, the
 //     re-arm distance and the approach-fit closing test go. The bounce distance comes from the radius and the height
 //     setting, not the offset x. rover_rearm_drop_m now sets only the outside turn-back repeat.
@@ -313,12 +361,12 @@
 #if defined(OTA_TEST_VERSION)
 #define ROVER_FW_VERSION OTA_TEST_VERSION  // OTA test images (envs ota_a, ota_b, ota_test_crash)
 #elif defined(BENCH_FAKE_IMU)
-#define ROVER_FW_VERSION "0.6.36+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.7.0+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #elif defined(SETTINGS_NEWKEY)
-#define ROVER_FW_VERSION "0.6.36-newkey"  // bench build: one more table line (test_new_setting)
+#define ROVER_FW_VERSION "0.7.0-newkey"  // bench build: one more table line (test_new_setting)
 #elif defined(TELEMETRY_NEWVALUE)
-#define ROVER_FW_VERSION "0.6.36-newvalue"  // bench build: the example lines of include/user_telemetry.h
+#define ROVER_FW_VERSION "0.7.0-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.6.36"
+#define ROVER_FW_VERSION "0.7.0"
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A

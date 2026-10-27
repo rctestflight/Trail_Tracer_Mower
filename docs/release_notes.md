@@ -3,6 +3,83 @@
 Newest first. Each release gives what changed for the user, the settings that the user must set or check, and what
 is not tested. The full change history for developers is in `include/firmware_version.h`.
 
+## 0.7.0
+
+This release follows 0.6.36. It also holds the 0.6.37 changes below.
+
+### Changes
+
+- **Two roam modes in one build.** The new setting "Roam mode" (`rover_bounce_style`, group "Rover: both roam
+  modes") chooses how the rover turns back at the wire. Change it in the setup page, the telemetry app or
+  config.json.
+  - **Bounce** (the default): As it drives, the rover measures the distance and the direction of the wire. At the
+    bounce distance it stops, turns on the spot and drives back into the loop at the mirror of the wire angle.
+  - **Join then leave**: At the wire the rover turns onto it and follows it for the short follow time. A skid
+    steer stops and turns on the spot by the measured wire angle; a car turns on an arc. The rover then drives an
+    arc back into the loop at the depart angle.
+- **Settings in three groups**: "Rover: both roam modes", "Rover: Bounce mode only" and "Rover: Join then leave
+  only". The help text of each setting starts with the mode or modes that use it.
+- **Older names load.** In config.json, `estimator` and `pivot` load as Bounce, and `basics` loads as Join then
+  leave. The rover writes the new names.
+- **Return distance is gone.** A charge falls due by battery voltage only.
+- **Update page: both boards in one step.** One upload sends the sensor board file and the rover image together. If
+  one part fails, neither board changes.
+- **Removed settings** (used by neither mode): `rover_rearm_m`, `rover_join_pivot_m`, `rover_turn_min_deg`,
+  `rover_turn_max_deg`. An older config.json with them loads with no error.
+
+### Settings to set or check
+
+Saved values stay in charge: the update changes no saved value. Two settings need a check:
+
+- **Depart angle limit** (`rover_bounce_min_deg`): the least angle between the wire and the depart heading; the most
+  is 180 deg minus it. The rover takes 90 at most, and at 90 every depart leaves square-on. We recommend 65.
+- **Depart angle spread** (`rover_bounce_spread_deg`): a random angle from minus to plus this value is added to each
+  planned depart angle. With the limit at 65 and the target at 90, the departs can only fall from 65 to 115 deg. A
+  spread of 90 puts 36 % of the departs at each limit; 180 puts 43 % at each limit. We recommend 25: every depart
+  then falls inside the limits, and the rover covers the lawn more evenly.
+
+### Other fixes
+
+- **Outside the loop, the rover crosses back in.** Before, a rover outside the wire could turn back every few
+  seconds short of the wire and stay outside for minutes. Now it drives on to the wire and crosses it.
+- **Join then leave on a skid steer** no longer joins on an arc. An arc join of a rover that met the wire against
+  the goal direction could end over the wire.
+
+### Not tested
+
+- On a real rover: neither mode. The roam behaviour is tested in the PC simulation of a skid steer only: 6 loops
+  from 8 m to 20 m across, 2 goal directions, 3 starts, with and without the inside/outside reading, 10 min each.
+  - Bounce: 144 runs with the defaults and with a field set of saved values (spread 90): no escape, no fault.
+  - Join then leave: 144 runs with the defaults and 72 with the same field set: no escape, no fault.
+- The update: bench board, update page, 0.6.41 to 0.7.0 and 0.6.36 to 0.7.0, 2 of 2 each; settings kept, sensor
+  board running after each. One of 10 updates from 0.7.0 gave no page answer for over 6 min, but it
+  installed. With no answer, wait 10 min, then reload the page; never cut the power.
+
+## 0.6.37
+
+### Changes
+
+- **No event during a turn on the spot**. While the rover turns on the spot, and until it stops
+  turning, it takes no decision: no bounce, join, turn-back, wrong-direction turn, follow end, return, stuck or lost
+  fault. This covers every turn on the spot: bounce, beacon, turn-back, join, follow end and the turn after a charge.
+  It replaces the 0.6.36 stop after a turn. A turn on the spot is a commanded turn, or a measured turn about a point
+  within 0.15 m of the rover centre: in such a turn the inner wheel stands still or turns backward.
+- **Wi-Fi test over USB** for the setup page: `wifi test [seconds]` joins the stored network and looks for the
+  telemetry server, with no save and no restart. It works in either radio mode and gives two results: network joined
+  (signal, address), and telemetry server found (address).
+
+### Settings to set or check
+
+- None.
+
+### Not tested
+
+- The turn rule: PC emulator only. Sensor 1 ahead of the wheels (the emulator default), 4 missions of 15 min with
+  60 s roam and follow: no outside crossing and no turn-back, as 0.6.36. The rover log case of 2026-10-24 (the bounce
+  after each follow end) is not reproduced in the emulator: it needs the sensor position on that rover.
+- Wi-Fi test: bench board, test access point with the telemetry program: join and server found 3 of 3 in ESP-NOW
+  mode (about 2 s), and in Wi-Fi mode. Network absent: "not found" after 15 s.
+
 ## 0.6.36
 
 ### Changes

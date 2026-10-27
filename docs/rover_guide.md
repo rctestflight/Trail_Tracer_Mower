@@ -12,7 +12,13 @@ The rover is standalone. It needs no Monitor Rx, no PC and no radio to behave co
 | 1, cruise | aux switch to auto (RC on) | cruise control on the RC throttle |
 | 2, autonomous | **no RC throttle signal 0.5 s after power-on**, or a click of the board button, or `run start` from the telemetry program | by `rover_mode`: the rover (default; off the wire it drives straight and steers on position only after the join), follow only, or the plain position-steering wire follower (expert) |
 
-The autopilot (from 0.6.23) roams inside the perimeter wire and bounces off it, returns to the wire after the return distance or below the return voltage, joins it in the goal direction, follows it to the dock with the wire follower, charges, and departs again (`lib/rover_autopilot/README.md`). Lost signal in join or follow, or no Tx signal in any state: it stops and waits.
+The autopilot (from 0.6.23) roams inside the perimeter wire and turns back at it, returns to the wire below the return voltage, joins it in the goal direction, follows it to the dock with the wire follower, charges, and departs again (`lib/rover_autopilot/README.md`). Lost signal in join or follow, or no Tx signal in any state: it stops and waits.
+
+From 0.7.0 the setting **Roam mode** (`rover_bounce_style`) chooses how the rover turns back at the wire:
+- **Bounce** (default): as it drives, the rover measures the distance and the direction of the wire. At the bounce distance it stops, turns on the spot and drives back into the loop at the mirror angle.
+- **Join then leave**: the rover joins the wire at the approach angle, follows it for the short follow time, then leaves on an arc back into the loop. It never stops or turns on the spot at the wire.
+
+The settings page and the telemetry program show the rover settings in three groups: both roam modes, Bounce mode only, and Join then leave only.
 
 **WARNING:** With no RC throttle signal at power-on, the rover enters mode 2 0.5 s after power-on and starts to drive. Keep the RC transmitter on for the first tests: the rover then starts in manual mode, a click of the board button enters mode 2, and a change of the aux switch leaves mode 2.
 
@@ -64,7 +70,6 @@ Three ways, all with the same keys:
 | rover_approach_pct | 60 | Approach and join speed, percent of the roam speed |
 | rover_join_pivot_m | 0.6 | Distance to the wire of the join reading, stop and pivot |
 | rover_join_angle_deg | 30 | Angle between the join heading and the wire, in the goal direction |
-| rover_return_m | 300 | Return after this distance driven since the last charge, m (0 = off). Keep it under the battery range by more than one lap of the wire |
 | rover_seek_vbatt | 0 | Return below this filtered battery voltage, V (0 = off) |
 | rover_wrong_dir_check | true | Follow: polarity direction against the goal, or the exit beacon before the entry beacon: turn round |
 | rover_entry_btx | 1 | BTx channel before the dock (0 = none) |

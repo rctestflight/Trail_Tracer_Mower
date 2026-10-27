@@ -31,7 +31,6 @@ static const char* TAG = "wfrx";
 rover::Autopilot roverAp;
 bool rover_enabled = false;
 double rover_seek_vbatt = 0.0;      // return battery voltage (0 = off)
-float rover_return_m = 0.0f;        // return distance (0 = off)
 uint8_t rover_entry_btx = 0;
 uint8_t rover_exit_btx = 0;
 bool rover_active = false;          // mode 2 with the autopilot driving
@@ -1508,7 +1507,6 @@ void applyDeviceConfig(const DeviceConfig& cfg)
   // Rover autopilot
   rover_enabled               = cfg.rover_mode != 2 && !safe_mode;  // autonomous runs the rover unless "position follower"; safe mode (crash resets): no rover mode
   rover_seek_vbatt            = cfg.rover_seek_vbatt;
-  rover_return_m              = cfg.rover_return_m;
   rover_entry_btx             = cfg.rover_entry_btx;
   rover_exit_btx              = cfg.rover_exit_btx;
   rover::Config& rc           = roverAp.cfg;
@@ -1521,7 +1519,6 @@ void applyDeviceConfig(const DeviceConfig& cfg)
   rc.bounceDistance           = cfg.rover_bounce_m;
   rc.bounceSpreadDeg          = cfg.rover_bounce_spread_deg;
   rc.bounceMinDeg             = cfg.rover_bounce_min_deg;
-  rc.rearmDistance            = cfg.rover_rearm_m;
   rc.rearmDrop                = cfg.rover_rearm_drop_m;
   rc.rearmFall                = cfg.rover_rearm_fall_mm * 0.001f;
   rc.beaconBounce             = cfg.rover_beacon_bounce;
@@ -1529,13 +1526,10 @@ void applyDeviceConfig(const DeviceConfig& cfg)
   rc.beaconRearm              = cfg.rover_beacon_rearm_m;
   rc.beaconSpreadDeg          = cfg.rover_beacon_spread_deg;
   rc.approachDistance         = cfg.rover_approach_m;
-  rc.joinPivotDistance        = cfg.rover_join_pivot_m;
   rc.approachAngleDeg         = cfg.rover_join_angle_deg;
   rc.wrongDirCheck            = cfg.rover_wrong_dir_check;
   rc.departMin                = cfg.rover_depart_min_m;
   rc.departMax                = cfg.rover_depart_max_m;
-  rc.turnMinDeg               = cfg.rover_turn_min_deg;
-  rc.turnMaxDeg               = cfg.rover_turn_max_deg;
   rc.probeLength              = cfg.rover_probe_m;
   rc.roamTimeS                = cfg.rover_roam_time_s;
   rc.followTimeS              = cfg.rover_follow_time_s;
@@ -1543,6 +1537,10 @@ void applyDeviceConfig(const DeviceConfig& cfg)
   rc.noTxRoamS                = cfg.rover_no_tx_roam_s;
   rc.noTxS                    = cfg.rover_no_tx_s;
   rc.lostTimeout              = (float)cfg.rover_lost_timeout_s;
+  rc.bounceStyle              = cfg.rover_bounce_style;
+  rc.followInset              = cfg.rover_follow_inset_m;
+  rc.bounceFollowS            = cfg.rover_bounce_follow_s;
+  rc.wireMaxDepth             = cfg.wire_max_depth_mm * 0.001f;
   // The autopilot steer command goes through the gyro rate loop: full steer requests steering_rate_max_dps
   // (odrive_setDriveOutput), so the autopilot's full yaw rate is that value.
   rc.maxYawRate               = (float)(steering_rate_max_dps * M_PI / 180.0);
@@ -1615,6 +1613,7 @@ void roverStep(){
     rover_was_docked = charge_status > 0;
     rover_charge_ran = false;
   }
+  if(!want && rover_active) roverAp.releaseSolve();  // the end of a run: the Bounce mode solve's memory back to the heap
   rover_active = want;
   if(!want) return;
 
@@ -1680,7 +1679,6 @@ void roverStep(){
   const float vb = stmPacket.items.vbatt;
   rover_vbatt_filt = (rover_vbatt_filt <= 0.0f) ? vb : 0.99f * rover_vbatt_filt + 0.01f * vb;
   if(rover_seek_vbatt > 0 && rover_vbatt_filt > 1.0f && rover_vbatt_filt < rover_seek_vbatt) rover_need_charge = true;
-  if(rover_return_m > 0 && rover_driven_m >= rover_return_m) rover_need_charge = true;
   in.needCharge = rover_need_charge;
 
   // Beacons: the radius of each channel filtered as BTx1Signal but not clamped (the re-arm distance is past the BTx
@@ -1711,6 +1709,13 @@ void roverStep(){
     tlm_set(TLM_rover_dec_turn_deg, d.turnDeg);
     tlm_set(TLM_rover_fault, (float)roverAp.fault);
     tlm_set(TLM_rover_dec_d_mm, constrain(d.d * 1000.0f, 0.0f, 65000.0f));
+    if (d.solveOk) {
+      tlm_set(TLM_rover_dec_solve_deg, d.solvePsiDeg);
+      tlm_set(TLM_rover_dec_solve_mm, constrain(d.solveD * 1000.0f, 0.0f, 65000.0f));
+    } else {
+      tlm_set(TLM_rover_dec_solve_deg, NAN);   // no solve answer: no value
+      tlm_set(TLM_rover_dec_solve_mm, NAN);
+    }
     if (usb_verbose)
       usbOut.printf("ROVER %s %s d=%.2f X=%.2f psi=%.0f turn=%.0f side=%d fault=%d\n", rover::stateName(roverAp.state),
                     rover::decisionName(d.code), d.d, d.X, d.psiDeg, d.turnDeg, d.side, d.reason);

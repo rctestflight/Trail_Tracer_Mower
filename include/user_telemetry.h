@@ -64,3 +64,7 @@ TLM(rover_dec_d_mm,    U16, 1,   "mm",  0, 10HZ, "Rover decisions", "Distance to
 TLM(s2_radius_mm,      U16, 1,   "mm",  0, LOG,  "Position", "Wire radius, sensor 2 (no value: sensor 2 off or no wire)")
 // 0.6.36: the inside filter's belief (src/main.cpp insideFilter); wire_inside changes at 95 % and 5 %.
 TLM(wire_inside_pct,   U8,  1,   "%",   0, 10HZ, "Polarity detection", "Inside filter: chance that the sensor is inside the loop (wire_inside changes at 95 % and 5 %)")
+// 0.7.0: the wire position solve at a bounce (estimator mode; rover_dec_psi_deg stays the approach fit, a frozen
+// name). The depart plan uses these, so the replay draws the bounce line from them
+TLM(rover_dec_solve_deg, I16, 0.1, "deg", 1, 10HZ, "Rover decisions", "Wire solve at the decision: the wire direction in the rover frame (+ counterclockwise from the heading; no value: no solve answer)")
+TLM(rover_dec_solve_mm,  U16, 1,   "mm",  0, 10HZ, "Rover decisions", "Wire solve at the decision: horizontal distance from sensor 1 to the wire (no value: no solve answer)")

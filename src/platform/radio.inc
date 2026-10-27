@@ -59,7 +59,7 @@ volatile uint32_t sim_dropped_tx = 0, sim_dropped_rx = 0;
 #define ESPNOW_TYPE_CMD     0x10
 #define ESPNOW_TYPE_ACK     0x11
 #define ESPNOW_TYPE_STOP    0x12  // u8 type, u16 seq, u32 fleet key: stop at once (docs/espnow_protocol.md)
-#define SETTINGS_DEF_VERSION 15  // docs/settings_def.json version (15: tx_dir default 1 (0.6.28); 14: rover ranges widened, every range from the table (0.6.27); 13: generated from include/settings_table.h by tools/gen_settings_def.py; 6: DSP settings dsp_*, groups for users; 7: servo map, drive_output, vehicle_name, steer_lpf_hz; 8: radio_mode, wifi_ssid, wifi_password; 9: dsp_sweep_bins; 10: dsp_frame_period_us min 2000; 11: min 2336; 12: min 2938)
+#define SETTINGS_DEF_VERSION 16  // docs/settings_def.json version (16: three rover groups, Roam mode, words from the table (0.7.0); 15: tx_dir default 1 (0.6.28); 14: rover ranges widened, every range from the table (0.6.27); 13: generated from include/settings_table.h by tools/gen_settings_def.py; 6: DSP settings dsp_*, groups for users; 7: servo map, drive_output, vehicle_name, steer_lpf_hz; 8: radio_mode, wifi_ssid, wifi_password; 9: dsp_sweep_bins; 10: dsp_frame_period_us min 2000; 11: min 2336; 12: min 2938)
 #define ESPNOW_TYPE_RESTART 0x7F
 #define ESPNOW_TYPE_MON     0x44  // monitor broadcast, once a second: u8 type, u8 version, u32 monitor ms, u64 PC unix ms (0 = unknown), u8 n
 // The last MON frame (set in the Wi-Fi task, read in loop()).
@@ -413,12 +413,129 @@ void wifiTelemetryFifoSend(){
   lastTelemetrySendTime = millis();
 }
 
+// USB "wifi test [seconds]": the setup page checks the Wi-Fi network before the user unplugs
+// the Rx. Two results: the network join, then the telemetry server. Progress lines, then
+//   WIFI test join start ssid=<ssid>
+//   WIFI test join ok ssid=<ssid> rssi=<dBm> ch=<n> ip=<a.b.c.d> ms=<join time>
+//   WIFI test join fail reason=no_network|wrong_password|not_found|no_address|radio_off|vehicle_moved
+//   WIFI test server wait s=<limit>
+//   WIFI test server ok ip=<a.b.c.d> port=<n> via=beacon|mdns ms=<time after the join>
+//   WIFI test server fail reason=not_heard|join_lost|vehicle_moved s=<wait>
+//   WIFI test end link=espnow|wifi
+// No save, no restart, no flash write. In espnow mode the test starts the Wi-Fi link and stops it at the end; ESP-NOW
+// frames are lost while the radio is on the network's channel, so the test needs a stopped vehicle. In wifi mode the
+// test reads the running link. Times: the join limit 15 s (WIFI_TEST_JOIN_MS: the driver gives up an attempt in about
+// 10 s; 15 s covers one attempt and a slow DHCP answer); the rest of the test time waits for the server (the server
+// sends its beacon each second and the rover asks mDNS at once, so 30 s is many chances; the default 45 s total).
+bool vehicleStationary();
+#define WIFI_TEST_JOIN_MS 15000u
+#define WIFI_TEST_DEFAULT_S 45
+static struct {
+  uint8_t step = 0;       // 0 off, 1 join, 2 server wait
+  bool own_link = false;  // the test started the link (espnow mode): it stops it at the end
+  uint8_t channel = 0;    // the ESP-NOW channel before the test
+  uint32_t t0 = 0, t_join = 0, limit_ms = 0;
+} wtest;
+static volatile uint8_t wtest_disc_reason = 0;  // the last disconnect reason (Wi-Fi event task)
+static volatile bool wtest_assoc = false;       // associated with the network (an address may still be missing)
+static void wifiTestEvent(arduino_event_id_t ev, arduino_event_info_t info){
+  if (ev == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) { wtest_disc_reason = info.wifi_sta_disconnected.reason; wtest_assoc = false; }
+  else if (ev == ARDUINO_EVENT_WIFI_STA_CONNECTED) wtest_assoc = true;
+}
+static const char* wifiTestJoinReason(){
+  switch (wtest_disc_reason) {
+    case WIFI_REASON_NO_AP_FOUND: return "not_found";
+    case WIFI_REASON_AUTH_FAIL: case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT: case WIFI_REASON_HANDSHAKE_TIMEOUT:
+    case WIFI_REASON_AUTH_EXPIRE: case WIFI_REASON_MIC_FAILURE: return "wrong_password";
+    default: return wtest_assoc ? "no_address" : "not_found";
+  }
+}
+static void wifiTestEnd(){
+  if (wtest.own_link) {
+    wifilink::end();
+    if (wtest.channel) esp_wifi_set_channel(wtest.channel, WIFI_SECOND_CHAN_NONE);  // ESP-NOW back on its channel
+  }
+  usbOut.printf("WIFI test end link=%s\n", radio_wifi ? "wifi" : "espnow");
+  wtest.step = 0;
+  wtest.own_link = false;
+}
+static void wifiTestStart(unsigned secs){
+  if (wtest.step) { usbOut.println("WIFI test refused: a test runs"); return; }
+  if (!msc_fat_wifi_ssid()[0]) { usbOut.println("WIFI test join fail reason=no_network"); usbOut.println("WIFI test end link=none"); return; }
+  if (!radio_wifi && !espnow_started) { usbOut.println("WIFI test join fail reason=radio_off"); usbOut.println("WIFI test end link=none"); return; }
+  // Wheels still, not drive mode: an Rx on USB with no RC transmitter starts in mode 2 (autonomous) and stands still.
+  if (!radio_wifi && !vehicleStationary()) {
+    usbOut.println("WIFI test refused: Stop the vehicle first (the test pauses ESP-NOW)");
+    return;
+  }
+  if (radio_wifi && !wifilink::started()) { usbOut.println("WIFI test join fail reason=radio_off"); usbOut.println("WIFI test end link=none"); return; }
+  static bool hooked = false;
+  if (!hooked) {
+    hooked = true;
+    WiFi.onEvent(wifiTestEvent, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+    WiFi.onEvent(wifiTestEvent, ARDUINO_EVENT_WIFI_STA_CONNECTED);
+  }
+  wtest_disc_reason = 0;
+  wtest_assoc = wifilink::connected();
+  wtest.t0 = millis();
+  wtest.limit_ms = secs * 1000u;
+  wtest.own_link = false;
+  usbOut.printf("WIFI test join start ssid=%s\n", msc_fat_wifi_ssid());
+  if (!radio_wifi) {
+    wifi_second_chan_t sc;
+    if (esp_wifi_get_channel(&wtest.channel, &sc) != ESP_OK) wtest.channel = 0;
+    wtest.own_link = true;
+    wifiStart();  // the stored network; the key is calculated as in wifi mode
+  }
+  wtest.step = 1;
+}
+static void wifiTestService(uint32_t now){
+  if (!wtest.step) return;
+  if (wtest.own_link) wifilink::service(now);  // in wifi mode radioService() runs it
+  const uint32_t t = now - wtest.t0;
+  if (wtest.own_link && !vehicleStationary()) {  // the wheels turn: ESP-NOW back at once
+    usbOut.printf("WIFI test %s fail reason=vehicle_moved\n", wtest.step == 1 ? "join" : "server");
+    wifiTestEnd();
+    return;
+  }
+  if (wtest.step == 1) {
+    if (wifilink::connected()) {
+      const IPAddress ip = WiFi.localIP();
+      usbOut.printf("WIFI test join ok ssid=%s rssi=%d ch=%d ip=%u.%u.%u.%u ms=%lu\n", msc_fat_wifi_ssid(), (int)WiFi.RSSI(),
+                    (int)WiFi.channel(), ip[0], ip[1], ip[2], ip[3], (unsigned long)t);
+      wtest.t_join = now;
+      wtest.step = 2;
+      const uint32_t left = wtest.limit_ms > t ? wtest.limit_ms - t : 0;
+      usbOut.printf("WIFI test server wait s=%lu\n", (unsigned long)((left + 999) / 1000));
+    } else if (t >= WIFI_TEST_JOIN_MS || t >= wtest.limit_ms) {
+      usbOut.printf("WIFI test join fail reason=%s\n", wifiTestJoinReason());
+      wifiTestEnd();
+    }
+    return;
+  }
+  uint8_t ip[4];
+  uint16_t port;
+  const char* via;
+  if (wifilink::server(ip, &port, &via)) {
+    usbOut.printf("WIFI test server ok ip=%u.%u.%u.%u port=%u via=%s ms=%lu\n", ip[0], ip[1], ip[2], ip[3], (unsigned)port,
+                  via, (unsigned long)(now - wtest.t_join));
+    wifiTestEnd();
+  } else if (!wifilink::connected()) {
+    usbOut.printf("WIFI test server fail reason=join_lost s=%lu\n", (unsigned long)((now - wtest.t_join) / 1000));
+    wifiTestEnd();
+  } else if (t >= wtest.limit_ms) {
+    usbOut.printf("WIFI test server fail reason=not_heard s=%lu\n", (unsigned long)((now - wtest.t_join) / 1000));
+    wifiTestEnd();
+  }
+}
+
 // USB "wifi" commands. The password goes to NVS only; no line, event or log record carries it.
 //   wifi                          status: mode, network, association, RSSI, IP, server, beacon age, counters
 //   wifi scan                     one line per network: SSID, RSSI, channel, security
 //   wifi set <ssid> <password>    "wifi set "<ssid with spaces>" <password>"; no password: an open network
 //   wifi clear                    removes the network and the password
 //   wifi blast <bytes> <per_s> <secs> [port]   throughput test to the server address (wifilink::blastStart)
+//   wifi test [seconds]           join the stored network and find the telemetry server (wifiTestStart, above)
 bool vehicleStationary();
 void wifiUsbCommand(const char* line){
   const char* mode = radio_wifi ? "wifi" : "espnow";
@@ -432,6 +549,11 @@ void wifiUsbCommand(const char* line){
     else if (radio_wifi && !wifilink::started()) usbOut.println("WIFI scan refused: the radio is off (espnow_enabled and telemetry_enabled false)");
     else if (!radio_wifi && !vehicleStationary()) usbOut.println("WIFI scan refused: Stop the vehicle first (a scan pauses ESP-NOW for about 2 s)");
     else wifilink::scanStart();
+  } else if (!strcmp(line, "wifi test") || !strncmp(line, "wifi test ", 10)) {
+    unsigned secs = WIFI_TEST_DEFAULT_S;
+    if (line[9] && (sscanf(line + 10, "%u", &secs) != 1 || secs < 20 || secs > 120))
+      usbOut.println("WIFI usage: wifi test [seconds 20-120, default 45]");
+    else wifiTestStart(secs);
   } else if (!strcmp(line, "wifi blast stop")) {
     wifilink::blastStop();
   } else if (!strncmp(line, "wifi blast ", 11)) {
@@ -462,7 +584,7 @@ void wifiUsbCommand(const char* line){
     }
     memset(pass, 0, sizeof(pass));
   } else {
-    usbOut.println("WIFI usage: wifi | wifi scan | wifi set <ssid> <password> | wifi clear");
+    usbOut.println("WIFI usage: wifi | wifi scan | wifi test [seconds] | wifi set <ssid> <password> | wifi clear");
   }
 }
 
@@ -582,6 +704,7 @@ void radioService(){
     monitorLinkService();  // MON frames: "monitor heard" and PC time events
     if (espnow_started) telemlog_poll(millis(), telemetrySend);  // live log frames, INFO, backfill
   }
+  if (radio_due) wifiTestService(millis());  // "wifi test": its steps and lines
   if (radio_due && wifiWanted() && radioSlotOpen()) {  // radio_mode "wifi": the same frames as UDP; nothing here waits for the network
     wifiStart();  // no-op once started; starts it after a config.json change
     stage(ST_RADIO);

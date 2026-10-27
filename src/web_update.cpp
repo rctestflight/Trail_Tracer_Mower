@@ -24,6 +24,10 @@
 // src/platform/updates.inc (rover_fw_version: src/platform/board.inc; vehicleStationary: src/platform/telemetry.inc)
 bool webUpdateGrant(uint8_t kind, unsigned long size, const char* sha, char* err, size_t cap);  // loop() context
 void webUpdateModeEnd();                                                                       // loop() context
+bool webUpdateRxGo(char* err, size_t cap);         // loop() context: the held Rx STM32 file goes to the feed
+void webUpdateRxDrop();                            // loop() context: the held Rx STM32 file is not used
+bool webUpdateEspHold(char* err, size_t cap);      // loop() context: the written ESP32 image waits in its slot
+bool webUpdateEspUnselect(char* err, size_t cap);  // loop() context: the boot slot back to the running image
 int stmUrlOutcome();        // 0 runs, 1 done, -1 failed, -2 idle
 const char* stmUrlError();  // the reason after a failure
 void stmStatusLine(String& out);
@@ -34,7 +38,9 @@ extern "C" const char* rover_fw_version();
 namespace webupd {
 namespace {
 
-enum : uint8_t { K_NONE, K_ESP, K_RX, Q_END };  // the file in hand; Q_END: a request to loop() only
+// The file in hand (K_*), and the requests to loop() only (Q_*). K_RX_HOLD: an Rx STM32 file in a form post, its feed
+// held to the end of the form (webUpdateGrant kind 4). Q_END_HOLD: the ESP32 image end in a form post, then it waits.
+enum : uint8_t { K_NONE, K_ESP, K_RX, Q_END, K_RX_HOLD, Q_END_HOLD, Q_RX_GO, Q_RX_DROP, Q_UNSELECT };
 constexpr uint32_t STALL_MS = 30000;     // no body byte for 30 s ends an upload (as "ota url")
 constexpr uint32_t FEED_MS = 240000;     // the Rx STM32 update: download end to its result
 
@@ -111,12 +117,17 @@ bool ask(uint8_t kind, unsigned long size, const char* sha, char* err, size_t ca
 }
 
 // One upload request (form post or raw post).
+// 0.6.40, the pair order of a form post: a failed part never leaves a changed Rx STM32 with an old ESP32, or the
+// reverse. The Rx STM32 file goes to flash and its feed waits (rx_held); the ESP32 image goes to its slot and the
+// restart waits (esp_held). At the end of the form: the feed runs if no part failed; then the restart if the feed
+// passed, or the boot slot goes back to the running image if it failed. The parts can come in either order.
 struct Up {
   httpd_req_t* req;
   uint8_t kind;          // the part in hand: K_NONE (ignored), K_ESP, K_RX
   bool started;          // its upload runs
   bool esp_seen, esp_ok, rx_ok, stop;
-  bool rx_late;          // an Rx STM32 file after the ESP32 image: not used
+  bool form;             // a form post: the pair order
+  bool rx_held, esp_held;
   int code;              // HTTP status of the answer
   unsigned long size;    // raw post: the body size; form post: 0 (not known)
   size_t left;           // body bytes not read yet
@@ -144,12 +155,6 @@ bool on_part(void* ctx, const char* name, const char*) {
   Up* u = (Up*)ctx;
   u->kind = !strcmp(name, "esp32") ? K_ESP : !strcmp(name, "rxstm32") ? K_RX : K_NONE;
   u->started = false;
-  if (u->kind == K_RX && u->esp_seen) {
-    // The ESP32 image restarts the ESP32, and the running ESP32 feeds the Rx STM32: the Rx STM32 file goes first.
-    // The ESP32 image is in its slot already: it stays, and this file is not used.
-    u->kind = K_NONE;
-    u->rx_late = true;
-  }
   return true;
 }
 
@@ -157,7 +162,7 @@ bool on_data(void* ctx, const uint8_t* b, size_t n) {
   Up* u = (Up*)ctx;
   if (u->kind == K_NONE || n == 0) return true;
   if (!u->started) {
-    if (!ask(u->kind, u->size, u->sha, u->err, sizeof(u->err))) {
+    if (!ask(u->kind == K_RX && u->form ? K_RX_HOLD : u->kind, u->size, u->sha, u->err, sizeof(u->err))) {
       fail(u, 409, "%s refused: %s", kind_name(u->kind), u->err);
       return false;
     }
@@ -194,19 +199,56 @@ bool wait_rx(Up* u) {
   return true;
 }
 
+// A form post: the Rx STM32 file is in flash; loop() checks it (header) and holds it. Wait for that.
+bool wait_held(Up* u) {
+  int r;
+  for (const uint32_t t0 = millis(); (r = stmUrlOutcome()) == 0;) {
+    if (millis() - t0 > 5000) { fail(u, 500, "Rx STM32 firmware: no check result in 5 s"); return false; }
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+  if (r != 2) { fail(u, 400, "Rx STM32 firmware refused: %s", r == -1 ? stmUrlError() : "the update stopped"); return false; }
+  u->rx_held = true;
+  return true;
+}
+
 bool on_end(void* ctx) {
   Up* u = (Up*)ctx;
   if (u->kind == K_NONE || !u->started) return true;  // an empty file input
   u->started = false;
-  if (!ask(Q_END, 0, nullptr, u->err, sizeof(u->err))) {
+  const bool hold = u->form && u->kind == K_ESP;
+  if (!ask(hold ? Q_END_HOLD : Q_END, 0, nullptr, u->err, sizeof(u->err))) {
     if (u->kind == K_ESP) s_end_mode = true;
     // Rx STM32: "stm url" reports the failure through its own state (fetch_poll); the reason is the same text.
     fail(u, 400, "%s refused: %s", kind_name(u->kind), u->err);
     return false;
   }
-  if (u->kind == K_RX) return wait_rx(u);
+  if (u->kind == K_RX) return u->form ? wait_held(u) : wait_rx(u);
   u->esp_ok = true;
+  u->esp_held = hold;
   return true;
+}
+
+// The end of a form post: the held parts go on together, or neither changes the Rx.
+void form_end(Up* u) {
+  char e[96];
+  if (u->rx_held) {
+    u->rx_held = false;
+    const bool go = u->code == 200 && (u->esp_ok || !u->esp_seen);
+    if (go && !ask(Q_RX_GO, 0, nullptr, e, sizeof(e))) fail(u, 500, "Rx STM32 firmware not updated: %s", e);
+    else if (go) wait_rx(u);
+    else {
+      ask(Q_RX_DROP, 0, nullptr, e, sizeof(e));
+      snprintf(s_msg + strlen(s_msg), sizeof(s_msg) - strlen(s_msg), " The Rx STM32 file was not used.");
+    }
+  }
+  if (u->esp_held && u->code != 200) {
+    u->esp_held = false;
+    u->esp_ok = false;
+    const bool back = ask(Q_UNSELECT, 0, nullptr, e, sizeof(e));
+    snprintf(s_msg + strlen(s_msg), sizeof(s_msg) - strlen(s_msg), back ? " The ESP32 image was not used."
+             : " The ESP32 image stays in its slot for the next restart: %s.", e);
+  }
+  if (u->code != 200) s_end_mode = true;
 }
 
 // Read the body: each piece to the multipart parser (form post) or straight to the writer (raw post).
@@ -261,8 +303,8 @@ esp_err_t answer(Up* u) {
     s_ok = 0;
   }
   if (u->code == 200 && u->esp_ok) {
-    snprintf(s_msg + strlen(s_msg), sizeof(s_msg) - strlen(s_msg), "%sESP32 firmware written: the Rx restarts.%s",
-             u->rx_ok ? " " : "", u->rx_late ? " The Rx STM32 file was not used: it must come before the ESP32 image." : "");
+    snprintf(s_msg + strlen(s_msg), sizeof(s_msg) - strlen(s_msg), "%sESP32 firmware written: the Rx restarts.",
+             u->rx_ok ? " " : "");
     s_phase = PH_RESTART;
     s_ok = 1;
   } else {
@@ -350,8 +392,10 @@ esp_err_t post_form(httpd_req_t* req) {
   heapSample();
   if (!mp) { fail(u, 500, "Not updated: no memory for the form"); return finish(u); }
   mp->begin(bnd, multipart::Callbacks{u, on_part, on_data, on_end});
+  u->form = true;
   receive(u, mp);
   delete mp;
+  form_end(u);
   return finish(u);
 }
 
@@ -430,7 +474,7 @@ const d=new FormData();
 if(r.length)d.append('rxstm32',r.length>1?new Blob(r):r[0],r.length>1?'rx_stm32.bin':r[0].name);
 if(e)d.append('esp32',e,e.name);
 const o=await st()||{},x=new XMLHttpRequest();$('b').disabled=true;$('p').hidden=false;$('p').value=0;
-S('Sending... '+(r.length?'The Rx STM32 goes first (about 30 s). ':'')+'Keep the power on.');
+S('Sending... Keep the power on.'+(r.length?' The Rx STM32 update runs after the upload (about 30 s).':''));
 x.upload.onprogress=p=>{if(p.lengthComputable)$('p').value=p.loaded/p.total};
 x.onload=x.onerror=async()=>{let j=null;try{j=JSON.parse(x.responseText)}catch(_){}
 if(!j){const s=await st();j={ok:false,msg:s&&s.msg?s.msg:'No answer from the Rx.'}}
@@ -475,8 +519,16 @@ void loopService() {
     portEXIT_CRITICAL(&s_mux);
     if (mine) {
       s_q_err[0] = 0;
-      s_q_ok = s_q_kind == Q_END ? usb_ota::push_end(s_q_err, sizeof(s_q_err))
-                                 : webUpdateGrant(s_q_kind, s_q_size, s_q_sha, s_q_err, sizeof(s_q_err));
+      char* const e = s_q_err;
+      const size_t n = sizeof(s_q_err);
+      switch (s_q_kind) {
+        case Q_END: s_q_ok = usb_ota::push_end(e, n); break;
+        case Q_END_HOLD: s_q_ok = usb_ota::push_end(e, n) && webUpdateEspHold(e, n); break;
+        case Q_RX_GO: s_q_ok = webUpdateRxGo(e, n); break;
+        case Q_RX_DROP: webUpdateRxDrop(); s_q_ok = true; break;
+        case Q_UNSELECT: s_q_ok = webUpdateEspUnselect(e, n); break;
+        default: s_q_ok = webUpdateGrant(s_q_kind, s_q_size, s_q_sha, e, n);  // K_ESP 1, K_RX 2, K_RX_HOLD 4
+      }
       s_q = 3;
     }
   }

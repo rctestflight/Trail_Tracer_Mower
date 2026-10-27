@@ -52,6 +52,7 @@ uint32_t dl_heap[5];                // free heap: command, after Update.begin, a
 constexpr uint32_t DL_STALL_MS = 30000;
 // An upload fed by the caller (push_begin): the same writers; dl_got counts the bytes, dl_size 0 = not known yet.
 bool dl_push = false;              // the download state belongs to an upload, not to "ota url" or fetch_start
+bool held = false;                 // push_hold: an ESP32 image in its selected slot waits for push_restart or push_unselect
 bool sha_given = true;             // sha_expected holds a value from the client
 uint8_t push_head[64];             // ESP32 image: the first bytes, held until the image check can run on 36 B or more
 size_t push_hn = 0;
@@ -106,6 +107,7 @@ bool start_image(unsigned long size, char* err, size_t cap, const char** slot) {
   }
   // An earlier writer that stopped part way (a page upload cut off) can leave the Update writer open with active
   // false: Update.begin then refuses with no error until a restart. Close it first.
+  if (held) { snprintf(err, cap, "an ESP32 image waits for its restart"); return false; }
   if (active || Update.isRunning()) Update.abort();
   if (!Update.begin(size, U_FLASH)) { snprintf(err, cap, "begin %s", Update.errorString()); active = false; return false; }
   mbedtls_sha256_init(&sha);
@@ -604,7 +606,29 @@ void push_abort(const char* why) {
 }
 
 void push_restart() {
+  if (held) {  // a partition upload (the Rx STM32 file) can have used the download state since push_hold
+    held = false;
+    dl_push = true;
+    dl_kind = K_ESP;
+    dl_state = DL_OK;  // service() restarts
+    return;
+  }
   if (dl_push && dl_kind == K_ESP && dl_state == DL_RUN && !active) dl_state = DL_OK;  // service() restarts
+}
+
+bool push_hold() {
+  if (!dl_push || dl_kind != K_ESP || dl_state != DL_RUN || active) return false;
+  held = true;
+  dl_state = DL_IDLE;
+  return true;
+}
+
+bool push_unselect(char* err, size_t cap) {
+  if (!held) return true;
+  held = false;
+  const esp_err_t e = esp_ota_set_boot_partition(esp_ota_get_running_partition());
+  if (e != ESP_OK) { snprintf(err, cap, "boot slot not set back: %s", esp_err_to_name(e)); return false; }
+  return true;
 }
 
 uint32_t push_got() { return dl_got; }
