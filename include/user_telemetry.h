@@ -67,4 +67,5 @@ TLM(wire_inside_pct,   U8,  1,   "%",   0, 10HZ, "Polarity detection", "Inside f
 // 0.7.0: the wire position solve at a bounce (estimator mode; rover_dec_psi_deg stays the approach fit, a frozen
 // name). The depart plan uses these, so the replay draws the bounce line from them
 TLM(rover_dec_solve_deg, I16, 0.1, "deg", 1, 10HZ, "Rover decisions", "Wire solve at the decision: the wire direction in the rover frame (+ counterclockwise from the heading; no value: no solve answer)")
-TLM(rover_dec_solve_mm,  U16, 1,   "mm",  0, 10HZ, "Rover decisions", "Wire solve at the decision: horizontal distance from sensor 1 to the wire (no value: no solve answer)")
+TLM(rover_dec_solve_mm,  U16, 1,   "mm",  0, 10HZ, "Rover decisions", "Wire solve at the decision: horizontal distance from the solve's sensor to the wire (no value: no solve answer)")
+TLM(rover_dec_solve_sensor, U8, 1, "",  0, 10HZ, "Rover decisions", "Wire solve at the decision: the sensor it took, 1 or 2 (Reverse bounce: sensor 2 leads in reverse; no value: no solve answer)")

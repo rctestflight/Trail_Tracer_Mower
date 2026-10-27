@@ -1539,6 +1539,7 @@ void applyDeviceConfig(const DeviceConfig& cfg)
   rc.lostTimeout              = (float)cfg.rover_lost_timeout_s;
   rc.bounceStyle              = cfg.rover_bounce_style;
   rc.followInset              = cfg.rover_follow_inset_m;
+  rc.turnRadius               = cfg.rover_turn_radius_m;
   rc.bounceFollowS            = cfg.rover_bounce_follow_s;
   rc.wireMaxDepth             = cfg.wire_max_depth_mm * 0.001f;
   // The autopilot steer command goes through the gyro rate loop: full steer requests steering_rate_max_dps
@@ -1635,6 +1636,21 @@ void roverStep(){
     in.x = x * c - y * s;
     in.y = x * s + y * c;
   }
+  // Sensor 2 for control (sensor2Control): the leading sensor of a reverse roam in the sweeping modes (rover_autopilot.cpp
+  // leadInputs). Sensor 2 for data only: sensor 1 leads both ways
+  in.inRange2 = sensor2Control()
+            && !WFRX_STATUS_GET_BIT(sb, WFRX_STATUS_S2_SIGNAL_LOST)
+            && !WFRX_STATUS_GET_BIT(sb, WFRX_STATUS_S2_SIGNAL_OVERLOAD)
+            && !WFRX_STATUS_GET_BIT(sb, WFRX_STATUS_S2_SIGNAL_DISABLED);
+  in.x2 = stmPacket.items.s2_x * 0.001f;
+  in.y2 = stmPacket.items.s2_y * 0.001f;
+  in.R2 = stmPacket.items.s2_radius * 0.001f;
+  if (g_deviceConfig.rover_imu_roll && gyro_ready) {   // the same roll correction as sensor 1
+    const float a = (g_deviceConfig.rover_imu_roll == 2 ? 1.0f : -1.0f) * imu_roll16 * (float)(M_PI / 32768.0);
+    const float x = in.x2, y = in.y2, c = cosf(a), s = sinf(a);
+    in.x2 = x * c - y * s;
+    in.y2 = x * s + y * c;
+  }
   in.inside = world_inside;    // polarity facts (worldFacts); 0 when not known
   in.heading = world_heading;
 
@@ -1712,9 +1728,11 @@ void roverStep(){
     if (d.solveOk) {
       tlm_set(TLM_rover_dec_solve_deg, d.solvePsiDeg);
       tlm_set(TLM_rover_dec_solve_mm, constrain(d.solveD * 1000.0f, 0.0f, 65000.0f));
+      tlm_set(TLM_rover_dec_solve_sensor, d.solveSensor);
     } else {
       tlm_set(TLM_rover_dec_solve_deg, NAN);   // no solve answer: no value
       tlm_set(TLM_rover_dec_solve_mm, NAN);
+      tlm_set(TLM_rover_dec_solve_sensor, NAN);
     }
     if (usb_verbose)
       usbOut.printf("ROVER %s %s d=%.2f X=%.2f psi=%.0f turn=%.0f side=%d fault=%d\n", rover::stateName(roverAp.state),

@@ -48,6 +48,11 @@ const float B_SIDE_REL = 0.04f;       // |y| under 4 % of the radius: the wire s
                                       // 20-28 % below, within a few degrees of square-on)
 const float B_YREL = 0.25f;           // |y| under 25 % of the radius says nothing about the frame (the worldFacts blind line)
 const float B_TURN_LIMIT = 3.0f;      // a driven turn ends at the latest after this many times its time at the full rate
+const int SJ_MIN_N = 10;              // the planned sweep join takes a solve over at least 10 samples (1 s of drive): one
+                                      // over 0.3 s of drive after the start put the follow on the wrong side (emulator)
+const float SJ_END_IN = 0.15f;        // m: the planned sweep join ends this far inside the follow line. Planned on the
+                                      // line, every join ran 0.10-0.22 m past the wire (emulator, a skid steer: the
+                                      // true speed is 1.16 x the speed setting, so the arc is that much wider; solve error)
 const float B_NULL_DEG = 15.0f;       // deg from square-on: the band where the field null loses the wire (12-15 deg in the
                                       // field model); the square-on guard acts only for a heading in it
 
@@ -123,7 +128,15 @@ void Autopilot::reset() {
   bPeak_ = 0;
   bPeakX_ = -1e9f;
   bStopped_ = false;
+  dir_ = 1;
+  lead_ = leadWant_ = fed_ = 1;
+  s2SeenT_ = 99;
+  s2LostT_ = 0;
+  sjPhase_ = 0;
+  sweepJoin_ = false;
+  arcGain_ = 1;
 #ifdef ROVER_WIRE_SOLVE
+  if (wfb_) { wfb_->cfg.sensorFwd = wirefit::Config().sensorFwd; wfb_->cfg.sensorLeft = wirefit::Config().sensorLeft; }
 #ifdef ROVER_WIRE_SOLVE_BG0
   if (wfb_) wfb_->bc.bgField = false;   // test build: no uniform vertical field term
 #endif
@@ -136,7 +149,7 @@ void Autopilot::reset() {
 void Autopilot::releaseSolve() {
 #ifdef ROVER_WIRE_SOLVE
 #ifdef ESP_PLATFORM
-  // the task must not work on the memory: wait for its answer (the longest measured solve and profile: 1.1 s of CPU)
+  // the task must not work on the memory: wait for its answer (the longest measured solve: 262 ms of CPU)
   for (int i = 0; i < 5000 && __atomic_load_n(&sState_, __ATOMIC_ACQUIRE) == 1; i++) vTaskDelay(1);
   if (__atomic_load_n(&sState_, __ATOMIC_ACQUIRE) == 1) return;   // still at work: keep the memory, never free under it
   if (sTask_) { vTaskDelete((TaskHandle_t)sTask_); sTask_ = nullptr; }
@@ -144,7 +157,6 @@ void Autopilot::releaseSolve() {
 #endif
   delete wfb_;
   wfb_ = nullptr;
-  profWant_ = profReady_ = false;
   wres_ = wirefit::BounceResult();
   wTotal_ = -1;
 #endif
@@ -152,7 +164,7 @@ void Autopilot::releaseSolve() {
 
 #ifdef ROVER_WIRE_SOLVE
 // The solve on the ESP32-S2 (no floating-point unit): 34 ms of CPU per solve on a lawn log of the reference rover (most 262 ms), and
-// 0.56 s for the direction profile (most 0.85 s; bench board, 0.7.0 timing build). In the loop that stopped the motor
+// 0.56 s for the direction profile of 0.7.1 (most 0.85 s; bench board, 0.7.0 timing build). In the loop that stopped the motor
 // commands and the Rx link for up to a second, so a task at the loop's priority does the work: the loop waits at most
 // one tick for it. On the PC (emulator) the same steps run at once
 #ifdef ESP_PLATFORM
@@ -168,7 +180,6 @@ static void solveTaskFn(void*) {
 void Autopilot::solveTaskRun() {
 #ifdef ESP_PLATFORM
   sRes_ = wfb_->iterate();
-  sProf_ = sWithProf_ && sRes_.valid ? wfb_->psiProfile(2.0f) : 90.0f;
   __atomic_store_n(&sState_, (uint8_t)2, __ATOMIC_RELEASE);
 #endif
 }
@@ -177,7 +188,6 @@ void Autopilot::solveStep() {
 #ifdef ESP_PLATFORM
   if (__atomic_load_n(&sState_, __ATOMIC_ACQUIRE) == 2) {
     wres_ = sRes_;
-    if (sWithProf_) { prof_ = sProf_; profReady_ = true; }
     sState_ = 0;
   }
   if (sState_ != 0 || wfb_->total() == wTotal_) return;   // busy: the next free step takes the newest sample
@@ -185,21 +195,18 @@ void Autopilot::solveStep() {
   wirefit::BounceResult r;
   if (!wfb_->prepare(r)) {
     wres_ = r;
-    if (profWant_) { profWant_ = false; prof_ = 90; profReady_ = true; }
     return;
   }
   if (!sTask_) {
     sSolveAp = this;
     TaskHandle_t t = nullptr;
-    // 4 kB stack: iterate() and the profile need under 1 kB of locals; the soft-float library calls add little
+    // 4 kB stack: iterate() needs under 1 kB of locals; the soft-float library calls add little
     if (xTaskCreate(solveTaskFn, "wsolve", 4096, nullptr, uxTaskPriorityGet(nullptr), &t) != pdPASS) {
       toFault(FAULT_NO_MEMORY);
       return;
     }
     sTask_ = t;
   }
-  sWithProf_ = profWant_;
-  profWant_ = false;
   __atomic_store_n(&sState_, (uint8_t)1, __ATOMIC_RELEASE);
   xTaskNotifyGive((TaskHandle_t)sTask_);
 #else
@@ -208,26 +215,16 @@ void Autopilot::solveStep() {
 }
 
 void Autopilot::bounceBegin() {
-  profWant_ = true;
-  profReady_ = false;
   bounceWaitT_ = 0;
   sub = SUB_BOUNCE_WAIT;
   stopT_ = 0;
 }
 
-bool Autopilot::profileReady() const {
+bool Autopilot::solveSettled() const {
 #ifdef ESP_PLATFORM
-  return profReady_;
+  return __atomic_load_n(&sState_, __ATOMIC_ACQUIRE) == 0 && wfb_ && wfb_->total() == wTotal_;
 #else
   return true;
-#endif
-}
-
-float Autopilot::profileNow() {
-#ifdef ESP_PLATFORM
-  return profReady_ ? prof_ : 90.0f;   // no answer in time: no direction information
-#else
-  return wfb_ ? wfb_->psiProfile(2.0f) : 90.0f;
 #endif
 }
 
@@ -347,21 +344,6 @@ void Autopilot::bounceNow(const Inputs& in) {
   // line has a side: the wire on the left when it runs forward past sensor 1 on its left)
   wirefit::BounceResult ws;
   const bool ok = solveNow(ws);
-  // Perturb and observe: the depart limit must exceed the angle uncertainty. The honest uncertainty
-  // is the cost profile over the wire direction (a rise of 2: two standard deviations at the reading noise); driving
-  // square-on it grows, because the distance falls at nearly the full speed for any angle from 60 to 90 deg. Over the
-  // limit: turn 15 deg away from the solve's wire side, reverse the vertical distance range (sensor height + wire extra
-  // depth, the travel over which the field shape changes), and solve again once
-  if (ok && !perturbed_ && profileNow() > cfg.bounceMinDeg) {
-    solveDebug("perturb", in);
-    perturbed_ = true;
-    planDir_ = cosf(ws.psiDeg * D2R) >= 0 ? -1 : 1;
-    decide(DEC_PROBE, planDir_ * 15.0f, (int8_t)-planDir_);
-    dec.solveOk = true; dec.solvePsiDeg = ws.psiDeg; dec.solveD = ws.d;
-    sub = SUB_PERTURB_STOP;
-    stopT_ = 0;
-    return;
-  }
   solveDebug("bounce", in);
   if (ok) {
     // Leave angle: the mirror of the approach plus the spread, within the limit (as planBounce). Heading: the solve's
@@ -390,7 +372,7 @@ void Autopilot::bounceNow(const Inputs& in) {
 #endif
   decide(DEC_BOUNCE, planDir_ * planTurn_ / D2R, planSide_);
 #ifdef ROVER_WIRE_SOLVE
-  if (ok) { dec.solveOk = true; dec.solvePsiDeg = ws.psiDeg; dec.solveD = ws.d; }
+  if (ok) { dec.solveOk = true; dec.solvePsiDeg = ws.psiDeg; dec.solveD = ws.d; dec.solveSensor = (uint8_t)lead_; }
 #endif
   sub = SUB_STOP;
   stopT_ = 0;
@@ -414,7 +396,51 @@ void Autopilot::feedFit(const Inputs& in) {
   if (in.inRange && in.R > 0) fit_.add(in.x, in.y, in.R, cfg.sensorHeight, in.inside);
 }
 
-Output Autopilot::step(const Inputs& in) {
+// The leading sensor (the best available sensor): in a sweeping mode the rover roams either
+// way round; in reverse, sensor 2 (at the back) leads and feeds every reading of the roam, the solve included. The
+// join, the follow and the depart drive forward on sensor 1. No distance between the sensors is assumed: the
+// solve models sensor 2 at the turn centre. Each sensor keeps its own Rx sign; the solve aligns each reading to the last
+// one of the same sensor, and its buffer starts again at each change of sensor (leadApply)
+Inputs Autopilot::leadInputs(const Inputs& in) const {
+  Inputs l = in;
+  if (lead_ == 2 && !bb_) { l.inRange = in.inRange2; l.x = in.x2; l.y = in.y2; l.R = in.R2; }
+  return l;
+}
+
+// After a change of drive direction: sensor 2 when the rover drives in reverse and sensor 2 has read in the last 2 s
+void Autopilot::leadPick() {
+  leadWant_ = (dir_ < 0 && s2SeenT_ < 2.0f) ? 2 : 1;
+  s2LostT_ = 0;
+}
+
+void Autopilot::leadApply() {
+#ifdef ROVER_WIRE_SOLVE
+#ifdef ESP_PLATFORM
+  if (__atomic_load_n(&sState_, __ATOMIC_ACQUIRE) == 1) return;   // the task works on the old sensor's window: wait
+  sState_ = 0;                                                      // its answer belongs to the old sensor
+#endif
+  if (wfb_) {
+    wfb_->cfg.sensorFwd = leadWant_ == 1 ? wirefit::Config().sensorFwd : 0.0f;
+    wfb_->cfg.sensorLeft = leadWant_ == 1 ? wirefit::Config().sensorLeft : 0.0f;
+  }
+  wres_ = wirefit::BounceResult();
+  wTotal_ = -1;   // the next frame starts the buffer again
+#endif
+  lead_ = leadWant_;
+}
+
+Output Autopilot::step(const Inputs& in0) {
+  s2SeenT_ = (in0.inRange2 && in0.R2 > 0) ? 0 : s2SeenT_ + in0.dt;
+  // Sensor 2 leads but reads nothing while sensor 1 reads, for 0.5 s: sensor 1 takes over
+  if (lead_ == 2 && !bb_ && !(in0.inRange2 && in0.R2 > 0) && in0.inRange) {
+    s2LostT_ += in0.dt;
+    if (s2LostT_ > 0.5f) leadWant_ = 1;
+  } else s2LostT_ = 0;
+  if (bb_) leadWant_ = 1;
+  const Inputs in = leadInputs(in0);
+  // A change of the sensor that feeds the readings: its wire side starts again from the polarity (basicsSide)
+  const int8_t fed = (lead_ == 2 && !bb_) ? 2 : 1;
+  if (fed != fed_) { bWasLost_ = true; bM_ = in.inside < 0 ? -1 : 1; fed_ = fed; }
   polNow_ = polSide(in);
   feedFit(in);
   last_ = stepStates(in);
@@ -423,6 +449,16 @@ Output Autopilot::step(const Inputs& in) {
 
 // The end of the start: on the wire -> FOLLOW (returns true), else ROAM or RETURN.
 bool Autopilot::startDone(const Inputs& in, Output& o) {
+  if (sweeping() && rd.valid && (fabsf(rd.X) <= CAPTURE_OFFSET || rd.d <= 0.5f * cfg.sensorHeight)) {
+    // A sweeping mode on the wire: the own follow (no turn on the spot), its short follow, then the depart arc
+    bb_ = true; state = FOLLOW; sub = SUB_NONE; bLong_ = false;
+    bT_ = bTurned_ = 0; bPlanned_ = bLeaveDeg();
+    bOnLine_ = bHavePrev_ = bStopped_ = false; bMinXs_ = 1e9f; bGuardTurnT_ = 0;
+    bYShot_ = bYActive_ = bGuardWas_ = false; sweepJoin_ = false; sjPhase_ = 0;
+    startCheck_ = false;
+    decide(DEC_START, 0, 0);
+    return true;
+  }
   if (rd.valid && (fabsf(rd.X) <= CAPTURE_OFFSET || rd.d <= 0.5f * cfg.sensorHeight)) {
     state = FOLLOW; sub = SUB_NONE;
     startCheck_ = false;
@@ -579,6 +615,7 @@ Output Autopilot::stepStates(const Inputs& in) {
 #endif
       wTotal_ = -1;
     }
+    if (leadWant_ != lead_) leadApply();
     if (wTotal_ < 0) {   // the first frame: the height starts at the setting, spread by the wire extra depth
       wfb_->bc.hStart = cfg.sensorHeight;
       wfb_->bc.hStartSd = cfg.wireMaxDepth;
@@ -613,7 +650,7 @@ Output Autopilot::stepStates(const Inputs& in) {
   }
   // Lost in FOLLOW or DEPART for rover_no_tx_s: one 30 deg turn in place (alternate sides). Square-on over
   // the wire the coils sit in the field null; the turn ends it. In place, so safe with the Tx off too.
-  const bool wireState = (state == FOLLOW || state == DEPART) && !bb_;   // basics: stop while lost, no search
+  const bool wireState = (state == FOLLOW || state == DEPART) && !bb_ && !sweeping();   // basics: stop while lost, no search
   if (in.inRange) { searched_ = searching_ = false; }
   else if (wireState) {
     if (searching_) {
@@ -688,6 +725,12 @@ Output Autopilot::stepStates(const Inputs& in) {
       switch (sub) {
         case SUB_BSTOP:
           if (!stopped(in)) return o;
+          if (twoWay()) {   // change the drive direction, the nose turned by the spread
+            const float sp = (2 * rnd() - 1) * cfg.beaconSpreadDeg * D2R;
+            decide(DEC_BEACON, sp / D2R, 0);
+            reverseTurn(sp, false);
+            return o;
+          }
           {
             float T = PI_F + (2 * rnd() - 1) * cfg.beaconSpreadDeg * D2R;
             int8_t dir = rnd() < 0.5f ? 1 : -1;
@@ -707,41 +750,52 @@ Output Autopilot::stepStates(const Inputs& in) {
           return o;
         case SUB_STOP:
           if (!stopped(in)) return o;
+          if (reverseBounce()) {
+            // Reverse bounce: the same decision; the rover changes its drive direction and sweeps to the planned heading
+            // (the travel direction, rover frame). No solve answer: straight back the way it came
+            float nose = 0;
+            if (dec.solveOk || !kWireSolve) nose = wrapPi(planDir_ * planTurn_ + (dir_ > 0 ? PI_F : 0.0f));
+            reverseTurn(nose, true);
+            return o;
+          }
           startPivot(planTurn_, planDir_);
           sub = SUB_PIVOT;
           return o;
-        case SUB_PERTURB_STOP:
-          if (!stopped(in)) return o;
-          startPivot(15.0f * D2R, planDir_);
-          sub = SUB_PERTURB_TURN;
+#ifdef ROVER_WIRE_SOLVE
+        case SUB_ENTRY_ARC:
+          // The probe on entry: the arc ends early at the bounce point, outside or out of range; the roam goes on
+          if (!rd.valid || in.inside < 0) { sub = SUB_NONE; break; }
+          {
+            wirefit::BounceResult ws;
+            if (solveNow(ws) && ws.d <= cfg.bounceDistance) { sub = SUB_NONE; break; }
+          }
+          if (arcStep(in, o)) { sub = SUB_NONE; o.v = dir_ * approachV; o.w = 0; }
           return o;
-        case SUB_PERTURB_TURN:
-          if (pivotStep(in, o)) { sub = SUB_PERTURB_BACK; perturbLeft_ = cfg.sensorHeight + cfg.wireMaxDepth; o = Output(); }
-          return o;
-        case SUB_PERTURB_BACK:
-          perturbLeft_ -= fabsf(in.v) * in.dt;
-          if (perturbLeft_ > 0) { o.v = -approachV; return o; }
-          sub = SUB_PERTURB_END;
-          stopT_ = 0;
-          return o;
-        case SUB_PERTURB_END:
-          if (!stopped(in)) return o;
-          bounceNow(in);
+#endif
+        case SUB_SWEEP:
+          if (arcStep(in, o)) {
+            sub = SUB_NONE;
+            armed_ = joinArmed_ = false;
+            rearmStart();
+            bPeak_ = bMedian();
+            bPeakX_ = -1e9f;
+            if (swBounce_) { startCheck_ = false; bounces++; }
+            o = Output();
+          }
           return o;
 #ifdef ROVER_WIRE_SOLVE
-        case SUB_BOUNCE_WAIT:   // the bounce point: stop, then decide on the solve and its direction profile
+        case SUB_BOUNCE_WAIT:   // the bounce point: stop, then decide on the solve of the last sample
           bounceWaitT_ += in.dt;
           if (!stopped(in)) return o;
-          // 5 s: the longest measured solve and profile (1.1 s of CPU) at the 41 % of the CPU the loop leaves free
-          // with Wi-Fi and both sensors (bench board) is 2.7 s; past 5 s the bounce goes on with no direction information
-          if (!profileReady() && bounceWaitT_ < 5.0f) return o;
+          // 5 s: well over the longest measured solve (262 ms of CPU) at the 41 % of the CPU the loop leaves free with
+          // Wi-Fi and both sensors (bench board); past 5 s the bounce goes on with the last answer
+          if (!solveSettled() && bounceWaitT_ < 5.0f) return o;
           bounceNow(in);
           return o;
 #endif
         case SUB_PIVOT:
           if (pivotStep(in, o)) {
             sub = SUB_NONE;
-            perturbed_ = false;
             armed_ = joinArmed_ = false;
             settleStart();
             startCheck_ = false;
@@ -765,19 +819,34 @@ Output Autopilot::stepStates(const Inputs& in) {
         if (!outsideTurned_ || (rd.valid && !nullBand && rd.df > outsideD_ + cfg.rearmDrop)) {
           outsideTurned_ = true;
           outsideD_ = rd.valid ? rd.df : 0;
-          startPivot(PI_F, 1); sub = SUB_BPIVOT; decide(DEC_TURN_BACK, 180, 0); return o;
+          decide(DEC_TURN_BACK, 180, 0);
+          insideRun_ = 0;
+          if (twoWay()) {   // a sweeping mode: change the drive direction, no turn
+            dir_ = (int8_t)-dir_;
+            leadPick();
+            o.v = dir_ * approachV;
+            return o;
+          }
+          startPivot(PI_F, 1); sub = SUB_BPIVOT; return o;
         }
         if (rd.valid) outsideD_ = fminf(outsideD_, rd.df);
-        o.v = approachV;
+        o.v = dir_ * approachV;
         return o;
       }
-      if (in.inside > 0) outsideTurned_ = false;
+      // A sweeping mode turns back by a change of drive direction, so the rover stays at the wire, where polarity
+      // flickers: the turn-back re-arms after the re-arm drop of travel with polarity inside (emulator: 137 turn-backs
+      // at the wire and an escape when each inside reading re-armed it)
+      if (in.inside > 0) {
+        insideRun_ += fabsf(in.v) * in.dt;
+        if (!twoWay() || insideRun_ >= cfg.rearmDrop) outsideTurned_ = false;
+      }
       if (cfg.beaconBounce && beaconArmed_ && in.beaconRange <= cfg.beaconDistance) {
         beaconArmed_ = false;
         sub = SUB_BSTOP;
         stopT_ = 0;
         return o;
       }
+      if (!armed_) entryDone_ = false;   // a new approach: its own probe on entry
       if (!armed_ || !joinArmed_) {
         if (!rd.valid) armed_ = joinArmed_ = true;
         else {
@@ -789,6 +858,41 @@ Output Autopilot::stepStates(const Inputs& in) {
           if (rd.df > cfg.approachDistance + 0.1f || closing) joinArmed_ = true;  // the join starts on entry: closing in
         }
       }
+#ifdef ROVER_WIRE_SOLVE
+      // A sweeping mode: every join is the planned sweep join (Join then leave: each arrival; Reverse bounce: the
+      // return, from forward travel only: a reverse leg bounces first, and the bounce leaves forward). Reverse bounce
+      // with no solve answer goes on to the bounce
+      if (sweeping() && (basics() || (state == RETURN && dir_ > 0))) {
+        // the join arm too (the radius falls again after a turn): 1 s after a Reverse bounce, a fresh solve over
+        // 0.3 m of drive away from the wire read closing at 1 m and joined 1.5 m from the wire (emulator)
+        if (dir_ > 0 && joinArmed_ && sweepJoinDue(in)) {
+          bLong_ = state == RETURN;
+          basicsJoin(in, o);
+          return o;
+        }
+        wirefit::BounceResult ws;
+        const bool solved = solveNow(ws) && ws.n >= SJ_MIN_N;
+        // Join then leave in reverse, or with no solve answer yet (the run start): at the plan's square-on join
+        // distance (the solve's, else by the Rx radius), closing, the rover drives back the way it came; it joins on
+        // a forward arrival only (a join planned from a reverse arrival ran against the goal direction, emulator).
+        // Reverse bounce goes on to its bounce
+        const float dW = solved ? ws.d : sqrtf(fmaxf(0.0f, rd.Rf * rd.Rf - H * H));
+        if (basics() && (dir_ < 0 || !solved) && joinArmed_ && rd.valid && (!solved || dir_ * ws.betaDeg < 0)
+            && dW <= cfg.followInset + cfg.turnRadius + 0.3f * cfg.roamSpeed) {
+          dir_ = (int8_t)-dir_;
+          leadPick();
+          joinArmed_ = false;
+          rearmStart();
+          decide(DEC_BOUNCE, 180, 0);
+          o.v = dir_ * approachV;
+          return o;
+        }
+        if (basics() || solved) {
+          o.v = dir_ * ((!basics() && rd.valid && rd.df <= cfg.approachDistance) ? approachV : cfg.roamSpeed);
+          return o;
+        }
+      }
+#endif
       // Bounce style basics: a timed or charge return joins the same way as a bounce, and its follow is the long follow
       if (basics() && state == RETURN) {
         const float medR = bMedian();
@@ -854,19 +958,22 @@ Output Autopilot::stepStates(const Inputs& in) {
           // A return drives on to its join, which lies inside the bounce distance (join distance 0.39 m against
           // bounce 0.56 m on the reference rover): no bounce while the solve has an answer (without one, the bounce and
           // its full turn stay)
-          if (state == RETURN) dR = 99;
+          if (state == RETURN && dir_ > 0) dR = 99;
         }
       }
 #endif
+#ifdef ROVER_WIRE_SOLVE
+      if (entryProbe(in)) return o;   // Bounce and Reverse bounce: the probe on entry
+#endif
       if (armed_ && rd.valid && dR <= cfg.bounceDistance) {
 #ifdef ROVER_WIRE_SOLVE
-        bounceBegin();  // stop; the decision follows with the solve's direction profile (SUB_BOUNCE_WAIT)
+        bounceBegin();  // stop; the decision follows on the settled solve (SUB_BOUNCE_WAIT)
 #else
         bounceNow(in);  // the fitted heading, or square-on with no fit
 #endif
         return o;
       }
-      o.v = (rd.valid && rd.df <= cfg.approachDistance) ? approachV : cfg.roamSpeed;
+      o.v = dir_ * ((rd.valid && rd.df <= cfg.approachDistance) ? approachV : cfg.roamSpeed);
       return o;
     }
 
@@ -993,12 +1100,13 @@ Output Autopilot::stepStates(const Inputs& in) {
         const float mn = cfg.bounceMinDeg * D2R;
         float turn = cfg.followExitDeg * D2R + (2 * rnd() - 1) * cfg.bounceSpreadDeg * D2R;
         turn = fmaxf(mn, fminf(PI_F - mn, turn));
-        startPivot(turn, cfg.goalCW ? -1 : 1);  // goal clockwise: the inside is on the right
+        if (sweeping()) arcStart(turn, cfg.goalCW ? -1 : 1, 1, cfg.turnRadius);
+        else startPivot(turn, cfg.goalCW ? -1 : 1);  // goal clockwise: the inside is on the right
         sub = SUB_TURN;
         return o;
       }
       if (sub == SUB_TURN) {
-        if (pivotStep(in, o)) {
+        if (sweeping() ? arcStep(in, o) : pivotStep(in, o)) {
           state = ROAM;
           sub = SUB_NONE;
           roamT_ = followT_ = 0;
@@ -1061,7 +1169,8 @@ float Autopilot::bJoinRadius() const {
 // The turn radius at the approach speed (the follow and the depart), from the full turn rate
 float Autopilot::bTurnRadius() const {
   const float v = cfg.approachFraction * cfg.roamSpeed, w = bYawRate();
-  return w > 1e-3f ? v / w : 1e3f;
+  const float r = w > 1e-3f ? v / w : 1e3f;
+  return sweeping() && cfg.turnRadius > r ? cfg.turnRadius : r;
 }
 
 // The join speed (a skid steer turns almost on the spot; in the join turn it slows so its turn
@@ -1213,7 +1322,24 @@ void Autopilot::basicsJoin(const Inputs& in, Output& o) {
   bSteer_ = bGoalSense();
   bTurnDeg_ = 180;   // basics: the most the turn needs
   bPivot_ = false;
+  bRateCmd_ = 0;
+  sweepJoin_ = false;
+  sjPhase_ = 0;
+  dir_ = 1;          // the follow and the depart drive forward on sensor 1
+  leadWant_ = 1;
 #ifdef ROVER_WIRE_SOLVE
+  if (sweeping()) {
+    sweepJoin_ = true;
+    sweepJoinPlan();
+    bTurnDeg_ = (sjTurn1_ + sjTurn2_) / D2R;
+    decide(DEC_JOIN, sjRot_ * bTurnDeg_, bP_);
+    startCheck_ = false;
+    if (sjPhase_ == 2) {   // one arc, on in the arrival direction (the first arc away from the wire stops first)
+      o.v = sjArrive_ * arcSpeed(cfg.turnRadius);
+      o.w = sjRot_ * fabsf(o.v) / cfg.turnRadius;
+    }
+    return;
+  }
   // Join then leave on a skid steer (0.7.0): the join stops and turns on the spot by the
   // solve's angle, as the Bounce mode join. An arc join of an arrival against the goal direction turns through
   // square-on near the wire, where the reading is lost or flat, and it ended over the wire (emulator, the reference settings:
@@ -1241,7 +1367,8 @@ float Autopilot::bGoalSense() const { return cfg.goalCW ? -1.0f : 1.0f; }
 // A driven turn of bTurnDeg_: done on the measured turn, or at B_TURN_LIMIT x its time at the full rate
 bool Autopilot::bTurnDone(const Inputs& in) {
   bTurned_ += fabsf(in.yawRate) * in.dt;
-  return bTurned_ >= bTurnDeg_ * D2R || bT_ * bYawRate() >= B_TURN_LIMIT * bTurnDeg_ * D2R;
+  const float w = bRateCmd_ > 0 && bRateCmd_ < bYawRate() ? bRateCmd_ : bYawRate();
+  return bTurned_ >= bTurnDeg_ * D2R || bT_ * w >= B_TURN_LIMIT * bTurnDeg_ * D2R;
 }
 
 // Square-on guard, in JOIN and FOLLOW. Near: the side
@@ -1267,7 +1394,9 @@ bool Autopilot::bGuard(const Inputs& in, float xs) {
       if (bGuardTurnT_ <= 0) bMinXs_ = xs;
       g = true;
     } else if (!bOnLine_ && ySmall && xs > bMinXs_ + cfg.rearmFall && bMinXs_ < nearL) {
-      bGuardTurnT_ = (90.0f - cfg.approachAngleDeg) * D2R / (cfg.maxYawRate > 1e-3f ? cfg.maxYawRate : 1e-3f);
+      float wg = cfg.maxYawRate;   // the guard turn's rate (a sweeping mode: at most speed / turn radius)
+      if (sweeping() && cfg.approachFraction * cfg.roamSpeed / cfg.turnRadius < wg) wg = cfg.approachFraction * cfg.roamSpeed / cfg.turnRadius;
+      bGuardTurnT_ = (90.0f - cfg.approachAngleDeg) * D2R / (wg > 1e-3f ? wg : 1e-3f);
       g = true;
     }
     if (!g) {
@@ -1303,12 +1432,33 @@ Output Autopilot::basicsStep(const Inputs& in) {
 Output Autopilot::basicsStep2(const Inputs& in) {
 #endif
   Output o;
-  const float v = cfg.approachFraction * cfg.roamSpeed, w = cfg.maxYawRate;
+  const float v = cfg.approachFraction * cfg.roamSpeed, wFull = cfg.maxYawRate;
+  // a sweeping mode: no commanded turn tighter than the turn radius (the follow, its guards and the depart)
+  const float w = sweeping() && v / cfg.turnRadius < wFull ? v / cfg.turnRadius : wFull;
+  // the rate loop reaches less than a part command: the command rises by the arcs' learned ratio (arcStep), so the
+  // follow turns on the radius its turning room assumes (bTurnRadius)
+  const float wGain = w < wFull ? fminf(arcGain_, wFull / w) : 1.0f;
+  // a sweeping mode: the turn follows the measured speed (from a stop the rover first rolls, then turns)
+  const float wSpeed = sweeping() ? fabsf(in.v) / cfg.turnRadius : wFull;
   const bool lost = !(in.inRange && in.R > 0);
   const float inward = bGoalSense();   // the inside, from the goal direction (every follow runs in it)
   if (!bStopped_) bT_ += in.dt;
   switch (state) {
     case JOIN: {
+      if (sweepJoin_) {   // the planned sweep join: its arcs on the measured turn, no reading changes them
+        if (sjPhase_ == 1 && arcStep(in, o)) {   // the next arc changes the drive direction: it stops first
+          sjPhase_ = 2;
+          arcStart(sjTurn2_, sjRot_, sjArrive_, cfg.turnRadius);
+          return Output();
+        }
+        if (sjPhase_ == 1) return o;
+        if (sjPhase_ == 2 && !arcStep(in, o)) return o;
+        sjPhase_ = 0;
+        sweepJoin_ = false;
+        state = FOLLOW; bT_ = 0; bHavePrev_ = false; bStopped_ = false;
+        decide(DEC_FOLLOW, 0, bP_);
+        return Output();
+      }
       if (lost) { state = FOLLOW; bStopped_ = true; decide(DEC_FOLLOW, 0, bP_); return o; }
       const float xs = bRate(bP_ * in.x, in.dt);
       if (!bPivot_ && bThreePoint(in, xs)) {   // reverse leg of a three-point turn, at the approach speed
@@ -1325,7 +1475,15 @@ Output Autopilot::basicsStep2(const Inputs& in) {
       return o;
     }
     case FOLLOW: {
-      if (lost) { bStopped_ = true; return o; }
+      if (lost) {
+        bStopped_ = true;
+        // A sweeping mode: the field null over the wire (square-on) holds a stopped rover lost, and it may not turn on
+        // the spot out of it (emulator: a follow lost 0.4 m from the wire waited 47 s to the lost fault). After 1 s
+        // it backs straight up to 0.25 m along its own track, where it read the wire
+        if (sweeping() && lostT_ > 1.0f && bBack_ < 0.25f) { bBack_ += fabsf(in.v) * in.dt; o.v = -0.5f * v; }
+        return o;
+      }
+      bBack_ = 0;
       if (bStopped_) { bStopped_ = false; bHavePrev_ = false; }
       // Direction: the join decides it. No wire side check in the follow: at a follow inset of 0 the wire lies under
       // sensor 1 and its side of the heading flips with the Rx noise. The follow steers toward
@@ -1364,16 +1522,19 @@ Output Autopilot::basicsStep2(const Inputs& in) {
         bT_ = bTurned_ = 0;
         bTurnDeg_ = bPlanned_;
         bSteer_ = inward;
+        bRateCmd_ = w;
         decide(DEC_DEPART, bSteer_ * bPlanned_, bP_);
       }
+      if (w < wFull && fabsf(steer) >= 0.99f) rateGain(w, fabsf(in.v), v, in);   // a turn at the limit: learn
       o.v = v;
-      o.w = steer * w;
+      o.w = steer * fminf(w, wSpeed) * wGain;
       return o;
     }
     case DEPART:
+      if (w < wFull) rateGain(w, fabsf(in.v), v, in);
       o.v = v;
-      o.w = bSteer_ * w;
-      bTurnMeasure(in);
+      o.w = bSteer_ * fminf(w, wSpeed) * wGain;
+      if (w >= wFull) bTurnMeasure(in);   // the full turn rate: only from a turn at the full command
       if (bTurnDone(in)) {
         state = ROAM;
         sub = SUB_NONE;
@@ -1399,5 +1560,139 @@ Output Autopilot::basicsStep2(const Inputs& in) {
       return o;
   }
 }
+
+#ifdef ROVER_WIRE_SOLVE
+// The probe on entry: a known perturbation for the solve, and null avoidance. Bounce and Reverse bounce, before a
+// bounce: once per approach, inside the approach distance and short of the bounce point, when the solve's angle between the drive direction and the wire is steeper than the depart
+// angle limit (a mirror depart of a steeper arrival takes the limit; square-on, the field null loses the wire), the
+// rover drives a 15 deg arc toward the nearer wire direction without a stop: the solve takes the known heading
+// change, and the rover leaves the square-on null. The radius: the turn radius, and no less than one vertical
+// distance range (sensor height + wire extra depth) over the 15 deg. True: the arc starts
+bool Autopilot::entryProbe(const Inputs& in) {
+  // every approach that can end in a bounce: roam, and a return driving in reverse (Reverse bounce: a reverse return
+  // bounces first; a forward return joins). Roam only left 20 of 34 bounces steeper than 75 deg unprobed (emulator)
+  if (basics() || (state == RETURN && dir_ > 0) || !armed_ || entryDone_ || sub != SUB_NONE || !rd.valid || in.inside < 0)
+    return false;
+  wirefit::BounceResult ws;
+  if (!solveNow(ws) || ws.n < SJ_MIN_N || ws.d > cfg.approachDistance || ws.d <= cfg.bounceDistance) return false;
+  entryDone_ = true;
+  const float a = fold90(ws.psiDeg);   // the nearer wire direction, rover frame (deg): 0 along, +-90 square-on
+  if (fabsf(a) <= cfg.bounceMinDeg) return false;
+  const int8_t rot = a >= 0 ? 1 : -1;
+  const float ang = 15.0f * D2R, r = fmaxf(cfg.turnRadius, (cfg.sensorHeight + cfg.wireMaxDepth) / ang);
+  arcStart(ang, rot, dir_, r);
+  sub = SUB_ENTRY_ARC;
+  solveDebug("entry", in);
+  decide(DEC_PROBE, rot * 15.0f, 0);
+  dec.solveOk = true; dec.solvePsiDeg = ws.psiDeg; dec.solveD = ws.d; dec.solveSensor = (uint8_t)lead_;
+  return true;
+}
+#endif
+
+// ===== Sweeping turns =====
+// A driven arc: the nose turns by angle (rad) in the sense rot (+1 counterclockwise) while the rover drives in the
+// direction travel, on the radius. Done on the measured net turn, or at B_TURN_LIMIT x its time at the commanded rate.
+// The speed: the approach speed, less when the radius needs more than 80 % of the full turn rate
+float Autopilot::arcSpeed(float radius) const {
+  const float v = cfg.approachFraction * cfg.roamSpeed, w = 0.8f * bYawRate();
+  return (radius > 0 && v > w * radius) ? w * radius : v;
+}
+
+// The rate ratio: up while the measured rate is under the wanted rate, down while over (the rate loop's own integral
+// catches up in a long turn), learned only near the set speed of the turn
+void Autopilot::rateGain(float want, float speed, float set, const Inputs& in) {
+  if (want < 1e-3f || speed < 0.5f * set || speed > 1.05f * set) return;
+  const float gMax = cfg.maxYawRate > want ? cfg.maxYawRate / want : 1.0f;
+  arcGain_ += in.dt * 2.0f * (want - fabsf(in.yawRate)) / want;
+  arcGain_ = arcGain_ < 1 ? 1 : (arcGain_ > gMax ? gMax : arcGain_);
+}
+
+void Autopilot::arcStart(float angle, int8_t rot, int8_t travel, float radius) {
+  arcTarget_ = angle;
+  arcRot_ = rot;
+  arcTravel_ = travel;
+  arcRadius_ = radius > 0.01f ? radius : 0.01f;
+  arcNet_ = arcT_ = 0;
+}
+
+// The turn rate follows the measured speed: rate = speed / radius, so the turn never runs ahead of the speed (from a
+// stop the rover first rolls, then turns). The speed rises to the arc speed at 1 m/s^2. The steering rate loop reaches
+// less than the commanded rate at part commands (emulator, a skid steer: 19 deg/s of 34 commanded after 4 s;
+// lawn logs: 52 of 90 at full steering), and the arc then turns on twice the radius: the rate command rises by a
+// learned ratio (arcGain_) until the measured rate reaches speed / radius
+bool Autopilot::arcStep(const Inputs& in, Output& o) {
+  const float va = arcSpeed(arcRadius_), wt = va / arcRadius_, wm = fabsf(in.yawRate);
+  // a change of drive direction: stop first (no turn while the speed passes through 0)
+  if (arcT_ == 0.0f && arcTravel_ * in.v < -STOP_SPEED) { o = Output(); return false; }
+  arcNet_ += in.yawRate * in.dt;   // net angle, as the pivot (the gyro sign does not enter)
+  arcT_ += in.dt;
+  if (fabsf(arcNet_) >= arcTarget_ - 0.01f || arcT_ * wt >= 2 * B_TURN_LIMIT * arcTarget_ + 1.0f) { o = Output(); return true; }
+  const float vm = fabsf(in.v), ww = vm / arcRadius_;   // also while it slows from the roam speed: the radius holds
+  rateGain(ww, vm, va, in);
+  const float v = vm + 1.0f * in.dt;
+  o.v = arcTravel_ * (v < va ? v : va);
+  o.w = arcRot_ * fminf(ww * arcGain_, cfg.maxYawRate);
+  return false;
+}
+
+// Change the drive direction, and turn the nose by nose (rad, counterclockwise positive) on an arc of the turn radius
+// in the new direction (a turn radius of 0: a pivot, then the new direction). The leading sensor of the new direction
+// feeds the solve from the start of the arc
+void Autopilot::reverseTurn(float nose, bool bounce) {
+  swTravel_ = (int8_t)-dir_;
+  swBounce_ = bounce;
+  const int8_t rot = nose >= 0 ? 1 : -1;
+  if (cfg.turnRadius > 0) {
+    arcStart(fabsf(nose), rot, swTravel_, cfg.turnRadius);
+    sub = SUB_SWEEP;
+  } else {
+    startPivot(fabsf(nose), rot);
+    sub = bounce ? SUB_PIVOT : SUB_BPIVOT;
+  }
+  dir_ = swTravel_;
+  leadPick();
+}
+
+#ifdef ROVER_WIRE_SOLVE
+// The planned sweep join. In the wire frame (along the goal direction; n: the distance inside the wire), a driven turn
+// of the nose from angle a to b on radius R moves the turn centre by R (cos a - cos b) away from the wire when it
+// drives away, toward it when it drives on. The join ends on the follow line, the nose along the goal direction:
+// one arc driving on (from an arrival with the goal direction: R (1 - cos a) of room), or an arc driving back
+// first, then an arc driving on (any arrival, from R of room: an arrival against the goal direction needs up to 2 R
+// in one arc). The solve gives the line (distance from the leading sensor, direction), the sensor position the
+// turn centre. Due when the room to the follow line reaches the need of the plan, plus 0.3 s of roam
+bool Autopilot::sweepJoinDue(const Inputs& in) {
+  wirefit::BounceResult ws;
+  if (!in.inRange || !solveNow(ws) || ws.n < SJ_MIN_N) return false;
+  const float sg = cfg.goalCW ? -1.0f : 1.0f;   // the inside: left (+1) or right (-1) of the goal direction
+  // the solve's wire direction has the sensor (inside) on its right: the clockwise way round
+  const float th = wrapPi(-(ws.psiDeg * D2R + (cfg.goalCW ? 0.0f : PI_F)));   // nose against the goal direction
+  if (sg * dir_ * sinf(th) > -0.05f) return false;   // not closing on the wire
+  const float sf = wfb_->cfg.sensorFwd, sl = wfb_->cfg.sensorLeft;
+  const float nc = ws.d - sg * (sf * sinf(th) + sl * cosf(th));        // turn centre
+  // turn centre with sensor 1 on the line, plus SJ_END_IN: the follow closes the rest
+  const float nf = cfg.followInset - sg * wirefit::Config().sensorLeft + SJ_END_IN;
+  const float R = cfg.turnRadius, c0 = cosf(th);
+  if (nc - nf > R * fminf(1.0f - c0, 1.0f) + 0.3f * cfg.roamSpeed) return false;
+  sjTheta_ = th;
+  sjNeed_ = nf - nc;
+  return true;
+}
+
+void Autopilot::sweepJoinPlan() {
+  const float R = cfg.turnRadius, c0 = cosf(sjTheta_);
+  float cm = 0.5f * (sjNeed_ / R + 1.0f + c0);   // the nose between the arcs: R (2 cm - c0 - 1) = the move
+  cm = cm < c0 ? c0 : (cm > 1.0f ? 1.0f : cm);
+  const float am = acosf(cm);
+  sjTurn1_ = fabsf(sjTheta_) - am;
+  if (sjTurn1_ < 0) sjTurn1_ = 0;
+  sjTurn2_ = am;
+  sjRot_ = sjTheta_ > 0 ? -1 : 1;   // toward the goal direction
+  sjArrive_ = dir_;
+  sjPhase_ = sjTurn1_ > 0.02f ? 1 : 2;
+  if (sjPhase_ == 1) arcStart(sjTurn1_, sjRot_, (int8_t)-sjArrive_, R);
+  else arcStart(sjTurn2_, sjRot_, sjArrive_, R);
+}
+#endif
 
 }  // namespace rover

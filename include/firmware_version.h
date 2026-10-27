@@ -3,6 +3,23 @@
 #pragma once
 
 // Change history
+//   0.7.2: sweeping turns. New setting Turn radius (default 0.5 m; 0 = turn on the spot). New Roam mode Reverse
+//     bounce: the Bounce solve and depart decision; at the bounce distance the rover stops, changes its drive
+//     direction and sweeps to the depart heading. Join then leave: the join, the follow end, the depart, the
+//     turn-back and the return are driven arcs at the turn radius or wider; the join is planned from the wire solve
+//     (one arc on, or an arc away and an arc on). Outside the loop both modes turn back by a change of drive
+//     direction. Bounce keeps its turn on the spot. With Use sensor 2 for control on, sensor 2 (at the back) leads when the rover
+//     drives in reverse; it feeds every roam reading and the solve, with no distance between the sensors assumed.
+//     The arc's turn rate follows the measured speed, with a learned ratio for the shortfall of the steering rate
+//     loop at part commands. A follow lost in a sweeping mode backs up 0.25 m after 1 s. New log value
+//     rover_dec_solve_sensor. Settings groups: every roam mode, Bounce and Reverse bounce, Join then leave;
+//     settings definition version 17.
+//     Bounce and Reverse bounce: the probe on entry. On an approach steeper than the depart angle limit, the rover
+//     drives a 15 deg arc inside the approach distance, without a stop: the solve takes the known heading change, and
+//     the rover leaves the square-on null. The stop, 15 deg turn and back-off after the bounce point is removed, and
+//     with it the direction profile wait at the bounce (emulator, 60 min runs: bounces steeper than 75 deg 15 of 262).
+//     Depart angle spread default 90 deg (was 25): 25 repeated paths on an oval loop (86-91 % of the area in 60 min,
+//     emulator); 90 visited 97-99 %.
 //   0.7.1: Join then leave: every vehicle joins by a stop and a turn on the spot. The car check is removed (1 s of
 //     the turn command with under 5 deg of turn marked the vehicle a car until power-off; one slow pivot on grass
 //     took 0.84 s in field logs). A car is not supported in this build.
@@ -364,12 +381,12 @@
 #if defined(OTA_TEST_VERSION)
 #define ROVER_FW_VERSION OTA_TEST_VERSION  // OTA test images (envs ota_a, ota_b, ota_test_crash)
 #elif defined(BENCH_FAKE_IMU)
-#define ROVER_FW_VERSION "0.7.1+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.7.2+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #elif defined(SETTINGS_NEWKEY)
-#define ROVER_FW_VERSION "0.7.1-newkey"  // bench build: one more table line (test_new_setting)
+#define ROVER_FW_VERSION "0.7.2-newkey"  // bench build: one more table line (test_new_setting)
 #elif defined(TELEMETRY_NEWVALUE)
-#define ROVER_FW_VERSION "0.7.1-newvalue"  // bench build: the example lines of include/user_telemetry.h
+#define ROVER_FW_VERSION "0.7.2-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.7.1"
+#define ROVER_FW_VERSION "0.7.2"
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A

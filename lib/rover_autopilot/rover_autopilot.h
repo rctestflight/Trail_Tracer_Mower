@@ -63,7 +63,8 @@ namespace rover {
 enum State : uint8_t { ROAM = 0, RETURN = 1, JOIN = 2, FOLLOW = 3, DEPART = 4, FAULT = 5, DOCK = 6 };
 enum Sub : uint8_t { SUB_NONE, SUB_START, SUB_STOP, SUB_CHECK, SUB_PIVOT, SUB_APPROACH, SUB_OPEN, SUB_WAIT, SUB_BSTOP,
                      SUB_BPIVOT, SUB_REVERSE_STOP, SUB_REVERSE, SUB_TURN_STOP, SUB_TURN, SUB_PROBE, SUB_PROBE_STOP, SUB_LEAVE, SUB_LEAVE_STOP, SUB_LEAVE_TURN,
-                     SUB_PERTURB_STOP, SUB_PERTURB_TURN, SUB_PERTURB_BACK, SUB_PERTURB_END, SUB_BOUNCE_WAIT
+                     SUB_PERTURB_STOP, SUB_PERTURB_TURN, SUB_PERTURB_BACK, SUB_PERTURB_END, SUB_BOUNCE_WAIT,
+                     SUB_SWEEP, SUB_ENTRY_ARC   // SUB_PERTURB_*: unused since 0.7.2 (the codes keep their numbers)
 };
 enum ProbeFor : uint8_t { PROBE_START, PROBE_BOUNCE, PROBE_JOIN };
 enum FaultCode : uint8_t { FAULT_NONE, FAULT_STUCK, FAULT_LOST, FAULT_NO_POLARITY, FAULT_POL_START, FAULT_NO_MEMORY };  // POL_START: polarity says
@@ -102,7 +103,8 @@ struct Config {
   float noTxS = 2;                 // s without Tx signal before the other states stop
   float lostTimeout = 30;          // s in JOIN, FOLLOW or DEPART (0 = never)
   float maxYawRate = 1.5708f;      // rad/s at full steering command
-  uint8_t bounceStyle = 1;         // roam mode: 0 = Bounce (estimator), 1 = Join then leave (basics)
+  uint8_t bounceStyle = 1;         // Roam mode: 0 = Bounce, 1 = Join then leave, 2 = Reverse bounce
+  float turnRadius = 0.5f;         // m: Join then leave and Reverse bounce: the tightest turn (0 = turn on the spot)
   float followInset = 0.30f;       // m: basics: the follow line lies this far inside the wire
   float bounceFollowS = 3;         // s: basics: the short follow, from the moment the follow line is reached
   float wireMaxDepth = 0.12f;      // m: the most the wire lies deeper than the sensor height setting
@@ -116,6 +118,8 @@ struct Inputs {
   int8_t heading = 0;              // polarity: +1 clockwise round the loop, -1 counterclockwise, 0 not known
   float v = 0;                     // measured forward speed, m/s
   float yawRate = 0;               // measured yaw rate, rad/s, counterclockwise positive
+  bool inRange2 = false;           // sensor 2 (when it is on): not lost, not overload, not disabled
+  float x2 = 0, y2 = 0, R2 = 0;    // m, sensor 2 as the Rx sends it
   float txOffS = 0;                // s since the Tx signal was last present
   bool stuck = false;              // stuck detector (the caller gives it only while the signal is not lost)
   bool docked = false;             // charging in progress
@@ -145,8 +149,9 @@ struct Decision {
   int8_t side = 0;                 // wire x sign used (+1 left)
   int8_t reason = 0;               // FAULT: FaultCode
   FitResult fit;                   // the approach fit at this decision (BOUNCE, JOIN, PROBE)
-  bool solveOk = false;            // the wire position solve at this decision (estimator bounce and perturb)
+  bool solveOk = false;            // the wire position solve at this decision (Bounce and Reverse bounce: the bounce and the probe on entry)
   float solvePsiDeg = 0, solveD = 0;   // its wire direction in the rover frame (+ counterclockwise) and distance, m
+  uint8_t solveSensor = 1;         // the sensor the solve took (2: sensor 2 led in reverse)
 };
 
 const char* stateName(State s);
@@ -227,17 +232,14 @@ class Autopilot {
   bool solveNow(wirefit::BounceResult& r) const;   // the last solve moved to the current pose; false: no valid solve
   void solveDebug(const char* what, const Inputs& in) const;
   void solveStep();                 // each Bounce mode frame: the next solve when the last one is done
-  void bounceBegin();               // the bounce point: stop, and ask for the direction profile (SUB_BOUNCE_WAIT)
-  float profileNow();               // the direction profile at a rise of 2 for the bounce (90: no direction information)
-  bool profileReady() const;
-  bool profWant_ = false, profReady_ = false;
-  float prof_ = 90, bounceWaitT_ = 0;
+  void bounceBegin();               // the bounce point: stop, then decide on the settled solve (SUB_BOUNCE_WAIT)
+  bool solveSettled() const;        // no solve at work and none due: the answer belongs to the last sample
+  bool entryProbe(const Inputs& in);   // the probe on entry: a known heading change on a near-square-on approach
+  float bounceWaitT_ = 0;
 #ifdef ESP_PLATFORM
   // the background solve (one FreeRTOS task at the loop's priority): 0 idle, 1 the task runs iterate() on the prepared
-  // window (and the profile when asked), 2 its answer waits for the loop
+  // window, 2 its answer waits for the loop
   uint8_t sState_ = 0;
-  bool sWithProf_ = false;
-  float sProf_ = 90;
   wirefit::BounceResult sRes_;
   void* sTask_ = nullptr;           // TaskHandle_t
 #endif
@@ -250,11 +252,11 @@ class Autopilot {
   int8_t probeDir_ = 1;
   ProbeFor probeFor_ = PROBE_START;
   bool leaveFlipped_ = false, rejoin_ = false, outsideTurned_ = false;
-  bool perturbed_ = false;   // estimator: this approach had its perturb (15 deg turn, short reverse, solve again)
-  float perturbLeft_ = 0;    // m of the perturb reverse still to drive
+  bool entryDone_ = false;   // this approach had its probe on entry (or needed none)
   bool searched_ = false, searching_ = false;   // lost in join, follow or depart: one turn out of the field null
   int8_t searchDir_ = 1;
   float outsideD_ = 0;      // ROAM: the least distance since the last outside turn
+  float insideRun_ = 0;     // m driven with polarity inside since the last outside turn (a sweeping mode's re-arm)
   float lastDf_ = 99;       // JOIN: the last distance while in range
   int8_t xSignNear_ = 0;    // JOIN: the Rx x sign 1-3 sensor heights from the wire
   int8_t planToward_ = 1;    // +1 closing on the wire at the reading, -1 moving away
@@ -301,6 +303,40 @@ class Autopilot {
   bool bClosed_ = false;            // the join closed on the wire since its start or its last reverse leg
   float bGuardTurnT_ = 0, bGuardPeakR_ = 0;
   bool bYShot_ = false, bYActive_ = false, bGuardWas_ = false;
+
+  // Sweeping turns (Join then leave and Reverse bounce with a turn radius over 0): no turn on the spot. The rover
+  // changes its drive direction instead (dir_), and the leading sensor feeds the wire solve (lead_)
+  bool reverseBounce() const { return cfg.bounceStyle == 2; }
+  bool sweeping() const { return cfg.bounceStyle != 0 && cfg.turnRadius > 0; }
+  bool twoWay() const { return sweeping() || reverseBounce(); }   // roam drives either way round
+  int8_t dir_ = 1;                  // roam drive direction: +1 forward, -1 reverse
+  int8_t lead_ = 1, leadWant_ = 1;  // the sensor the wire solve takes, and the one it takes next
+  float s2SeenT_ = 99, s2LostT_ = 0;   // s since sensor 2 last read; s sensor 2 lost while sensor 1 reads
+  void leadPick();                  // after a change of drive direction: the leading sensor when it reads, else sensor 1
+  void leadApply();                 // the solve takes leadWant_ (its buffer starts again)
+  Inputs leadInputs(const Inputs& in) const;   // the inputs with the leading sensor's reading in place of sensor 1's
+  float arcSpeed(float radius) const;
+  void arcStart(float angle, int8_t rot, int8_t travel, float radius);
+  bool arcStep(const Inputs& in, Output& o);   // true when the arc is done
+  float arcTarget_ = 0, arcNet_ = 0, arcT_ = 0, arcRadius_ = 0, arcLeft_ = 0;
+  int8_t arcRot_ = 1, arcTravel_ = 1;
+  float arcGain_ = 1;               // turn rate command over the wanted rate: the rate loop reaches less (learned per run)
+  void rateGain(float want, float speed, float set, const Inputs& in);   // learn arcGain_ from a turn at speed set
+  int8_t swTravel_ = 1;             // the drive direction after the sweep
+  bool swBounce_ = false;           // the sweep ends a bounce (not a beacon turn)
+  void reverseTurn(float nose, bool bounce);   // change the drive direction and sweep the nose by nose (rad, signed)
+  int8_t fed_ = 1;                  // the sensor whose reading the last step used
+#ifdef ROVER_WIRE_SOLVE
+  bool sweepJoinDue(const Inputs& in);   // the planned sweep join starts now (the solve's line and the turn radius)
+  void sweepJoinPlan();
+  float sjTheta_ = 0, sjNeed_ = 0;  // at the join decision: nose against the goal direction (rad), the lateral move (m)
+#endif
+  uint8_t sjPhase_ = 0;             // planned join: 1 the arc away from the wire, 2 the arc onto the follow line
+  float sjTurn1_ = 0, sjTurn2_ = 0;
+  int8_t sjRot_ = 1, sjArrive_ = 1;
+  bool sweepJoin_ = false;          // this join is the planned sweep join
+  float bRateCmd_ = 0;              // the commanded turn rate of a driven turn (its time limit)
+  float bBack_ = 0;                 // m backed up out of a field null in this loss (a sweeping follow)
 };
 
 }  // namespace rover

@@ -1,5 +1,5 @@
 {
-  "version": 16,
+  "version": 17,
   "about": "Rover settings definition, owned by Trail_Tracer_Mower (docs/settings_def.json). The PC uses an unchanged copy. Words from the PC draft (Trail-Tracer-PC-Telemetry 22deeea); values checked against src/usb_msc_fat.cpp (defaults, limits) and src/main.cpp (STATIONARY_KEYS). Format: Trail-Tracer-PC-Telemetry docs/control_api.md, section 3. 'list' ends 'end <n> def 6'. Version 6: groups in user order ('groups'), a 'label' per setting, DSP settings (dsp_*) with read-only values in effect (dsp_*_eff, 'readonly': true; 'effect' names the _eff key of a setting). Version 7 (firmware 0.5.69): 'string' and 'choice' types, 'max_len', 'pattern' and 'dec'; the servo outputs by function (steer_*, throttle_*) replace PWM_OUT_n_*; drive_output, vehicle_name, steer_lpf_hz; CHARGE_MAX_SECONDS is the charge time. Version 8 (firmware 0.5.71): radio_mode (espnow or wifi, from the next start), read-only wifi_ssid and wifi_password (set or not set; USB 'wifi set' writes them). Version 9 (firmware 0.5.87): dsp_sweep_bins (off, auto or 1-8; the bins off that sweep 41.1-68.5 kHz; default auto).",
   "groups": [
     {
@@ -23,19 +23,19 @@
       "description": "Charge limits"
     },
     {
-      "name": "Rover: both roam modes",
+      "name": "Rover: every roam mode",
       "advanced": false,
-      "description": "What autonomous mode runs, the Roam mode (Bounce or Join then leave), and the rover settings that both roam modes use"
+      "description": "What autonomous mode runs, the Roam mode (Bounce, Join then leave or Reverse bounce), the turn radius, and the rover settings that every roam mode uses"
     },
     {
-      "name": "Rover: Bounce mode only",
+      "name": "Rover: Bounce and Reverse bounce",
       "advanced": false,
-      "description": "Rover settings that only the Bounce mode uses"
+      "description": "Rover settings that only the Bounce and Reverse bounce modes use"
     },
     {
-      "name": "Rover: Join then leave only",
+      "name": "Rover: Join then leave",
       "advanced": false,
-      "description": "Rover settings that only the Join then leave mode uses"
+      "description": "Rover settings of the Join then leave mode; the approach angle also limits the follow of a Reverse bounce return"
     },
     {
       "name": "Beacons",
@@ -409,7 +409,7 @@
       ],
       "default": "rover",
       "live": false,
-      "group": "Rover: both roam modes",
+      "group": "Rover: every roam mode",
       "description": "What drive mode 2 (autonomous) runs. rover: the full mission (roam, turn back at the wire, return, join, follow, dock, depart), in the Roam mode below. follow only: find the wire, join it, follow it. position follower (expert): the plain position-steering wire follower, which circles when it starts off the wire. Cruise mode (RC throttle) always uses the wire follower",
       "label": "Autonomous mode"
     },
@@ -417,8 +417,8 @@
       "type": "bool",
       "default": true,
       "live": false,
-      "group": "Rover: both roam modes",
-      "description": "Both roam modes: the goal direction along the wire, into the charger: on = clockwise seen from above",
+      "group": "Rover: every roam mode",
+      "description": "Every roam mode: the goal direction along the wire, into the charger: on = clockwise seen from above",
       "label": "Charger direction clockwise"
     },
     "rover_sensor_height_mm": {
@@ -427,8 +427,8 @@
       "min": 10.0,
       "default": 180.0,
       "live": false,
-      "group": "Rover: both roam modes",
-      "description": "Both roam modes: the height of the sensor centre above the wire",
+      "group": "Rover: every roam mode",
+      "description": "Every roam mode: the height of the sensor centre above the wire",
       "max": 2000.0,
       "label": "Sensor height"
     },
@@ -438,8 +438,8 @@
       "min": 0.0,
       "default": 0,
       "live": true,
-      "group": "Rover: both roam modes",
-      "description": "Both roam modes: return to the wire below this battery voltage (filtered). 0 = off",
+      "group": "Rover: every roam mode",
+      "description": "Every roam mode: return to the wire below this battery voltage (filtered). 0 = off",
       "max": 60.0,
       "label": "Return battery voltage"
     },
@@ -449,7 +449,7 @@
       "default": 1,
       "live": false,
       "group": "Beacons",
-      "description": "Both roam modes: the beacon channel before the charger: slow approach (0 = none)",
+      "description": "Every roam mode: the beacon channel before the charger: slow approach (0 = none)",
       "max": 2,
       "label": "Beacon before the charger"
     },
@@ -459,7 +459,7 @@
       "default": 2,
       "live": false,
       "group": "Beacons",
-      "description": "Both roam modes: the beacon channel after the charger exit: the vehicle turns back if it meets this beacon first (0 = none)",
+      "description": "Every roam mode: the beacon channel after the charger exit: the vehicle turns back if it meets this beacon first (0 = none)",
       "max": 2,
       "label": "Beacon after the charger"
     },
@@ -469,8 +469,8 @@
       "min": 0,
       "default": 30,
       "live": true,
-      "group": "Rover: both roam modes",
-      "description": "Both roam modes: the rover stops after this long without the wire in a join, a follow or a depart (0 = never)",
+      "group": "Rover: every roam mode",
+      "description": "Every roam mode: the rover stops after this long without the wire in a join, a follow or a depart (0 = never)",
       "label": "Stop after wire lost for"
     },
     "espnow_enabled": {
@@ -1373,8 +1373,8 @@
       ],
       "default": "inside",
       "live": false,
-      "group": "Rover: Bounce mode only",
-      "description": "Bounce mode only: with no polarity at a join: inside = assume the rover is inside the loop; stop = stop. Join then leave always assumes inside at the start and takes the side from polarity when it has it",
+      "group": "Rover: Bounce and Reverse bounce",
+      "description": "Bounce and Reverse bounce: with no polarity at a join: inside = assume the rover is inside the loop; stop = stop. Join then leave always assumes inside at the start and takes the side from polarity when it has it",
       "label": "Join without polarity"
     },
     "rover_roam_speed_mps": {
@@ -1384,8 +1384,8 @@
       "max": 20.0,
       "default": 0.5,
       "live": false,
-      "group": "Rover: both roam modes",
-      "description": "Both roam modes: the one top speed: the vehicle speed at full drive command; roam drives at it",
+      "group": "Rover: every roam mode",
+      "description": "Every roam mode: the one top speed: the vehicle speed at full drive command; roam drives at it",
       "label": "Roam speed"
     },
     "rover_bounce_m": {
@@ -1395,8 +1395,8 @@
       "max": 20.0,
       "default": 0.5,
       "live": false,
-      "group": "Rover: Bounce mode only",
-      "description": "Bounce mode only: the distance to the wire at which the rover stops and turns back into the loop",
+      "group": "Rover: Bounce and Reverse bounce",
+      "description": "Bounce and Reverse bounce: the distance to the wire at which the rover stops and turns back into the loop",
       "label": "Bounce distance"
     },
     "rover_bounce_spread_deg": {
@@ -1404,10 +1404,10 @@
       "unit": "deg",
       "min": 0.0,
       "max": 180.0,
-      "default": 25.0,
+      "default": 90.0,
       "live": false,
-      "group": "Rover: both roam modes",
-      "description": "Both roam modes: a random angle from minus to plus this value is added to each planned depart angle (Bounce: the mirror of the measured wire angle at a bounce, and the depart angle target at the end of a follow; Join then leave: the depart angle target). 0 = always the planned angle. 25 with target 90 and limit 65 gives departs from 65 to 115 deg, none clipped to a limit",
+      "group": "Rover: every roam mode",
+      "description": "Every roam mode: a random angle from minus to plus this value is added to each planned depart angle (Bounce and Reverse bounce: the mirror of the measured wire angle at a bounce, and the depart angle target at the end of a follow; Join then leave: the depart angle target). 0 = always the planned angle. A wider spread covers the lawn more evenly; a narrow spread can repeat the same paths. A depart past a limit takes that limit",
       "label": "Depart angle spread"
     },
     "rover_bounce_min_deg": {
@@ -1417,8 +1417,8 @@
       "max": 90.0,
       "default": 65.0,
       "live": false,
-      "group": "Rover: both roam modes",
-      "description": "Both roam modes: the least angle between the wire and the depart heading; the most is 180 deg minus it. A planned angle outside the limits takes the nearer limit. It keeps the rover off a shallow path along the wire, and it must exceed the uncertainty of the measured wire angle",
+      "group": "Rover: every roam mode",
+      "description": "Every roam mode: the least angle between the wire and the depart heading; the most is 180 deg minus it. A planned angle outside the limits takes the nearer limit. It keeps the rover off a shallow path along the wire, and it must exceed the uncertainty of the measured wire angle",
       "label": "Depart angle limit"
     },
     "rover_rearm_drop_m": {
@@ -1428,8 +1428,8 @@
       "max": 20.0,
       "default": 0.3,
       "live": false,
-      "group": "Rover: both roam modes",
-      "description": "Both roam modes: outside the loop (polarity), the rover turns round again each time its distance from the wire grows this much since the last turn-back",
+      "group": "Rover: every roam mode",
+      "description": "Every roam mode: outside the loop (polarity), the rover turns round again each time its distance from the wire grows this much since the last turn-back",
       "label": "Turn-back repeat distance"
     },
     "rover_beacon_bounce": {
@@ -1437,7 +1437,7 @@
       "default": true,
       "live": false,
       "group": "Beacons",
-      "description": "Both roam modes: in roam and return, turn round at a beacon",
+      "description": "Every roam mode: in roam and return, turn round at a beacon",
       "label": "Turn round at a beacon"
     },
     "rover_beacon_m": {
@@ -1448,7 +1448,7 @@
       "default": 0.15,
       "live": false,
       "group": "Beacons",
-      "description": "Both roam modes: the beacon distance at which the rover stops and turns round",
+      "description": "Every roam mode: the beacon distance at which the rover stops and turns round",
       "label": "Beacon turn distance"
     },
     "rover_beacon_rearm_m": {
@@ -1459,7 +1459,7 @@
       "default": 0.25,
       "live": false,
       "group": "Beacons",
-      "description": "Both roam modes: after a beacon turn, the beacon counts again past this distance",
+      "description": "Every roam mode: after a beacon turn, the beacon counts again past this distance",
       "label": "Beacon re-arm distance"
     },
     "rover_beacon_spread_deg": {
@@ -1470,7 +1470,7 @@
       "default": 30.0,
       "live": false,
       "group": "Beacons",
-      "description": "Both roam modes: a random angle from minus to plus this value on the 180 deg beacon turn",
+      "description": "Every roam mode: a random angle from minus to plus this value on the 180 deg beacon turn",
       "label": "Beacon turn spread"
     },
     "rover_approach_m": {
@@ -1480,8 +1480,8 @@
       "max": 50.0,
       "default": 1.1,
       "live": false,
-      "group": "Rover: both roam modes",
-      "description": "Both roam modes. Join then leave: the join point lies inside this distance to the wire (with the re-arm radius fall), for a turn at the wire and for a return. Bounce: inside it the rover drives at the approach speed, and a return starts its join here",
+      "group": "Rover: every roam mode",
+      "description": "Every roam mode. Join then leave: the join point lies inside this distance to the wire (with the re-arm radius fall), for a turn at the wire and for a return. Bounce and Reverse bounce: inside it the rover drives at the approach speed, and a Bounce return starts its join here",
       "label": "Approach distance"
     },
     "rover_approach_pct": {
@@ -1491,8 +1491,8 @@
       "max": 100.0,
       "default": 60.0,
       "live": false,
-      "group": "Rover: both roam modes",
-      "description": "Both roam modes: percent of the roam speed. Join then leave: the join, the short follow and the depart arc. Bounce: inside the approach distance and the join. Both: the probe and the drive outside the loop",
+      "group": "Rover: every roam mode",
+      "description": "Every roam mode: percent of the roam speed. Join then leave: the join, the short follow and the depart arc. Bounce and Reverse bounce: inside the approach distance and the join. Every mode: the probe and the drive outside the loop",
       "label": "Approach speed"
     },
     "rover_join_angle_deg": {
@@ -1502,16 +1502,16 @@
       "max": 90.0,
       "default": 45.0,
       "live": false,
-      "group": "Rover: Join then leave only",
-      "description": "Join then leave only: the angle between the join heading and the wire: the rover never drives square-on at the wire, where the field has its null. 45 deg nominal. The Bounce mode join drives straight to the wire and turns on the spot",
+      "group": "Rover: Join then leave",
+      "description": "Join then leave, and the follow of a Reverse bounce return: the most angle between the heading and the wire as the follow closes on its line; the rover never drives square-on at the wire, where the field has its null. Turn radius 0: also the join heading. 45 deg nominal. The Bounce mode join drives straight to the wire and turns on the spot",
       "label": "Approach angle"
     },
     "rover_wrong_dir_check": {
       "type": "bool",
       "default": true,
       "live": false,
-      "group": "Rover: both roam modes",
-      "description": "Both roam modes, in the follow after a start on the wire and after a charge; the Bounce mode also in every other follow. Polarity direction against the goal direction, or the exit beacon before the entry beacon: turn round",
+      "group": "Rover: every roam mode",
+      "description": "Every roam mode, in the follow after a start on the wire and after a charge; the Bounce mode also in every other follow. Polarity direction against the goal direction, or the exit beacon before the entry beacon: turn round",
       "label": "Wrong-direction check"
     },
     "rover_depart_min_m": {
@@ -1521,8 +1521,8 @@
       "max": 1000.0,
       "default": 0.5,
       "live": false,
-      "group": "Rover: both roam modes",
-      "description": "Both roam modes: after a charge, follow a random distance from minimum to maximum (equal: fixed), then turn to the depart angle",
+      "group": "Rover: every roam mode",
+      "description": "Every roam mode: after a charge, follow a random distance from minimum to maximum (equal: fixed), then turn to the depart angle",
       "label": "Depart distance minimum"
     },
     "rover_depart_max_m": {
@@ -1532,8 +1532,8 @@
       "max": 1000.0,
       "default": 3.0,
       "live": false,
-      "group": "Rover: both roam modes",
-      "description": "Both roam modes: after a charge, follow a random distance from minimum to maximum (equal: fixed), then turn to the depart angle",
+      "group": "Rover: every roam mode",
+      "description": "Every roam mode: after a charge, follow a random distance from minimum to maximum (equal: fixed), then turn to the depart angle",
       "label": "Depart distance maximum"
     },
     "rover_probe_m": {
@@ -1543,8 +1543,8 @@
       "max": 20.0,
       "default": 0.5,
       "live": false,
-      "group": "Rover: both roam modes",
-      "description": "Both roam modes: at a start in range, a straight drive of this length, forward when the wire is further away, else reverse; it gives the heading to the wire (0 = no probe)",
+      "group": "Rover: every roam mode",
+      "description": "Every roam mode: at a start in range, a straight drive of this length, forward when the wire is further away, else reverse; it gives the heading to the wire (0 = no probe)",
       "label": "Probe length"
     },
     "rover_imu_roll": {
@@ -1556,8 +1556,8 @@
       ],
       "default": "off",
       "live": true,
-      "group": "Rover: both roam modes",
-      "description": "Both roam modes: turn the Rx x and y back by the accelerometer roll before the heading fit, so a side slope does not bend the lateral wire offset. inverted: the IMU sits the other way round (check on a side slope over the wire)",
+      "group": "Rover: every roam mode",
+      "description": "Every roam mode: turn the Rx x and y back by the accelerometer roll before the heading fit, so a side slope does not bend the lateral wire offset. inverted: the IMU sits the other way round (check on a side slope over the wire)",
       "label": "IMU roll correction"
     },
     "rover_no_tx_roam_s": {
@@ -1567,8 +1567,8 @@
       "max": 86400.0,
       "default": 20.0,
       "live": false,
-      "group": "Rover: both roam modes",
-      "description": "Both roam modes, in roam and return: no Tx signal (the wire signal under 10 dB on both sensors) this long: stop and wait until it returns. Far from the wire in a large loop the signal can drop out",
+      "group": "Rover: every roam mode",
+      "description": "Every roam mode, in roam and return: no Tx signal (the wire signal under 10 dB on both sensors) this long: stop and wait until it returns. Far from the wire in a large loop the signal can drop out",
       "label": "Roam: stop after no Tx signal for"
     },
     "rover_no_tx_s": {
@@ -1578,8 +1578,8 @@
       "max": 86400.0,
       "default": 2.0,
       "live": false,
-      "group": "Rover: both roam modes",
-      "description": "Both roam modes, in join, follow, depart and dock: no Tx signal (the wire signal under 10 dB on both sensors) this long: stop and wait until it returns",
+      "group": "Rover: every roam mode",
+      "description": "Every roam mode, in join, follow, depart and dock: no Tx signal (the wire signal under 10 dB on both sensors) this long: stop and wait until it returns",
       "label": "Stop after no Tx signal for"
     },
     "rover_roam_time_s": {
@@ -1589,8 +1589,8 @@
       "max": 86400.0,
       "default": 60.0,
       "live": false,
-      "group": "Rover: both roam modes",
-      "description": "Both roam modes: roam this long, then find the wire, join it and follow it for the follow time; then depart at the depart angle and roam again. The time counts only in roam (not while it waits for the Tx signal). A charge return comes first; after a charge both times start again. 0 = off (also when the follow time is 0)",
+      "group": "Rover: every roam mode",
+      "description": "Every roam mode: roam this long, then find the wire, join it and follow it for the follow time; then depart at the depart angle and roam again. The time counts only in roam (not while it waits for the Tx signal). A charge return comes first; after a charge both times start again. 0 = off (also when the follow time is 0)",
       "label": "Roam time"
     },
     "rover_follow_time_s": {
@@ -1600,8 +1600,8 @@
       "max": 86400.0,
       "default": 30.0,
       "live": false,
-      "group": "Rover: both roam modes",
-      "description": "Both roam modes: after the roam time, follow the wire this long, then depart at the depart angle and roam again. A charge return comes first. 0 = off (also when the roam time is 0)",
+      "group": "Rover: every roam mode",
+      "description": "Every roam mode: after the roam time, follow the wire this long, then depart at the depart angle and roam again. A charge return comes first. 0 = off (also when the roam time is 0)",
       "label": "Follow time"
     },
     "rover_follow_exit_deg": {
@@ -1611,8 +1611,8 @@
       "max": 180.0,
       "default": 90.0,
       "live": false,
-      "group": "Rover: both roam modes",
-      "description": "Both roam modes: the planned angle between the wire and the depart heading, before the spread and the limits. Join then leave: each depart. Bounce: the end of a timed follow and the depart after a charge (a bounce mirrors the measured wire angle). 90 = straight into the loop",
+      "group": "Rover: every roam mode",
+      "description": "Every roam mode: the planned angle between the wire and the depart heading, before the spread and the limits. Join then leave: each depart. Bounce and Reverse bounce: the end of a timed follow and the depart after a charge (a bounce mirrors the measured wire angle). 90 = straight into the loop",
       "label": "Depart angle target"
     },
     "rover_rearm_fall_mm": {
@@ -1622,8 +1622,8 @@
       "max": 500.0,
       "default": 30.0,
       "live": false,
-      "group": "Rover: both roam modes",
-      "description": "Both roam modes: after any turn, the next turn at the wire (Join then leave: the join point) arms when the wire radius falls this much below its highest value since the turn: the rover closes on the wire again. Join then leave: the side reading must fall the same amount. 30 mm is 3 x the radius noise. More delays the turn; less lets noise arm it",
+      "group": "Rover: every roam mode",
+      "description": "Every roam mode: after any turn, the next turn at the wire (Join then leave: the join point) arms when the wire radius falls this much below its highest value since the turn: the rover closes on the wire again. Join then leave: the side reading must fall the same amount. 30 mm is 3 x the radius noise. More delays the turn; less lets noise arm it",
       "label": "Re-arm radius fall"
     },
     "wire_max_depth_mm": {
@@ -1633,8 +1633,8 @@
       "max": 1000.0,
       "default": 120.0,
       "live": false,
-      "group": "Rover: both roam modes",
-      "description": "Both roam modes: the most the wire lies deeper than the sensor height setting, anywhere round the loop. The inside/outside value changes side only when the sensor comes this near the wire: deeper wire is seen farther out. 120 mm takes a wire buried 120 mm deeper than the setting. Too small: a real crossing at deep wire shows late; too large: a false polarity reading near the wire can change the side",
+      "group": "Rover: every roam mode",
+      "description": "Every roam mode: the most the wire lies deeper than the sensor height setting, anywhere round the loop. The inside/outside value changes side only when the sensor comes this near the wire: deeper wire is seen farther out. 120 mm takes a wire buried 120 mm deeper than the setting. Too small: a real crossing at deep wire shows late; too large: a false polarity reading near the wire can change the side",
       "label": "Wire extra depth, maximum"
     },
     "use_sensor_2": {
@@ -1642,19 +1642,20 @@
       "default": false,
       "live": false,
       "group": "Wire and sensors",
-      "description": "On (with Sensor 2 on): the inside/outside value, the heading round the loop and the follow direction come from the sensor nearest the wire. Off: sensor 2 is data only (log and app), and every rover decision uses sensor 1. Turn it on only when sensor 2 faces the same way as sensor 1 and has the same sign: a sensor 2 with the opposite sign gives the wrong side",
+      "description": "On (with Sensor 2 on): the inside/outside value, the heading round the loop and the follow direction come from the sensor nearest the wire; Join then leave and Reverse bounce: sensor 2 leads when the rover drives in reverse. Off: sensor 2 is data only (log and app), and every rover decision uses sensor 1. Turn it on only when sensor 2 faces the same way as sensor 1 and has the same sign: a sensor 2 with the opposite sign gives the wrong side",
       "label": "Use sensor 2 for control"
     },
     "rover_bounce_style": {
       "type": "choice",
       "values": [
         "Bounce",
-        "Join then leave"
+        "Join then leave",
+        "Reverse bounce"
       ],
       "default": "Bounce",
       "live": false,
-      "group": "Rover: both roam modes",
-      "description": "How the rover turns back at the wire. Bounce: as it drives, the rover measures the distance and the direction of the wire; at the bounce distance it stops, turns on the spot and drives back into the loop at the mirror angle. Join then leave: the rover joins the wire at the approach angle, follows it for the short follow time, then leaves on an arc back into the loop; it never stops or turns on the spot at the wire",
+      "group": "Rover: every roam mode",
+      "description": "How the rover turns back at the wire. Bounce: as it drives, the rover measures the distance and the direction of the wire; at the bounce distance it stops, turns on the spot and drives back into the loop at the mirror angle. Join then leave: the rover joins the wire on a sweeping turn, follows it for the short follow time, then leaves on an arc back into the loop. Reverse bounce: as Bounce, but the rover does not turn on the spot: it stops, drives the other way and sweeps round to the mirror angle (with Use sensor 2 for control on, sensor 2 at the back leads in reverse). Join then leave and Reverse bounce never turn tighter than the turn radius",
       "label": "Roam mode"
     },
     "rover_follow_inset_m": {
@@ -1664,8 +1665,8 @@
       "max": 1.0,
       "default": 0.0,
       "live": false,
-      "group": "Rover: both roam modes",
-      "description": "Both roam modes: the follow holds this far inside the wire. 0: the follow runs over the wire (a follow offset breaks the charge station entry)",
+      "group": "Rover: every roam mode",
+      "description": "Every roam mode: the follow holds this far inside the wire. 0: the follow runs over the wire (a follow offset breaks the charge station entry)",
       "label": "Follow inset"
     },
     "rover_bounce_follow_s": {
@@ -1675,9 +1676,20 @@
       "max": 60.0,
       "default": 3.0,
       "live": false,
-      "group": "Rover: Join then leave only",
+      "group": "Rover: Join then leave",
       "description": "Join then leave only: the short follow lasts this long from the moment the rover reaches the follow line; it brings the heading parallel to the wire before the depart. 3 s in the simulation",
       "label": "Short follow time"
+    },
+    "rover_turn_radius_m": {
+      "type": "float",
+      "unit": "m",
+      "min": 0.0,
+      "max": 5.0,
+      "default": 0.5,
+      "live": false,
+      "group": "Rover: every roam mode",
+      "description": "Join then leave and Reverse bounce: the tightest turn the rover drives, as the radius of its turn. A larger radius slips the wheels less and spares the lawn. 0: the rover turns on the spot",
+      "label": "Turn radius"
     }
   }
 }

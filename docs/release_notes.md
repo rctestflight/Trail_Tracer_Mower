@@ -3,6 +3,50 @@
 Newest first. Each release gives what changed for the user, the settings that the user must set or check, and what
 is not tested. The full change history for developers is in `include/firmware_version.h`.
 
+## 0.7.2
+
+This release follows 0.7.1.
+
+### Changes
+
+- **New setting: Turn radius.** Default 0.5 m. In Join then leave and Reverse bounce, the rover never turns
+  tighter than this radius. A larger radius slips the wheels less and spares the lawn. 0: the rover turns on the
+  spot, as in 0.7.1.
+- **New Roam mode: Reverse bounce.** The rover makes the same bounce decision as in Bounce. At the bounce distance
+  it stops, drives the other way and sweeps round to the depart angle. It does not turn on the spot.
+- **Join then leave: sweeping turns.** The join, the end of the follow, the depart, the turn-back and the return
+  are driven turns at the turn radius or wider. The rover plans the join from the measured wire distance and
+  direction. The 0.7.1 turn on the spot at the join is gone.
+- Outside the loop, Join then leave and Reverse bounce turn back by a change of drive direction.
+- A follow that loses the wire in these two modes backs up 0.25 m after 1 s.
+- **Bounce and Reverse bounce: probe on entry.** When the rover approaches the wire steeper than the depart angle
+  limit, it drives a gentle 15 deg arc on the way in, without a stop. The known turn helps the wire measurement, and
+  the rover keeps out of the square-on spot where the wire signal fades. The stop, turn and back-off after the
+  bounce point is gone.
+- **Depart angle spread: default 90 deg (was 25).** A wider spread covers the lawn more evenly. With 25 the rover can
+  repeat the same paths on an oval loop and leave one end unmown.
+- New log value: rover_dec_solve_sensor, the sensor that the wire solve used at a decision.
+- The rover settings show in three groups: every roam mode, Bounce and Reverse bounce, Join then leave.
+
+### Settings to set or check
+
+- Roam mode: Bounce stays the default. Choose Reverse bounce or Join then leave for sweeping turns.
+- Turn radius: check it against the space at the wire.
+- Depart angle spread: a saved value stays as it is. Set 90, or remove the saved value, for the new default.
+- Reverse bounce uses sensor 2 only with "Use sensor 2 for control" on.
+- Sensor 2 at the back: with Sensor 2 and Use sensor 2 for control both on, sensor 2 leads when the rover drives
+  in reverse. Sensor 2 must face the same way as sensor 1. With either setting off, sensor 1 leads both ways.
+
+### Not tested
+
+- On a real rover: neither sweeping mode. The sweeping turns are tested in the PC simulation of a skid steer only:
+  an 8 m round loop and a 12 x 10 m ellipse, clockwise goal, 3 starts, polarity on and off, 60 min each.
+
+### Update
+
+- Stop the rover before an update. An update during a run can fail with the page message "ESP32 firmware
+  refused: begin No Error". Stop the run and install again.
+
 ## 0.7.1
 
 This release follows 0.7.0.
@@ -55,8 +99,8 @@ Saved values stay in charge: the update changes no saved value. Two settings nee
   is 180 deg minus it. The rover takes 90 at most, and at 90 every depart leaves square-on. We recommend 65.
 - **Depart angle spread** (`rover_bounce_spread_deg`): a random angle from minus to plus this value is added to each
   planned depart angle. With the limit at 65 and the target at 90, the departs can only fall from 65 to 115 deg. A
-  spread of 90 puts 36 % of the departs at each limit; 180 puts 43 % at each limit. We recommend 25: every depart
-  then falls inside the limits, and the rover covers the lawn more evenly.
+  spread of 90 puts 36 % of the departs at each limit; 180 puts 43 % at each limit. 0.7.2 changes the advice: a
+  wider spread covers the lawn more evenly (see 0.7.2).
 
 ### Other fixes
 
