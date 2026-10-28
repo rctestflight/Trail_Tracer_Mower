@@ -485,7 +485,8 @@ void stmRestartEnter(){
 #define SU_MAX_CHUNKS 112  // boot checker: image_size 1 to 114688 B, 1024 B a chunk
 #define SU_TRIES 3
 #define SF_GAP_MS 60       // more than the boot checker's 50 ms frame gap
-enum : uint8_t { SU_IDLE, SU_DOWNLOAD, SU_FEED, SU_DONE, SU_FAILED };  // "stm status" state
+// SU_HELD: an update page form post; the file is in flash and checked, the feed waits for the end of the form (0.6.40)
+enum : uint8_t { SU_IDLE, SU_DOWNLOAD, SU_FEED, SU_DONE, SU_FAILED, SU_HELD };  // "stm status" state
 // Feed steps. SF_RESTART: the command 41 sequence in the normal loop; SF_START: BOOT accepted, frames awaited.
 enum : uint8_t { SF_RESTART, SF_SETTLE, SF_STATUS, SF_PROBE, SF_ABORT, SF_HELLO, SF_BEGIN, SF_CHUNK, SF_FINAL, SF_BOOT, SF_START };
 const char* const SF_NAMES[] = {"restart", "settle", "status", "probe", "abort", "hello", "begin", "chunks", "finalize",
@@ -493,6 +494,7 @@ const char* const SF_NAMES[] = {"restart", "settle", "status", "probe", "abort",
 uint8_t su_state = SU_IDLE, sf_step = SF_RESTART, sf_try = 1, sf_count = 0;
 bool sf_on = false;      // loop() runs the feed branch
 bool sf_resent = false;  // the chunk in hand went twice
+bool su_hold = false;    // the download ends in SU_HELD, not in the feed (webUpdateGrant kind 4)
 uint16_t su_chunks = 0, sf_chunk = 0;
 uint32_t su_size = 0, su_got = 0, su_t0 = 0, su_print_ms = 0, sf_ms = 0, sf_timeout = 0, sf_resend_at = 0, sf_step_ms = 0;
 const esp_partition_t* su_part = nullptr;
@@ -529,6 +531,7 @@ void stmUrlFail(const char* fmt, ...){
   va_end(ap);
   const bool restarted = su_state == SU_FEED && sf_step != SF_RESTART;  // the Rx STM32 left its app
   su_state = SU_FAILED;
+  su_hold = false;
   sfEnd();
   if (restarted) stmLinkRelearn();  // a running app comes back; a boot checker gets HELLO/BOOT from the silence recovery
   usbOut.printf("STM url failed: %s (%lu ms)\n", su_err, (unsigned long)(millis() - su_t0));
@@ -743,6 +746,7 @@ const char SU_SIZE_ERR[] = "size must be 52 + 1040 x chunk count (1 to 112 chunk
 
 static uint32_t rd32(const uint8_t* p){ return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
 
+void stmFeedStart();
 void stmUrlDownloaded(){
   if (su_chunks == 0) {  // an upload from the update page: the size is known only now
     su_size = su_got;
@@ -761,6 +765,16 @@ void stmUrlDownloaded(){
   if (n != su_chunks) { stmUrlFail("header chunk count %u, the size gives %u", (unsigned)n, (unsigned)su_chunks); return; }
   usbOut.printf("STM url: file in flash, SHA-256 equal (%lu B, %u chunks, %lu ms)\n", (unsigned long)su_size,
                 (unsigned)su_chunks, (unsigned long)(millis() - su_t0));
+  if (su_hold) {
+    su_state = SU_HELD;
+    usbOut.println("STM url: the feed waits for the end of the update page form");
+    return;
+  }
+  stmFeedStart();
+}
+
+// The feed: command 41 (or HELLO to a boot checker), then the chunks. The file is in flash and checked.
+void stmFeedStart(){
   su_state = SU_FEED;
   sf_chunk = 0;
   sf_try = 1;
@@ -786,7 +800,7 @@ void stmUrlDownloaded(){
 
 // The refusals before an Rx STM32 download or upload, in this order (size 0: not known yet). nullptr: none.
 const char* stmStartRefusal(unsigned long size){
-  if (stmUrlBusy()) return "an Rx STM32 update runs";
+  if (stmUrlBusy() || su_state == SU_HELD) return "an Rx STM32 update runs";
   if (usb_ota::busy()) return "an ESP32 update runs (ota abort stops it)";
   if (stm_bridge || raw_mode || stm_raw || stm_rs_phase != RS_IDLE || stm_cal_phase != CAL_IDLE) return "the Rx STM32 link is busy";
   if (size && !stmUrlChunks(size)) return SU_SIZE_ERR;
@@ -805,6 +819,7 @@ void stmDownloadArmed(unsigned long size, uint16_t chunks){
   su_err[0] = 0;
   sf_try = 1;
   sf_chunk = 0;
+  su_hold = false;
 }
 
 void stmUrlCommand(const char* arg, String& out){
@@ -820,12 +835,15 @@ void stmUrlCommand(const char* arg, String& out){
 }
 
 // For the update page (src/web_update.cpp): the "stm url" result, and its reason.
-int stmUrlOutcome(){ return su_state == SU_DONE ? 1 : su_state == SU_FAILED ? -1 : stmUrlBusy() ? 0 : -2; }
+int stmUrlOutcome(){
+  return su_state == SU_DONE ? 1 : su_state == SU_FAILED ? -1 : su_state == SU_HELD ? 2 : stmUrlBusy() ? 0 : -2;
+}
 const char* stmUrlError(){ return su_err; }
 
 // The update page asks to start an upload (src/web_update.cpp); this runs in loop() context. kind 1: ESP32 image, the
-// checks of "ota url"; kind 2: Rx STM32 file, the checks of "stm url". size 0: not known (a form post). The reasons
-// are the command texts. True: the upload runs (update mode on, as for the commands).
+// checks of "ota url"; kind 2: Rx STM32 file, the checks of "stm url"; kind 4: the same, and the feed waits in SU_HELD
+// (a form post: webUpdateRxGo or webUpdateRxDrop at its end). size 0: not known (a form post). The reasons are the
+// command texts. True: the upload runs (update mode on, as for the commands).
 bool webUpdateGrant(uint8_t kind, unsigned long size, const char* sha, char* err, size_t cap){
   extern uint32_t web_upload_quiet_ms;
   web_upload_quiet_ms = millis() | 1;  // 0.6.15: telemetry datagrams pause for the upload (wifiTelemetrySend)
@@ -838,8 +856,44 @@ bool webUpdateGrant(uint8_t kind, unsigned long size, const char* sha, char* err
   if (const char* e = stmStartRefusal(size)) { snprintf(err, cap, "%s", e); return false; }
   if (!usb_ota::push_begin(su_part, size, sha, err, cap)) return false;
   stmDownloadArmed(size, stmUrlChunks(size));
+  su_hold = kind == 4;
   usbOut.printf("STM upload started from the update page (size=%lu)\n", size);
   return true;
+}
+
+// The end of an update page form post (loop() context, 0.6.40). Go: the held Rx STM32 file goes to the feed (the ESP32
+// image of the same form, if any, is in its slot and waits). Drop: the ESP32 part failed; the Rx STM32 is not touched.
+bool webUpdateRxGo(char* err, size_t cap){
+  if (su_state != SU_HELD) { snprintf(err, cap, "no Rx STM32 file waits"); return false; }
+  su_hold = false;
+  usbOut.println("STM url: the update page form ended; the feed starts");
+  stmFeedStart();
+  return true;
+}
+void webUpdateRxDrop(){
+  if (su_state != SU_HELD) return;
+  su_hold = false;
+  su_state = SU_IDLE;
+  usbOut.println("STM url: the update page form failed; the Rx STM32 file is not used");
+}
+
+// The ESP32 image of a form post is written and its slot selected (push_end): it waits (push_hold), and update mode
+// ends, so that loop() can run the Rx STM32 feed. Unselect: the Rx STM32 update failed; the boot slot goes back to the
+// running image. Its image check reads the whole slot: the loop watchdog pauses for it (as at "ota end").
+bool webUpdateEspHold(char* err, size_t cap){
+  if (!usb_ota::push_hold()) { snprintf(err, cap, "the ESP32 image is not in its slot"); return false; }
+  update_mode = false;
+  enableLoopWDT();
+  usbOut.println("UPDATE mode off: the ESP32 image waits in its slot for the end of the update page form");
+  return true;
+}
+bool webUpdateEspUnselect(char* err, size_t cap){
+  disableLoopWDT();
+  const uint32_t t0 = millis();
+  const bool ok = usb_ota::push_unselect(err, cap);
+  enableLoopWDT();
+  usbOut.printf("OTA boot slot back to the running image: %s (%lu ms)\n", ok ? "ok" : err, (unsigned long)(millis() - t0));
+  return ok;
 }
 
 // After a failed ESP32 upload from the update page: update mode ends at once (after "ota url" it holds 120 s).
@@ -861,6 +915,8 @@ void stmStatusLine(String& out){
     snprintf(t, sizeof(t), "STM status state=done chunks=%u tries=%u", (unsigned)su_chunks, (unsigned)sf_try);
   else if (su_state == SU_FAILED)
     snprintf(t, sizeof(t), "STM status state=failed error=\"%s\"", su_err);
+  else if (su_state == SU_HELD)
+    snprintf(t, sizeof(t), "STM status state=held size=%lu (the feed waits for the end of the update page form)", (unsigned long)su_size);
   else
     snprintf(t, sizeof(t), "STM status state=idle");
   out = t;

@@ -128,6 +128,32 @@ bool started() { return s_started; }
 bool connected() { return s_conn; }
 bool ready() { return s_conn && s_server_known && s_tx >= 0; }
 
+bool server(uint8_t ip[4], uint16_t* port, const char** via) {
+  if (!s_server_known) return false;
+  memcpy(ip, s_server_ip, 4);
+  *port = s_server_port;
+  *via = s_server_via;
+  return true;
+}
+
+// The link off, back to the state before begin(): the station stays (ESP-NOW uses it), not associated.
+void end() {
+  if (!s_started) return;
+  WiFi.setAutoReconnect(false);
+  WiFi.disconnect();  // returns at once
+  if (s_search) { mdns_query_async_delete(s_search); s_search = nullptr; }
+  if (s_mdns_ok) mdns_free();
+  if (s_rx >= 0) lwip_close(s_rx);
+  if (s_tx >= 0) lwip_close(s_tx);
+  s_rx = s_tx = -1;
+  s_mdns_ok = false;
+  s_started = s_conn = s_heard = s_server_known = false;
+  s_server_via = "none";
+  s_beacon_ms = 0;
+  memset(s_pass, 0, sizeof(s_pass));
+  line("WIFI link stopped\n");
+}
+
 void setCredentials(const char* ssid, const char* pass) {
   snprintf(s_ssid, sizeof(s_ssid), "%s", ssid ? ssid : "");
   snprintf(s_pass, sizeof(s_pass), "%s", pass ? pass : "");

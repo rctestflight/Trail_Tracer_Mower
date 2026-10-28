@@ -25,7 +25,7 @@ import re
 import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-VERSION = 15
+VERSION = 17
 TYPES = {'T_TEXT': 'string', 'T_U8': 'int', 'T_I32': 'int', 'T_LONG': 'int', 'T_IBOOL': 'bool', 'T_BOOL': 'bool',
          'T_F32': 'float', 'T_F64': 'float', 'T_CHOICE': 'choice'}
 COLS = ['name', 'field', 'type', 'default', 'min', 'max', 'opts', 'nvs', 'flags', 'unit', 'group', 'label', 'help']
@@ -112,6 +112,8 @@ def choices(opts):
     out = []
     for pos, seg in enumerate(opts.split('|')):
         name, _, val = seg.partition('=')
+        if name.startswith('~'):
+            continue  # an older name (0.7.0): the firmware accepts it, the app never shows it
         out.append((name, int(val) if val else pos))
     return out
 
@@ -185,6 +187,20 @@ def generate(defines):
         # 0.6.32: the table is the one source of each default; a changed default goes into this file, no stop
         d = json_default(e, old.get('default'))
         ent['type'], ent['default'] = t, d
+        # 0.7.0: the words of a table line that has them replace the words of this file (the app shows the same
+        # labels and groups as the settings page)
+        if e['group']:
+            if e['group'] not in [g['name'] for g in base['groups']]:
+                sys.exit(f"{key}: group {e['group']!r} is not in settings_def.json groups")
+            ent['group'] = e['group']
+        if e['label']:
+            ent['label'] = e['label']
+        if e['help']:
+            ent['description'] = e['help']
+        if e['unit']:
+            ent['unit'] = e['unit']
+        if t == 'choice':
+            ent['values'] = [n for n, _ in choices(e['opts'])]
         # The range is the firmware's (0.6.26, operator): the app, the settings page and the programmer take it from
         # this file, so no other program keeps its own range.
         if t in ('int', 'float') and 'values' not in old and 'choices' not in old:

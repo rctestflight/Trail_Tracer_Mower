@@ -285,6 +285,7 @@ static int find_setting(const char* name)
 }
 
 // T_CHOICE: the name of a stored value (not 0-terminated: *len), or nullptr; the stored value of a name, or -1.
+// A name that starts with ~ is an older name (0.7.0): accepted from config.json and set, never shown or written.
 static const char* choice_name(const char* opts, int v, size_t* len)
 {
     int pos = 0;
@@ -292,7 +293,7 @@ static const char* choice_name(const char* opts, int v, size_t* len)
         const char* end = strchr(s, '|');
         if (!end) end = s + strlen(s);
         const char* eq = (const char*)memchr(s, '=', end - s);
-        if ((eq ? atoi(eq + 1) : pos) == v) { *len = (eq ? eq : end) - s; return s; }
+        if (*s != '~' && (eq ? atoi(eq + 1) : pos) == v) { *len = (eq ? eq : end) - s; return s; }
         s = *end ? end + 1 : end;
     }
     return nullptr;
@@ -305,8 +306,9 @@ static int choice_value(const char* opts, const char* name)
         const char* end = strchr(s, '|');
         if (!end) end = s + strlen(s);
         const char* eq = (const char*)memchr(s, '=', end - s);
-        const size_t len = (eq ? eq : end) - s;
-        if (len == n && !strncmp(s, name, n)) return eq ? atoi(eq + 1) : pos;
+        const char* nm = *s == '~' ? s + 1 : s;
+        const size_t len = (eq ? eq : end) - nm;
+        if (len == n && !strncmp(nm, name, n)) return eq ? atoi(eq + 1) : pos;
         s = *end ? end + 1 : end;
     }
     return -1;
@@ -1184,7 +1186,17 @@ static bool config_from_json_text(DeviceConfig& c, const String& json_no_comment
     // A config.json from 0.5.68 or older (PWM_OUT_1_DEFAULT, no steer_center_us): CHARGE_MAX_SECONDS was half the charge
     // time; the file is written again in the 0.5.69 form after the read (s_rate_config_missing).
     const bool legacy_file = doc["PWM_OUT_1_DEFAULT"].is<int>() && doc["steer_center_us"].isNull();
-    s_rate_config_missing = doc["steering_rate_kp"].isNull() || doc["steering_rate_ki"].isNull() || doc["steering_rate_kd"].isNull() || doc["steering_rate_pid_direction"].isNull() || doc["steering_rate_max_dps"].isNull() || legacy_file;
+    // 0.6.36: a setting that the file does not hold (new in an update, such as the timed roam and follow times of
+    // 0.6.33) also puts the file in the current form, with its own values kept and the new settings at their defaults:
+    // every setting shows in config.json, as in the app and the USB list (one method for all
+    // settings). Before, config.json got new settings only at a "save". Once per update: the new file holds every key
+    // (a key, not a value: containsKey, so a null value never makes a write at each start).
+    JsonObjectConst obj = doc.as<JsonObjectConst>();
+    int new_keys = 0;
+    for (int i = 0; i < N_SETTINGS; i++)
+        if (!(SETTINGS[i].flags & F_LEGACY) && !obj.containsKey(SETTINGS[i].name)) new_keys++;
+    if (new_keys) ESP_LOGI(TAG, "config.json: %d settings not in the file; the file is written again", new_keys);
+    s_rate_config_missing = new_keys > 0 || legacy_file;
     if (legacy_file && doc["CHARGE_MAX_SECONDS"].is<int>())
         c.CHARGE_MAX_SECONDS = constrain(doc["CHARGE_MAX_SECONDS"].as<int>() * 2, 10, 3600);  // the clamp as up to 0.5.111
     return true;
@@ -1624,7 +1636,7 @@ int msc_fat_setting_json(const DeviceConfig* cfg, int index, char* out, size_t c
                 const char* end = strchr(p, '|');
                 if (!end) end = p + strlen(p);
                 const char* eq = (const char*)memchr(p, '=', end - p);
-                c.add(JsonString(p, (eq ? eq : end) - p));
+                if (*p != '~') c.add(JsonString(p, (eq ? eq : end) - p));
                 p = *end ? end + 1 : end;
             }
             break;

@@ -31,7 +31,6 @@ static const char* TAG = "wfrx";
 rover::Autopilot roverAp;
 bool rover_enabled = false;
 double rover_seek_vbatt = 0.0;      // return battery voltage (0 = off)
-float rover_return_m = 0.0f;        // return distance (0 = off)
 uint8_t rover_entry_btx = 0;
 uint8_t rover_exit_btx = 0;
 bool rover_active = false;          // mode 2 with the autopilot driving
@@ -154,14 +153,93 @@ bool sine_wave_force_disabled = false;
 double target_x_pos = 0;  // target x distance from wire
 double live_position = 0;
 
-// 0.6.21: world facts from the polarity (Rx STM32 2.2.0+), at the sensor nearest the wire, for the followed Tx channel
+// 0.6.36: sensor 2 acts on behaviour only with both "Sensor 2" (enable_sensor_2: the data) and "Use sensor 2 for control"
+// (use_sensor_2) on. Else every decision uses sensor 1, and sensor 2 is data for the log and the app only.
+bool sensor2Control(){ return enable_sensor_2 && g_deviceConfig.use_sensor_2; }
+
+// 0.6.21: world facts from the polarity (Rx STM32 2.2.0+), at the sensor nearest the wire (0.6.36: sensor 1 only, unless
+// sensor2Control()), for the followed Tx channel
 // (rx_channel). world_inside: +1 inside the loop, -1 outside. world_heading: +1 clockwise round the loop, -1
 // counterclockwise (seen from above). 0: not known. With D = the current direction setting of the channel (+1
 // clockwise, -1 counterclockwise): inside = polarity x sign(x) x D; heading = polarity x sign(y) x D. Each fact
 // counts only away from its blind line (|x|, or |y|, at least 25 % of the radius: above the wire x is near 0, square
 // to the wire y is near 0); else, and while the polarity is 0, the last value holds. No sensor in range for 2 s,
 // no fresh polarity item for 1 s, or no current direction set: both 0.
+// 0.6.36: world_inside comes from the inside filter below, not from the held polarity.
 int8_t world_inside = 0, world_heading = 0;
+float world_inside_p = 0.5f;  // the inside filter's belief that the sensor is inside the loop, 0..1
+
+// 0.6.36: the inside filter. The sensor can change sides only by a crossing, and a crossing needs the sensor near the
+// wire. A rover log (2026-10-24) had "outside" polarity bursts of 0.1-0.3 s at 1 m from the wire: the join then started
+// the follow 1 m from the wire, and starts faulted. The filter mixes every raw sign read (Rx STM32 extension items 9
+// sign and 10 sign spread, about 5 per s) into a belief, by Bayes' rule, in 2 steps per new read:
+// 1. Crossing chance since the last read: INSIDE_FLIP_MAX / (1 + (rNear / rCross)^12) + INSIDE_FLIP_MIN. rNear is the
+//    least radius seen, grown since then at the roam speed (the top speed): the nearest the sensor can have been to
+//    the wire. rCross is the farthest radius at the first usable read after a crossing: worst case the deepest wire
+//    (height setting + wire_max_depth_mm) and a square approach. The sensor is then past the wire by the blind line
+//    (|x| < 25 % of the radius: 0.26 x the depth), plus one read at the top speed, plus 0.1 m for field distortion.
+//    A soft edge, not a gate: at 1.25 x rCross the chance is 1/8 of its value at rCross, so a radius error moves the
+//    edge but never stops a crossing.
+// 2. The read: a sign at its spread, weighted by the wrong-read rate at that spread (Rx STM32 sign reads against the
+//    true side in 2 rover logs, 2026-10-24: 0 in 1345 under 25 deg, 0.8 % at 25-35, 2.3 % at 35-45, 13 % at 45-55).
+// The value changes at a belief of 95 % (one read under 25 deg near the wire, or 2-3 far from it). No sensor in
+// range for 2 s, or no read for 1 s: the value is unknown (0), but the belief stays, because the side cannot change
+// far from the wire. While no sensor is in range, the nearest radius falls at the roam speed from the last radius
+// seen: the sensor can close on the wire unseen. A change of the current direction setting starts the belief again
+// at 50 %.
+const float INSIDE_READ_S = 0.2f;       // s, time between two Rx sign reads (rover logs: about 5 per s)
+const float INSIDE_DISTORT = 0.1f;      // m, margin on rCross for field distortion near the wire
+const float INSIDE_FLIP_MAX = 0.5f;     // crossing chance per read right over the wire: either side is as likely, so
+                                        // the reads alone decide (one read under 25 deg). Log replay: 0 false side
+                                        // changes far from the wire, median delay 0 s (0.05: 0.1 s, 1 crossing lost)
+const float INSIDE_FLIP_MIN = 1e-6f;    // crossing chance per read far from the wire: 3 reads under 25 deg still
+                                        // change the value (a crossing during a signal loss)
+const float INSIDE_SURE = 0.95f;        // belief at which the value changes
+float insideReadErr(float spread_deg){
+  if (spread_deg < 25) return 0.002f;   // 0 wrong in 1345: the rate is at most this
+  if (spread_deg < 35) return 0.008f;
+  if (spread_deg < 45) return 0.023f;
+  if (spread_deg < 55) return 0.126f;
+  if (spread_deg < 70) return 0.3f;     // estimate between the measured 13 % and no information
+  return 0.5f;                          // no information
+}
+void insideFilter(int s, int c, int D, float rs, bool seen, bool gone, uint32_t now){
+  static float r_near = 99, r_last = 99;
+  static int d_last = 0;
+  static uint32_t last_ms = 0;
+  static uint16_t last_t10[2] = {};
+  const float v = g_deviceConfig.rover_roam_speed_mps;
+  const float dt = last_ms ? (now - last_ms) * 0.001f : 0;
+  last_ms = now;
+  r_last = seen ? rs : fmaxf(0, r_last - v * dt);
+  r_near = fminf(r_near + v * dt, r_last);
+  if (D != d_last) { d_last = D; world_inside_p = 0.5f; world_inside = 0; }
+  const uint16_t now10 = (uint16_t)(now / 10u);
+  const unsigned sl = (unsigned)s * 8u + (unsigned)c;
+  const uint16_t t = stmDec.ext_t10[8][sl], tp = stmDec.ext_t10[9][sl];
+  const bool fresh = t && tp && (uint16_t)(now10 - t) <= 100u;
+  if (D == 0 || !fresh || gone) { world_inside = 0; return; }
+  if (t == last_t10[s]) return;  // no new read
+  last_t10[s] = t;
+  const int sign = stmDec.ext_val[8][sl];
+  const float x = s == 0 ? stmPacket.items.s1_x : stmPacket.items.s2_x;
+  float p = world_inside_p;
+  if (seen && sign != 0 && fabsf(x) >= 0.25f * rs) {  // over the wire x says nothing about the side
+    const float h = (float)(g_deviceConfig.rover_sensor_height_mm + g_deviceConfig.wire_max_depth_mm) * 0.001f;
+    const float r_cross = hypotf(h, 0.26f * h + v * INSIDE_READ_S + INSIDE_DISTORT);
+    const float q = r_near / r_cross, q2 = q * q, q4 = q2 * q2;
+    const float flip = INSIDE_FLIP_MAX / (1 + q4 * q4 * q4) + INSIDE_FLIP_MIN;
+    p = p * (1 - flip) + (1 - p) * flip;
+    const float e = insideReadErr(stmDec.ext_val[9][sl] * 0.1f);
+    const bool says_in = sign * (x > 0 ? 1 : -1) * D > 0;
+    const float pin = p * (says_in ? 1 - e : e), pout = (1 - p) * (says_in ? e : 1 - e);
+    p = fminf(fmaxf(pin / (pin + pout), 1e-6f), 1 - 1e-6f);
+    world_inside_p = p;
+  }
+  if (p >= INSIDE_SURE) world_inside = 1;
+  else if (p <= 1 - INSIDE_SURE) world_inside = -1;
+}
+
 void worldFacts(){
   const int c = (int)rx_channel - 1;
   const uint8_t dirs[5] = {g_deviceConfig.tx_dir_ch1, g_deviceConfig.tx_dir_ch2, g_deviceConfig.tx_dir_ch3,
@@ -170,21 +248,22 @@ void worldFacts(){
   const uint32_t now = millis();
   const bool fresh = stmDec.pol_t10 && (uint16_t)((uint16_t)(now / 10u) - stmDec.pol_t10) <= 100u;
   static uint32_t seen_ms = 0;
+  static int s_last = 0;
   int s = -1;
   float rs = 0;
-  for (int k = 0; k < 2; k++) {
+  for (int k = 0; k < (sensor2Control() ? 2 : 1); k++) {
     if (stmDec.lost[k]) continue;
     const float r = k == 0 ? stmPacket.items.s1_radius : stmPacket.items.s2_radius;
     if (s < 0 || r < rs) { s = k; rs = r; }
   }
-  if (s >= 0) seen_ms = now;
-  if (D == 0 || !fresh || now - seen_ms > 2000u) { world_inside = world_heading = 0; return; }
+  if (s >= 0) { seen_ms = now; s_last = s; }
+  const bool gone = now - seen_ms > 2000u;
+  insideFilter(s_last, c < 0 ? 0 : c, D, rs, s >= 0, gone, now);
+  if (D == 0 || !fresh || gone) { world_heading = 0; return; }
   if (s < 0) return;
   const int p = stmDec.pol[s][c];
   if (p == 0) return;
-  const float x = s == 0 ? stmPacket.items.s1_x : stmPacket.items.s2_x;
   const float y = s == 0 ? stmPacket.items.s1_y : stmPacket.items.s2_y;
-  if (fabsf(x) >= 0.25f * rs) world_inside = (int8_t)(p * (x > 0 ? 1 : -1) * D);
   if (fabsf(y) >= 0.25f * rs) world_heading = (int8_t)(p * (y > 0 ? 1 : -1) * D);
 }
 // PID Initialization
@@ -1428,7 +1507,6 @@ void applyDeviceConfig(const DeviceConfig& cfg)
   // Rover autopilot
   rover_enabled               = cfg.rover_mode != 2 && !safe_mode;  // autonomous runs the rover unless "position follower"; safe mode (crash resets): no rover mode
   rover_seek_vbatt            = cfg.rover_seek_vbatt;
-  rover_return_m              = cfg.rover_return_m;
   rover_entry_btx             = cfg.rover_entry_btx;
   rover_exit_btx              = cfg.rover_exit_btx;
   rover::Config& rc           = roverAp.cfg;
@@ -1441,7 +1519,6 @@ void applyDeviceConfig(const DeviceConfig& cfg)
   rc.bounceDistance           = cfg.rover_bounce_m;
   rc.bounceSpreadDeg          = cfg.rover_bounce_spread_deg;
   rc.bounceMinDeg             = cfg.rover_bounce_min_deg;
-  rc.rearmDistance            = cfg.rover_rearm_m;
   rc.rearmDrop                = cfg.rover_rearm_drop_m;
   rc.rearmFall                = cfg.rover_rearm_fall_mm * 0.001f;
   rc.beaconBounce             = cfg.rover_beacon_bounce;
@@ -1449,13 +1526,10 @@ void applyDeviceConfig(const DeviceConfig& cfg)
   rc.beaconRearm              = cfg.rover_beacon_rearm_m;
   rc.beaconSpreadDeg          = cfg.rover_beacon_spread_deg;
   rc.approachDistance         = cfg.rover_approach_m;
-  rc.joinPivotDistance        = cfg.rover_join_pivot_m;
   rc.approachAngleDeg         = cfg.rover_join_angle_deg;
   rc.wrongDirCheck            = cfg.rover_wrong_dir_check;
   rc.departMin                = cfg.rover_depart_min_m;
   rc.departMax                = cfg.rover_depart_max_m;
-  rc.turnMinDeg               = cfg.rover_turn_min_deg;
-  rc.turnMaxDeg               = cfg.rover_turn_max_deg;
   rc.probeLength              = cfg.rover_probe_m;
   rc.roamTimeS                = cfg.rover_roam_time_s;
   rc.followTimeS              = cfg.rover_follow_time_s;
@@ -1463,6 +1537,11 @@ void applyDeviceConfig(const DeviceConfig& cfg)
   rc.noTxRoamS                = cfg.rover_no_tx_roam_s;
   rc.noTxS                    = cfg.rover_no_tx_s;
   rc.lostTimeout              = (float)cfg.rover_lost_timeout_s;
+  rc.bounceStyle              = cfg.rover_bounce_style;
+  rc.followInset              = cfg.rover_follow_inset_m;
+  rc.turnRadius               = cfg.rover_turn_radius_m;
+  rc.bounceFollowS            = cfg.rover_bounce_follow_s;
+  rc.wireMaxDepth             = cfg.wire_max_depth_mm * 0.001f;
   // The autopilot steer command goes through the gyro rate loop: full steer requests steering_rate_max_dps
   // (odrive_setDriveOutput), so the autopilot's full yaw rate is that value.
   rc.maxYawRate               = (float)(steering_rate_max_dps * M_PI / 180.0);
@@ -1535,6 +1614,7 @@ void roverStep(){
     rover_was_docked = charge_status > 0;
     rover_charge_ran = false;
   }
+  if(!want && rover_active) roverAp.releaseSolve();  // the end of a run: the Bounce mode solve's memory back to the heap
   rover_active = want;
   if(!want) return;
 
@@ -1555,6 +1635,21 @@ void roverStep(){
     const float x = in.x, y = in.y, c = cosf(a), s = sinf(a);
     in.x = x * c - y * s;
     in.y = x * s + y * c;
+  }
+  // Sensor 2 for control (sensor2Control): the leading sensor of a reverse roam in the sweeping modes (rover_autopilot.cpp
+  // leadInputs). Sensor 2 for data only: sensor 1 leads both ways
+  in.inRange2 = sensor2Control()
+            && !WFRX_STATUS_GET_BIT(sb, WFRX_STATUS_S2_SIGNAL_LOST)
+            && !WFRX_STATUS_GET_BIT(sb, WFRX_STATUS_S2_SIGNAL_OVERLOAD)
+            && !WFRX_STATUS_GET_BIT(sb, WFRX_STATUS_S2_SIGNAL_DISABLED);
+  in.x2 = stmPacket.items.s2_x * 0.001f;
+  in.y2 = stmPacket.items.s2_y * 0.001f;
+  in.R2 = stmPacket.items.s2_radius * 0.001f;
+  if (g_deviceConfig.rover_imu_roll && gyro_ready) {   // the same roll correction as sensor 1
+    const float a = (g_deviceConfig.rover_imu_roll == 2 ? 1.0f : -1.0f) * imu_roll16 * (float)(M_PI / 32768.0);
+    const float x = in.x2, y = in.y2, c = cosf(a), s = sinf(a);
+    in.x2 = x * c - y * s;
+    in.y2 = x * s + y * c;
   }
   in.inside = world_inside;    // polarity facts (worldFacts); 0 when not known
   in.heading = world_heading;
@@ -1600,7 +1695,6 @@ void roverStep(){
   const float vb = stmPacket.items.vbatt;
   rover_vbatt_filt = (rover_vbatt_filt <= 0.0f) ? vb : 0.99f * rover_vbatt_filt + 0.01f * vb;
   if(rover_seek_vbatt > 0 && rover_vbatt_filt > 1.0f && rover_vbatt_filt < rover_seek_vbatt) rover_need_charge = true;
-  if(rover_return_m > 0 && rover_driven_m >= rover_return_m) rover_need_charge = true;
   in.needCharge = rover_need_charge;
 
   // Beacons: the radius of each channel filtered as BTx1Signal but not clamped (the re-arm distance is past the BTx
@@ -1631,6 +1725,15 @@ void roverStep(){
     tlm_set(TLM_rover_dec_turn_deg, d.turnDeg);
     tlm_set(TLM_rover_fault, (float)roverAp.fault);
     tlm_set(TLM_rover_dec_d_mm, constrain(d.d * 1000.0f, 0.0f, 65000.0f));
+    if (d.solveOk) {
+      tlm_set(TLM_rover_dec_solve_deg, d.solvePsiDeg);
+      tlm_set(TLM_rover_dec_solve_mm, constrain(d.solveD * 1000.0f, 0.0f, 65000.0f));
+      tlm_set(TLM_rover_dec_solve_sensor, d.solveSensor);
+    } else {
+      tlm_set(TLM_rover_dec_solve_deg, NAN);   // no solve answer: no value
+      tlm_set(TLM_rover_dec_solve_mm, NAN);
+      tlm_set(TLM_rover_dec_solve_sensor, NAN);
+    }
     if (usb_verbose)
       usbOut.printf("ROVER %s %s d=%.2f X=%.2f psi=%.0f turn=%.0f side=%d fault=%d\n", rover::stateName(roverAp.state),
                     rover::decisionName(d.code), d.d, d.X, d.psiDeg, d.turnDeg, d.side, d.reason);

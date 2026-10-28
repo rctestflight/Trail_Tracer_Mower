@@ -1,5 +1,5 @@
 r"""Rx data over USB, for the PC and the equipment helpers: time-domain samples, polarity, and the magnitude and
-phase of the frequency bins, from any Rx (Rx-A to Rx-D) by its COM port.
+phase of the frequency bins, from any Rx board by its COM port.
 
 Port rules (tools/directport.py): one open per call, no retry when the open fails, close with RTS off then DTR off,
 and the port is closed when the call returns (also on an error).

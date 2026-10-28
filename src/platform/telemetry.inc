@@ -78,6 +78,7 @@ void dtTelemetry() {
       tlm_set(POL[s][c], (tp12 && (uint16_t)(now10 - tp12) <= 100u) ? (float)stmDec.pol[s][c] : NAN);
     }
   tlm_set(TLM_wire_inside, (float)world_inside);
+  tlm_set(TLM_wire_inside_pct, (float)lroundf(world_inside_p * 100.0f));
   tlm_set(TLM_wire_heading, (float)world_heading);
   tlm_set(TLM_dt_decoded, (dt_decoded >= 0 && millis() - dt_decoded_ms < 5000) ? (float)(dt_decoded & 0xFF) : NAN);
 
@@ -96,7 +97,7 @@ void dtTelemetry() {
                               g_deviceConfig.dt_side_a_ch4, g_deviceConfig.dt_side_a_ch5};
     const uint8_t side_a = (c >= 0 && c < 5) ? sides[c] : 0;
     const float r1 = stmPacket.items.s1_radius, r2 = stmPacket.items.s2_radius;
-    const unsigned s = (r2 > 0.0f && (r1 <= 0.0f || r2 < r1)) ? 1u : 0u;  // the sensor nearest the wire
+    const unsigned s = (sensor2Control() && r2 > 0.0f && (r1 <= 0.0f || r2 < r1)) ? 1u : 0u;  // nearest sensor (0.6.36: sensor 2 only with sensor2Control())
     int sign = 0;
     if (c >= 0 && c < 5) {
       const unsigned sl = s * 8u + (unsigned)c;
@@ -403,6 +404,7 @@ void telemetryEvents(){
     telemetryEvent(rec::EV_HALTED, roverAp.fault, 0, roverAp.fault == rover::FAULT_STUCK ? "fault: stuck"
                    : roverAp.fault == rover::FAULT_NO_POLARITY ? "fault: no polarity at join"
                    : roverAp.fault == rover::FAULT_POL_START ? "fault: polarity says outside at start: Tx direction"
+                   : roverAp.fault == rover::FAULT_NO_MEMORY ? "fault: no memory for the Bounce mode wire solve"
                    : "fault: wire lost too long");  // 0.6.32: the start check had the "wire lost" text
   }
   telem_last_halted = halted;
