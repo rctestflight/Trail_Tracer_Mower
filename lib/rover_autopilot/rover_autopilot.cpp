@@ -109,6 +109,7 @@ void Autopilot::reset() {
   txWait = false;
   lostT_ = stopT_ = startT_ = 0;
   armed_ = beaconArmed_ = joinArmed_ = true;
+  sqArmed_ = true; sqPeak_ = 0; entryDone_ = entryArc_ = false;
   settle_ = hold_ = wasHold_ = false;
   startCheck_ = true;
   turnBacks_ = 0;
@@ -603,6 +604,7 @@ void Autopilot::planJoin() {
 
 Output Autopilot::stepStates(const Inputs& in) {
   Output o;
+  stepN_++;
   read(in);
 #ifdef ROVER_WIRE_SOLVE
   // Every frame in both roam modes (the join pivots by the solve's angle, basicsJoin); one solve per buffer sample (10 Hz)
@@ -715,10 +717,10 @@ Output Autopilot::stepStates(const Inputs& in) {
       // Loud and early: the rover starts inside, so polarity "outside" before the first turn means the Tx direction
       // setting is the wrong way round (a silent inversion would bounce it out of the loop)
       if (startCheck_ && in.inside < 0 && !hold_) { toFault(FAULT_POL_START); return Output(); }
-      if ((cfg.followOnly || in.needCharge) && state == ROAM && !hold_) { state = RETURN; decide(DEC_RETURN, 0, 0); }
+      if ((cfg.followOnly || in.needCharge) && state == ROAM && !hold_) { state = RETURN; entryArc_ = false; decide(DEC_RETURN, 0, 0); }
       if (state == ROAM && timed()) {
         roamT_ += in.dt;
-        if (roamT_ >= cfg.roamTimeS && !hold_) { state = RETURN; followT_ = 0; decide(DEC_RETURN, 0, 0); }
+        if (roamT_ >= cfg.roamTimeS && !hold_) { state = RETURN; followT_ = 0; entryArc_ = false; decide(DEC_RETURN, 0, 0); }
       }
       // Beacon re-arm: past the beacon re-arm distance
       if (!beaconArmed_ && in.beaconRange > cfg.beaconRearm) beaconArmed_ = true;
@@ -772,6 +774,9 @@ Output Autopilot::stepStates(const Inputs& in) {
           if (arcStep(in, o)) { sub = SUB_NONE; o.v = dir_ * approachV; o.w = 0; }
           return o;
 #endif
+        case SUB_SQ_ARC:   // the square-on guard turn: one driven turn, then the drive goes on
+          if (arcStep(in, o)) { sub = SUB_NONE; o.v = dir_ * approachV; o.w = 0; }
+          return o;
         case SUB_SWEEP:
           if (arcStep(in, o)) {
             sub = SUB_NONE;
@@ -809,6 +814,7 @@ Output Autopilot::stepStates(const Inputs& in) {
       // The pivot rule: stand still while the turn lasts; then the re-arm starts from this reading (settleStart)
       if (hold_) return o;
       if (wasHold_) { rearmStart(); bPeak_ = bMedian(); bPeakX_ = -1e9f; }
+      if (sqGuard(in, o)) return o;   // every mode, roam and return, turn-back drives too
       // Driving straight. Polarity says outside the loop: no bounce until inside again.
       // Outside: turn round, and again each time the distance grows by the re-arm drop since the last turn
       // A square-on approach to the wire reads a false rise in the null band (emulator: a turn-back 6 cm short of the
@@ -822,6 +828,7 @@ Output Autopilot::stepStates(const Inputs& in) {
           decide(DEC_TURN_BACK, 180, 0);
           insideRun_ = 0;
           if (twoWay()) {   // a sweeping mode: change the drive direction, no turn
+            sqPeak_ = bMedian();
             dir_ = (int8_t)-dir_;
             leadPick();
             o.v = dir_ * approachV;
@@ -846,7 +853,7 @@ Output Autopilot::stepStates(const Inputs& in) {
         stopT_ = 0;
         return o;
       }
-      if (!armed_) entryDone_ = false;   // a new approach: its own probe on entry
+      if (!armed_) entryDone_ = entryArc_ = false;   // a new approach: its own probe on entry
       if (!armed_ || !joinArmed_) {
         if (!rd.valid) armed_ = joinArmed_ = true;
         else {
@@ -1417,6 +1424,63 @@ bool Autopilot::bGuard(const Inputs& in, float xs) {
   return g;
 }
 
+// Square-on guard in the roam and return drives. Square-on over the wire the coils see mostly the vertical field: the
+// radius reading stops falling well short of the wire, and a return can miss its join and cross (a 0.7.1 field run: a
+// Bounce return met the wire near square-on, read no nearer than 0.44 m, never joined and crossed). The Join then
+// leave guard (bGuard) covers JOIN and FOLLOW; this one covers the straight drives of every mode, roam and return,
+// turn-back drives too. It trips when three tests hold: near (below), the side field small (|y| under sensor height x
+// sin(null band), as bGuard), and closing (the median radius the re-arm fall below its highest value since the last
+// turn). Then one driven turn of 90 deg minus the approach angle toward the goal direction, so the rover meets the
+// wire at the approach angle: Bounce at the full turn rate, the sweeping modes on the turn radius, no stop. Inside and
+// closing, the rover drives outward: the goal direction lies clockwise of it for a clockwise goal; outside, the other
+// way. One null avoidance per approach: where the probe on entry turned on this approach, the guard stays off (its 15
+// deg turn already leaves the null); where the guard turns first, the probe stays off. It arms again as the roam
+// re-arms (the median radius falls the re-arm fall below its highest value since the trip). True: the turn starts
+bool Autopilot::sqGuard(const Inputs& in, Output& o) {
+  if (bN_ == 0) return false;
+  const float med = bMedian();
+  // the first straight-drive step after a turn, a stop, a join or a depart: the peak starts again
+  if (sqStep_ + 1 != stepN_) sqPeak_ = med;
+  sqStep_ = stepN_;
+  if (!sqArmed_) {   // the re-arm
+    if (med > sqPeak_) sqPeak_ = med;
+    else if (med <= sqPeak_ - cfg.rearmFall) sqArmed_ = true;
+    return false;
+  }
+  if (med > sqPeak_) sqPeak_ = med;
+  if (entryArc_ || !in.inRange) return false;
+  // Near: the solve's distance within the bounce distance plus the turn radius, so the guard turn ends short of the
+  // wire. Farther, the rest of the loop bends the reading: the side field reads small up to 49 deg from square-on
+  // (emulator, an 8 m loop: trips at 1.4 m from the wire with the approach distance, median 25 deg from
+  // square-on), and the radius alone reads near (under 0.74 m at 1.8-2.0 m from the wire). No solve answer yet: the
+  // radius under 2 x the sensor height, the least radius square-on over a straight wire at the sensor height (the coils
+  // see the vertical field only: R = (d^2 + H^2) / d, least 2 H at d = H)
+  bool nearW = med < 2 * cfg.sensorHeight;
+#ifdef ROVER_WIRE_SOLVE
+  {
+    wirefit::BounceResult ws;
+    if (solveNow(ws) && ws.n >= SJ_MIN_N) {
+      nearW = ws.d <= cfg.bounceDistance + bTurnRadius();
+      // The probe on entry decides first where it applies (Bounce and Reverse bounce roam, a reverse return): it turns
+      // 15 deg on a steep approach, or finds the approach shallow; the guard acts after it only on a shallow verdict
+      if (!basics() && !(state == RETURN && dir_ > 0) && armed_ && !entryDone_ && ws.d > cfg.bounceDistance) return false;
+    }
+  }
+#endif
+  const bool ySmall = fabsf(in.y) < cfg.sensorHeight * sinf(B_NULL_DEG * D2R);
+  const bool closing = med <= sqPeak_ - cfg.rearmFall;
+  if (!(nearW && ySmall && closing)) return false;
+  sqArmed_ = false;
+  sqPeak_ = med;
+  entryDone_ = true;   // the probe on entry stays off on this approach
+  const int8_t rot = (int8_t)((cfg.goalCW ? -1 : 1) * (in.inside < 0 ? -1 : 1));
+  const float ang = (90.0f - cfg.approachAngleDeg) * D2R;
+  arcStart(ang, rot, dir_, bTurnRadius());
+  sub = SUB_SQ_ARC;
+  decide(DEC_SQUARE_ON, rot * ang / D2R, 0);
+  return arcStep(in, o), true;
+}
+
 // JOIN: the join turn in the goal direction's sense until the rover no longer closes (basicsJoin). Inside: the goal
 // side (goal clockwise: right) in JOIN, FOLLOW and DEPART. FOLLOW: drive the side distance to the follow inset; the
 // closing speed is at most speed x sin(the angle the rover can still turn out of, bCloseDeg), so it never closes
@@ -1581,6 +1645,7 @@ bool Autopilot::entryProbe(const Inputs& in) {
   const int8_t rot = a >= 0 ? 1 : -1;
   const float ang = 15.0f * D2R, r = fmaxf(cfg.turnRadius, (cfg.sensorHeight + cfg.wireMaxDepth) / ang);
   arcStart(ang, rot, dir_, r);
+  entryArc_ = true;
   sub = SUB_ENTRY_ARC;
   solveDebug("entry", in);
   decide(DEC_PROBE, rot * 15.0f, 0);

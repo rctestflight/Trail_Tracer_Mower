@@ -64,7 +64,7 @@ enum State : uint8_t { ROAM = 0, RETURN = 1, JOIN = 2, FOLLOW = 3, DEPART = 4, F
 enum Sub : uint8_t { SUB_NONE, SUB_START, SUB_STOP, SUB_CHECK, SUB_PIVOT, SUB_APPROACH, SUB_OPEN, SUB_WAIT, SUB_BSTOP,
                      SUB_BPIVOT, SUB_REVERSE_STOP, SUB_REVERSE, SUB_TURN_STOP, SUB_TURN, SUB_PROBE, SUB_PROBE_STOP, SUB_LEAVE, SUB_LEAVE_STOP, SUB_LEAVE_TURN,
                      SUB_PERTURB_STOP, SUB_PERTURB_TURN, SUB_PERTURB_BACK, SUB_PERTURB_END, SUB_BOUNCE_WAIT,
-                     SUB_SWEEP, SUB_ENTRY_ARC   // SUB_PERTURB_*: unused since 0.7.2 (the codes keep their numbers)
+                     SUB_SWEEP, SUB_ENTRY_ARC, SUB_SQ_ARC   // SUB_PERTURB_*: unused since 0.7.2 (the codes keep their numbers)
 };
 enum ProbeFor : uint8_t { PROBE_START, PROBE_BOUNCE, PROBE_JOIN };
 enum FaultCode : uint8_t { FAULT_NONE, FAULT_STUCK, FAULT_LOST, FAULT_NO_POLARITY, FAULT_POL_START, FAULT_NO_MEMORY };  // POL_START: polarity says
@@ -253,6 +253,7 @@ class Autopilot {
   ProbeFor probeFor_ = PROBE_START;
   bool leaveFlipped_ = false, rejoin_ = false, outsideTurned_ = false;
   bool entryDone_ = false;   // this approach had its probe on entry (or needed none)
+  bool entryArc_ = false;    // this approach turned on its probe on entry (the square-on guard then stays off)
   bool searched_ = false, searching_ = false;   // lost in join, follow or depart: one turn out of the field null
   int8_t searchDir_ = 1;
   float outsideD_ = 0;      // ROAM: the least distance since the last outside turn
@@ -284,6 +285,10 @@ class Autopilot {
   bool bThreePoint(const Inputs& in, float xs);
   float bRate(float xs, float dt);
   bool bGuard(const Inputs& in, float xs);
+  bool sqGuard(const Inputs& in, Output& o);   // the square-on guard in the roam and return drives
+  bool sqArmed_ = true;             // the square-on guard may trip on this approach
+  float sqPeak_ = 0;                // highest median radius since the last turn (closing) or since the trip (re-arm)
+  uint32_t stepN_ = 0, sqStep_ = 0; // step count; the step of the last guard check (a gap: a turn or another state ran)
   bool bTurnDone(const Inputs& in);
   bool bb_ = false;                 // a basics bounce runs (state JOIN, FOLLOW or DEPART)
   bool bLong_ = false;              // the basics join of a timed or charge return: the long follow

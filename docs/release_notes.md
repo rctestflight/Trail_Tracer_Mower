@@ -3,6 +3,35 @@
 Newest first. Each release gives what changed for the user, the settings that the user must set or check, and what
 is not tested. The full change history for developers is in `include/firmware_version.h`.
 
+## 0.7.3
+
+This release follows 0.7.2. It adds one change only.
+
+### Changes
+
+- **Square-on guard in every roam mode.** When the rover drives straight at the wire close to square-on, the wire
+  signal fades and the rover can misjudge its distance to the wire. A Bounce return could then miss its join and
+  cross the wire. Now, near the wire on a square-on approach, the rover drives one gentle turn toward the goal
+  direction, without a stop, and meets the wire at the Approach angle. The turn is 90 deg minus the Approach angle:
+  45 deg with the default. The guard works in Bounce, Reverse bounce and Join then leave, in roam and in return. The
+  log shows each guard turn as a square-on decision.
+
+### Settings to set or check
+
+- None. No new setting. The guard turn uses the Approach angle setting (group Rover: Join then leave) in every
+  roam mode; its help text says so.
+
+### Not tested
+
+- On a real rover. The guard is tested in the PC simulation of a skid steer only: the 0.7.2 runs (8 m round loop,
+  12 x 10 m ellipse, rough lawn), 60 min each, and the square-on approach of the 0.7.1 field run in every mode, roam
+  and return. All these runs used Approach angle 30 deg (guard turn 60 deg), not the default 45.
+
+### Update
+
+- Stop the rover before an update. An update during a run can fail with the page message "ESP32 firmware
+  refused: begin No Error". Stop the run and install again.
+
 ## 0.7.2
 
 This release follows 0.7.1.

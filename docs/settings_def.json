@@ -1503,7 +1503,7 @@
       "default": 45.0,
       "live": false,
       "group": "Rover: Join then leave",
-      "description": "Join then leave, and the follow of a Reverse bounce return: the most angle between the heading and the wire as the follow closes on its line; the rover never drives square-on at the wire, where the field has its null. Turn radius 0: also the join heading. 45 deg nominal. The Bounce mode join drives straight to the wire and turns on the spot",
+      "description": "Join then leave, and the follow of a Reverse bounce return: the most angle between the heading and the wire as the follow closes on its line; the rover never drives square-on at the wire, where the field has its null. Turn radius 0: also the join heading. Every roam mode: near the wire on a square-on approach, the square-on guard turns the rover onto this angle (a turn of 90 deg minus this value). 45 deg nominal. The Bounce mode join drives straight to the wire and turns on the spot",
       "label": "Approach angle"
     },
     "rover_wrong_dir_check": {

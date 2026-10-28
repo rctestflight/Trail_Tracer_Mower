@@ -3,6 +3,13 @@
 #pragma once
 
 // Change history
+//   0.7.3: square-on guard in the roam and return drives, every roam mode (0.7.2 + this guard only). Square-on over
+//     the wire the coils read no nearer than about 2 x the height, so a Bounce return could miss its join distance
+//     and cross the wire (a 0.7.1 field run). Near the wire (solve distance within the bounce distance plus the turn
+//     radius), with a small side field and the radius closing, the rover drives one turn of 90 deg minus the
+//     approach angle toward the goal direction, no stop; it re-arms as the roam re-arms. One null avoidance per
+//     approach with the probe on entry. Logged as the square-on decision. No new setting; settings definition 17
+//     (Approach angle help: the guard turn).
 //   0.7.2: sweeping turns. New setting Turn radius (default 0.5 m; 0 = turn on the spot). New Roam mode Reverse
 //     bounce: the Bounce solve and depart decision; at the bounce distance the rover stops, changes its drive
 //     direction and sweeps to the depart heading. Join then leave: the join, the follow end, the depart, the
@@ -381,12 +388,12 @@
 #if defined(OTA_TEST_VERSION)
 #define ROVER_FW_VERSION OTA_TEST_VERSION  // OTA test images (envs ota_a, ota_b, ota_test_crash)
 #elif defined(BENCH_FAKE_IMU)
-#define ROVER_FW_VERSION "0.7.2+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.7.3+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #elif defined(SETTINGS_NEWKEY)
-#define ROVER_FW_VERSION "0.7.2-newkey"  // bench build: one more table line (test_new_setting)
+#define ROVER_FW_VERSION "0.7.3-newkey"  // bench build: one more table line (test_new_setting)
 #elif defined(TELEMETRY_NEWVALUE)
-#define ROVER_FW_VERSION "0.7.2-newvalue"  // bench build: the example lines of include/user_telemetry.h
+#define ROVER_FW_VERSION "0.7.3-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.7.2"
+#define ROVER_FW_VERSION "0.7.3"
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
