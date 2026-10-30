@@ -1021,7 +1021,7 @@
       "type": "int",
       "min": 0,
       "max": 2,
-      "default": 1,
+      "default": 2,
       "live": true,
       "group": "Polarity detection",
       "description": "The way positive Tx current runs round the loop, seen from above: 0 = not set (no inside/outside), 1 = clockwise (default), 2 = counterclockwise. Wrong: the rover faults at the start in rover mode (polarity says outside); then set the other way.",

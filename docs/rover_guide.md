@@ -178,7 +178,7 @@ A remote stop holds until the next restart. After a restart with no RC signal, t
 **Monitor heartbeat.**
 
 - Each second, a Monitor Rx sends a MON message. The rover then logs event 17 "monitor" and sets byte 67 of its status record to the age of the last MON message. When the PC sends its clock to the Monitor Rx, the rover logs event 16 "time". Each status record then also holds the PC time (bytes 68 to 73).
-- **Green LED:** each MON message inverts the green LED for 100 ms. A blink once a second on top of the drive-mode pattern shows that a Monitor Rx hears the rover.
+- **Green LED:** MON messages do not change the rover's LED pattern.
 
 ## 6. IMU (MPU6050)
 

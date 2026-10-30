@@ -33,12 +33,16 @@
 //User button pin / BOOT pin
 #define BUTTON_PIN GPIO_NUM_0
 
+// Nano sonar stream on UART0 (115200, 8N1); TX stays on the ESP32-S2 default.
+#define SONAR_UART_RX_PIN GPIO_NUM_33  // Former PWM input 4.
+#define SONAR_UART_TX_PIN GPIO_NUM_43
+
 // PWM Inputs
-#define PWM_IN_NUM 4
+#define PWM_IN_NUM 3
 #define PWM_IN_1 GPIO_NUM_14
 #define PWM_IN_2 GPIO_NUM_21
 #define PWM_IN_3 GPIO_NUM_15
-#define PWM_IN_4 GPIO_NUM_33
+// PWM input 4 (GPIO33) is now SONAR_UART_RX_PIN; no RC capture on that pin.
 
 // PWM Outputs
 #define PWM_OUT_1 GPIO_NUM_26
@@ -91,7 +95,7 @@ void eraseWindowOpen();
 void canBegin();
 
 /**
- * @brief Starts the RC receiver inputs (PWM_IN_1 to PWM_IN_4). Read them with pwm_read_rmt_dur().
+ * @brief Starts the RC receiver inputs (PWM_IN_1 to PWM_IN_3). Read them with pwm_read_rmt_dur().
  */
 void rcInputsBegin();
 

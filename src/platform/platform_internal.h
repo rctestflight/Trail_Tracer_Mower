@@ -209,7 +209,6 @@ bool wifiWanted();
 bool radioSlotOpen();
 uint8_t monitorAgeS();
 void monitorLinkService();
-void monLedService();
 void espnowStart();
 void espnowEnsurePeer(const uint8_t* mac);
 void espnowSendAck(const uint8_t* mac, uint16_t seq, uint8_t result, const char* text);

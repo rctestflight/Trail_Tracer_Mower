@@ -22,6 +22,46 @@
 
 static const char* TAG = "wfrx";
 
+// Latest complete Nano record: four unsigned ranges, comma separated, ending in LF or CRLF.
+// Units are passed through exactly as sent by the Nano.
+static uint32_t sonar_ranges[4] = {};
+static bool sonar_pending = false;
+
+static void readSonar() {
+  static uint32_t fields[4] = {};
+  static uint8_t field = 0;
+  static bool digits = false;
+  static bool bad = false;
+  // Bound each pass so a busy or noisy UART cannot hold up vehicle control.
+  for (unsigned budget = 256; budget && Serial0.available(); --budget) {
+    const int c = Serial0.read();
+    if (c < 0) break;
+    if (c == '\n') {
+      if (!bad && field == 3 && digits) {
+        for (unsigned i = 0; i < 4; ++i) sonar_ranges[i] = fields[i];
+        sonar_pending = true;
+      }
+      for (unsigned i = 0; i < 4; ++i) fields[i] = 0;
+      field = 0;
+      digits = false;
+      bad = false;
+    } else if (c == '\r') {
+      // Ignore the CR in the Nano's Serial.println() CRLF terminator.
+    } else if (!bad) {
+      if (c >= '0' && c <= '9') {
+        const uint32_t digit = c - '0';
+        if (fields[field] > (UINT32_MAX - digit) / 10) bad = true;
+        else { fields[field] = fields[field] * 10 + digit; digits = true; }
+      } else if (c == ',' && digits && field < 3) {
+        ++field;
+        digits = false;
+      } else {
+        bad = true;  // Discard malformed records through their next newline.
+      }
+    }
+  }
+}
+
 // ===== Rover autopilot values =====
 
 // Rover autopilot (lib/rover_autopilot): roam inside the perimeter, return to the wire after the return distance
@@ -322,7 +362,6 @@ float low_pass_last_val_1 = 0.0;
 float low_pass_last_val_2 = 0.0;
 
 // ===== Debug print and button counters =====
-uint32_t data_sent = 0;  // flag that debug UART statements have been sent
 int32_t bttn_counter = 0;  // button counter for debounce logic
 int32_t bttn_state = 0;  // debounced state of the user button
 int32_t bttn_click_counter = 0;  // button counter for "click" logic
@@ -569,7 +608,6 @@ void setup() {
   pinMode(PWM_IN_1, INPUT);
   pinMode(PWM_IN_2, INPUT);
   pinMode(PWM_IN_3, INPUT);
-  pinMode(PWM_IN_4, INPUT);
 
   pinMode(PWM_OUT_1, OUTPUT);
   pinMode(PWM_OUT_2, OUTPUT);
@@ -637,6 +675,8 @@ void loop() {
   // Board first: watchdog, USB, updates. During an update, the PC monitor job or a bench pass-through, the board
   // uses the whole pass and the vehicle code waits.
   if (platformLoopStart()) return;
+
+  readSonar();
 
   // Button, every 10 ms
   static uint32_t last_button_update = 0;
@@ -938,14 +978,16 @@ void loop() {
 
   // Serial Print debug data to the USB virtual COM port
   mark(SEC_DEBUG);  // CPU profiler: the debug print part
-  uint32_t interval = 100; // interval between prints in milliseconds
-  if(millis() % interval == 0 && !data_sent){
+  static uint32_t last_debug_ms = 0;
+  const uint32_t debug_now_ms = millis();
+  if(debug_now_ms - last_debug_ms >= 100){
+    last_debug_ms = debug_now_ms;
 
     // Individual prints kept for debugging — uncomment as needed:
     //Serial.print(" Ch1: "); Serial.print(pwm_read_rmt_dur(0)); // R/C PWM input 1 (steering input from receiver)
     //Serial.print(" Ch2: "); Serial.print(pwm_read_rmt_dur(1)); // R/C PWM input 2 (throttle input from receiver)
     //Serial.print(" Ch3: "); Serial.print(pwm_read_rmt_dur(2)); // R/C PWM input 3 (auxiliary input from receiver)
-    //Serial.print(" Ch4: "); Serial.print(pwm_read_rmt_dur(3)); // R/C PWM input 4 (unused)
+    // Former R/C PWM input 4 is now the Nano sonar UART0 RX (GPIO33).
     //Serial.print(" Thr Out: "); Serial.print(throttle);
     //Serial.print(" Str Out: "); Serial.print(steering_output);
     //Serial.print(" PID Output: "); Serial.print(pid_output);
@@ -982,6 +1024,13 @@ void loop() {
     // Serial.println(mpu.getGyroZ(), 3);  // Yaw rate in degrees/second
     // Serial.printf(" GPIO35: %d GPIO37: %d\n", digitalRead(MOTOR_ARM_SWITCH_PIN), digitalRead(BUZZER_PIN));
 
+    if (sonar_pending) {
+      usbOut.printf("Sonar: %lu,%lu,%lu,%lu\n",
+                    (unsigned long)sonar_ranges[0], (unsigned long)sonar_ranges[1],
+                    (unsigned long)sonar_ranges[2], (unsigned long)sonar_ranges[3]);
+      sonar_pending = false;
+    }
+
 
     //Serial.print(stmPacket.items.s1_x);
     //Serial.print(" ");
@@ -993,17 +1042,13 @@ void loop() {
     // The main-branch coil strength print (cc9bedb), 10 per second. It goes through usbOut (the USB text queue) in place of
     // Serial, so it cannot cut into the other USB lines. Layout 2 STM32: coilStrength() reads the coil magnitudes in
     // int24 LSB (lib/stm_v2 fills coil_data for it); v1 STM32: counts, as before.
-    const float strength_s1c1 = coilStrength(stmPacket, 0, 0);
-    const float strength_s1c2 = coilStrength(stmPacket, 0, 1);
-    usbOut.print(strength_s1c1);
-    usbOut.print(" ");
-    usbOut.print(strength_s1c2);
-    usbOut.println();
+    //const float strength_s1c1 = coilStrength(stmPacket, 0, 0);
+    //const float strength_s1c2 = coilStrength(stmPacket, 0, 1);
+    //usbOut.print(strength_s1c1);
+    //usbOut.print(" ");
+    //usbOut.print(strength_s1c2);
+    //usbOut.println();
 
-    data_sent = 1;
-  }
-  if(millis() % interval >= 1){
-    data_sent = 0;  // reset flag to allow new data to send
   }
 
   /*

@@ -91,8 +91,10 @@ void platformStart(){
   }
 #endif
   TRACE(4);
-  Serial0.setTxBufferSize(1024);  // Prevents log writes from blocking at 1 Mbaud
-  Serial0.begin(1000000);  // Start debug UART (visible on tag-connect)
+  Serial0.setTxBufferSize(1024);
+  Serial0.setRxBufferSize(2048);
+  Serial0.begin(115200, SERIAL_8N1, SONAR_UART_RX_PIN, SONAR_UART_TX_PIN);
+  // UART0 now receives Nano sonar; tag-connect debug TX also runs at 115200.
   Serial1.setRxBufferSize(2048);  // ~176 ms headroom at 100 Hz × 116 bytes/packet
   Serial1.begin(2000000);  // Start ESP32 <-> STM32 UART
   Serial1.setRxFIFOFull(64);  // v2.0 layout 2 frame is 128 B = the hardware FIFO: interrupt at 64 B, not 120 B
@@ -107,7 +109,7 @@ void canBegin(){
 
 void rcInputsBegin(){
   // Set up PWM inputs (in progress)
-  uint8_t pwm_input_pins[] = {PWM_IN_1, PWM_IN_2, PWM_IN_3, PWM_IN_4};
+  uint8_t pwm_input_pins[] = {PWM_IN_1, PWM_IN_2, PWM_IN_3};
   TRACE(7);
   pwm_read_rmt_init(pwm_input_pins, PWM_IN_NUM);
 }
@@ -234,8 +236,7 @@ void benchService(){
       loop_max_us = 0;
       loop_exec_count = 0;
     } else {
-      // Heartbeat: keeps the USB link busy (an idle ESP32-S2 USB link can stop for good, see
-      // bench tests) and shows that loop() runs and STM32 packets arrive.
+      // Optional heartbeat output (disabled below). Keep the CPU sampling and status updates active.
       static uint32_t hb_last_packets = 0;
       if (safe_mode) usbOut.printf("SAFE MODE after %lu crash resets: no telemetry, no ESP-NOW\n", (unsigned long)crash_count);
       if (imu_halt) usbOut.println("IMU HALT: no drive (MPU6050 failed at start-up, imu_required=true)");
@@ -243,11 +244,11 @@ void benchService(){
       // control = control passes; cpu, loop, drive = CPU load % of the last second (lib/cpu_prof load()).
       cpuprof::load((1u << SEC_DRIVE) | (1u << SEC_PACKET) | (1u << SEC_ROVER) | (1u << SEC_MPU), &cpu_busy_pct, &cpu_loop_pct, &cpu_drive_pct);
       static uint32_t hb_last_frames = 0;
-      usbOut.printf("HB ms=%lu packets=%lu control=%lu mode=%d espnow=%d gyro=%d heap=%lu maxblk=%lu psram=%lu dtr=%d cpu=%u loop=%u drive=%u\n",
-        (unsigned long)millis(), (unsigned long)(stmDec.st.frames - hb_last_frames),
-        (unsigned long)((main_loop_counter - hb_last_packets + MAIN_LOOP_PERIOD) % MAIN_LOOP_PERIOD), (int)drive_mode_status, (int)espnow_started, (int)mpu_ok,
-        (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMaxAllocHeap(), (unsigned long)ESP.getPsramSize(),
-        (int)tud_cdc_connected(), (unsigned)cpu_busy_pct, (unsigned)cpu_loop_pct, (unsigned)cpu_drive_pct);
+      // usbOut.printf("HB ms=%lu packets=%lu control=%lu mode=%d espnow=%d gyro=%d heap=%lu maxblk=%lu psram=%lu dtr=%d cpu=%u loop=%u drive=%u\n",
+      //   (unsigned long)millis(), (unsigned long)(stmDec.st.frames - hb_last_frames),
+      //   (unsigned long)((main_loop_counter - hb_last_packets + MAIN_LOOP_PERIOD) % MAIN_LOOP_PERIOD), (int)drive_mode_status, (int)espnow_started, (int)mpu_ok,
+      //   (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMaxAllocHeap(), (unsigned long)ESP.getPsramSize(),
+      //   (int)tud_cdc_connected(), (unsigned)cpu_busy_pct, (unsigned)cpu_loop_pct, (unsigned)cpu_drive_pct);
       hb_last_frames = stmDec.st.frames;
       if (usb_verbose && (usbOut.dropped || usb_guard::restarts() || usb_guard::full_resets()))
         usbOut.printf("USB dropped=%lu guard_reconnects=%lu full_resets=%lu stalls=%lu\n", (unsigned long)usbOut.dropped,
@@ -261,7 +262,6 @@ void benchService(){
 
 void loopEnd(){
   mark(SEC_MPU);
-  monLedService();  // green LED: 100 ms inversion per MON frame
   // Process STM32 packets first, then do at most one sensor sample.
   serviceMpu();
   // 0.5.98: wait for the next frame edge, at most LOOP_WAIT_MS (0.5.99: 5 ms; with 1 ms the loop woke about 580 times

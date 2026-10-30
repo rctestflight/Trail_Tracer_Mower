@@ -69,9 +69,6 @@ uint8_t mon_mac[6] = {0};
 volatile bool mon_new = false;
 bool pc_time_known = false;    // a MON frame brought PC time
 int64_t pc_offset_ms = 0;      // PC unix ms - millis()
-uint32_t mon_blip_until = 0;   // LED inverted until this millis() (100 ms per MON frame)
-bool mon_blip_on = false;      // the LED pin is inverted now
-uint8_t mon_blip_level = 0;    // the level that the inversion wrote
 #define ESPNOW_CMD_TEXT_MAX 200
 volatile bool espnow_cmd_pending = false;
 uint8_t espnow_cmd_mac[6];
@@ -256,7 +253,6 @@ void monitorLinkService(){
   if (mon_new) {
     mon_new = false;
     const uint32_t r = mon_rx_ms;
-    mon_blip_until = millis() + 100;  // green LED: a 100 ms inversion per MON frame (a monitor hears this rover)
     const uint64_t u = mon_rx_unix_ms;
     char t[48];
     if (!heard) {
@@ -280,25 +276,6 @@ void monitorLinkService(){
     heard = false;
     telemetryEvent(rec::EV_MONITOR, 0, 5, "no MON frame for 5 s");
     usbOut.println("MONITOR lost: no MON frame for 5 s");
-  }
-}
-
-// Green LED (nLED, GPIO1): invert the level that the drive-mode code set. The output register holds
-// it (the pin is output only, so digitalRead() cannot read it).
-uint8_t ledLevel(){ return (REG_READ(GPIO_OUT_REG) >> nLED) & 1; }
-// Once per loop pass: inverted while a MON window runs (100 ms). When the drive-mode code writes the
-// LED in the window, the next pass inverts its new level. At the window end, the pass restores it.
-void monLedService(){
-  const uint8_t cur = ledLevel();
-  if ((int32_t)(millis() - mon_blip_until) < 0) {
-    if (!mon_blip_on || cur != mon_blip_level) {
-      mon_blip_level = cur ? 0 : 1;
-      digitalWrite(nLED, mon_blip_level);
-      mon_blip_on = true;
-    }
-  } else if (mon_blip_on) {
-    if (cur == mon_blip_level) digitalWrite(nLED, cur ? 0 : 1);
-    mon_blip_on = false;
   }
 }
 
