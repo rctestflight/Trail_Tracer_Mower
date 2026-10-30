@@ -7,10 +7,13 @@
 #include <Arduino.h>  // getCpuFrequencyMhz()
 
 #include "driver/timer.h"
+#include "esp_intr_alloc.h"
 #include "hal/cpu_hal.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
+extern "C" volatile uint32_t port_interruptNesting[];  // FreeRTOS port: interrupt nesting depth (our own handler counts 1)
 
 namespace cpuprof {
 
@@ -41,16 +44,30 @@ int64_t window_start_us = 0;
 volatile uint8_t cur_section = 0;
 TaskHandle_t loop_task = nullptr;
 bool running_ = false;
+uint32_t isr_n = 0;                    // samples inside another interrupt handler (nesting above 1)
+uint32_t nest_n[3];                    // samples by nesting depth 0, 1, 2 or more (a check of the "isr" rule)
+volatile uint32_t pass_n = 0;          // loopTask samples in the loop pass that runs now
+uint32_t kind_n[PASS_KINDS];           // loopTask samples by pass kind
+
+#ifdef DIAG_STEPTIME
+Ring ring[RING_N];
+volatile uint32_t ring_i = 0;
+#endif
 
 bool IRAM_ATTR onTimer(void*) {
   const uint32_t c0 = cpu_hal_get_cycle_count();
   TaskHandle_t h = xTaskGetCurrentTaskHandle();
+  const uint32_t nest = port_interruptNesting[0];
   portENTER_CRITICAL_ISR(&mux);
   samples++;
   interval_sum_us += cur_interval_us;
+  nest_n[nest < 2 ? nest : 2]++;
   int i = 0;
+  if (nest > 1) { isr_n++; i = -1; }  // inside another handler: not the task's time
+  else
   while (i < n_tasks && tasks[i].h != h) i++;
-  if (i < n_tasks) {
+  if (i < 0) {
+  } else if (i < n_tasks) {
     tasks[i].n++;
   } else if (n_tasks < MAX_TASKS) {
     tasks[i].h = h;
@@ -61,7 +78,17 @@ bool IRAM_ATTR onTimer(void*) {
   } else {
     other++;
   }
-  if (h == loop_task) sec_n[cur_section]++;
+  if (i >= 0 && h == loop_task) { sec_n[cur_section]++; pass_n++; }
+#ifdef DIAG_STEPTIME
+  {  // DIAG_STEPTIME: the last RING_N samples, for the control step gaps (src/diag_steptime.cpp)
+    Ring& r = ring[ring_i % RING_N];
+    r.cyc = c0;
+    r.task = i < 0 ? RING_ISR : (i < n_tasks ? (uint8_t)i : RING_OTHER);
+    r.sec = (i >= 0 && h == loop_task) ? cur_section : 0xFF;
+    r.lsec = cur_section;
+    ring_i = ring_i + 1;
+  }
+#endif
   l_samples++;
   if (h == idle_task) l_idle++;
   else if (h == loop_task) { l_loop++; l_sec[cur_section]++; }
@@ -93,12 +120,26 @@ bool begin(uint32_t mean_us) {
   timer_set_counter_value(GROUP, TIMER, 0);
   timer_set_alarm_value(GROUP, TIMER, cur_interval_us);
   timer_enable_intr(GROUP, TIMER);
-  if (timer_isr_callback_add(GROUP, TIMER, onTimer, nullptr, 0) != ESP_OK) return false;
+#ifdef CPUPROF_LEVEL3
+  const int flags = ESP_INTR_FLAG_LEVEL3;  // diagnostic build: samples inside level 1 and 2 handlers too
+#else
+  const int flags = 0;
+#endif
+  if (timer_isr_callback_add(GROUP, TIMER, onTimer, nullptr, flags) != ESP_OK) return false;
   window_start_us = esp_timer_get_time();
   if (timer_start(GROUP, TIMER) != ESP_OK) return false;
   running_ = true;
   return true;
 }
+
+void passEnd(uint8_t kind) {
+  portENTER_CRITICAL(&mux);
+  kind_n[kind < PASS_KINDS ? kind : PASS_KINDS - 1] += pass_n;
+  pass_n = 0;
+  portEXIT_CRITICAL(&mux);
+}
+
+uint8_t IRAM_ATTR sectionNow() { return cur_section; }
 
 void section(uint8_t s) { cur_section = s < MAX_SECTIONS ? s : MAX_SECTIONS - 1; }
 
@@ -120,9 +161,15 @@ bool load(uint32_t drive_mask, uint8_t* busy, uint8_t* loop, uint8_t* drive) {
 
 bool running() { return running_; }
 
+#ifdef DIAG_STEPTIME
+const Ring* ringBase(uint32_t* head) { *head = ring_i; return ring; }  // read in place: the ISR writes only at the head
+const char* taskName(uint8_t i) { return i < n_tasks ? tasks[i].name : (i == RING_ISR ? "isr" : "other"); }
+uint32_t meanUs() { return mean_us_; }
+#endif
+
 int report(char* buf, size_t len, const char* const* names, int n) {
   Task t[MAX_TASKS];
-  uint32_t sn[MAX_SECTIONS], ns, no;
+  uint32_t sn[MAX_SECTIONS], ns, no, ni, nn[3], kn[PASS_KINDS];
   uint64_t covered, cyc;
   int nt;
   portENTER_CRITICAL(&mux);
@@ -132,6 +179,12 @@ int report(char* buf, size_t len, const char* const* names, int n) {
   memcpy(sn, sec_n, sizeof(sn));
   ns = samples;
   no = other;
+  ni = isr_n;
+  memcpy(nn, nest_n, sizeof(nn));
+  memcpy(kn, kind_n, sizeof(kn));
+  isr_n = 0;
+  memset(nest_n, 0, sizeof(nest_n));
+  memset(kind_n, 0, sizeof(kind_n));
   covered = interval_sum_us;
   cyc = isr_cycles;
   isr_cycles = 0;
@@ -159,6 +212,9 @@ int report(char* buf, size_t len, const char* const* names, int n) {
     t[b].h = nullptr;
   }
   if (no && k < len) k += (size_t)snprintf(buf + k, len - k, " other=%.2f", 100.0 * no / ns);
+  if (k < len) k += (size_t)snprintf(buf + k, len - k, " isr=%.2f | nest0/1/2+=%lu/%lu/%lu | pass: empty=%.2f decode=%.2f control=%.2f",
+                                     100.0 * ni / ns, (unsigned long)nn[0], (unsigned long)nn[1], (unsigned long)nn[2],
+                                     100.0 * kn[0] / ns, 100.0 * kn[1] / ns, 100.0 * kn[2] / ns);
   if (k < len) k += (size_t)snprintf(buf + k, len - k, " | loop:");
   for (int s = 0; s < n && s < MAX_SECTIONS && k < len; s++)
     if (sn[s]) k += (size_t)snprintf(buf + k, len - k, " %s=%.2f", names[s], 100.0 * sn[s] / ns);

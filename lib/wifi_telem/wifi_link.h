@@ -36,6 +36,7 @@ bool connected();                                         // associated, with an
 bool ready();                                             // connected and the server known: a send can go out
 bool server(uint8_t ip[4], uint16_t* port, const char** via);  // the server address, if known
 uint32_t pollRx(uint32_t now_ms);  // update mode (service() stops): read the datagrams, as a held one holds a Wi-Fi receive
+void serviceFast(uint32_t now_ms);  // STEP4: server datagrams and the blast test only (service() at a lower rate)
                                    // buffer (about 1.7 KB); beacons and server frames as in service(); returns the count
 
 // "wifi scan": start, then scanService() each loop() pass prints one line per network.

@@ -153,4 +153,43 @@ bool ChannelDecimator::push(const float* in, uint32_t ms, float* out, uint32_t* 
   return ready;
 }
 
+void IntChannelDecimator::setRate(int out_hz) {
+  rate_ = rateNearest(out_hz);
+  n_ = DECIM_IN_HZ / rate_;
+  i_ = 0;
+  blocks_ = 0;
+  for (int c = 0; c < MAX_CH; c++) s_[c] = m_[c] = ps_[c] = pm_[c] = 0;
+}
+
+bool IntChannelDecimator::push(const int32_t* in, uint32_t ms, float* out, uint32_t* out_ms) {
+  if (n_ == 1) {
+    for (int c = 0; c < nch_; c++) out[c] = (float)in[c];
+    *out_ms = ms;
+    return true;
+  }
+  const int32_t fi = i_;
+  for (int c = 0; c < nch_; c++) {
+    s_[c] += in[c];
+    m_[c] += (int64_t)fi * in[c];
+  }
+  ms_ = ms;
+  if (++i_ < n_) return false;
+  const bool ready = blocks_ >= 1;
+  if (ready) {
+    const int64_t n1 = n_ - 1;
+    const double inv = 1.0 / ((double)n_ * (double)n_);
+    for (int c = 0; c < nch_; c++) out[c] = (float)((double)((pm_[c] + ps_[c]) + (n1 * s_[c] - m_[c])) * inv);
+    *out_ms = pms_;
+  }
+  for (int c = 0; c < nch_; c++) {
+    ps_[c] = s_[c];
+    pm_[c] = m_[c];
+    s_[c] = m_[c] = 0;
+  }
+  pms_ = ms_;
+  i_ = 0;
+  blocks_++;
+  return ready;
+}
+
 }  // namespace rec

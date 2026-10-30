@@ -673,22 +673,49 @@ void radioService(){
   if (radio_due) radio_last_us = micros();
   if (radio_due && espnowWanted() && radioSlotOpen()) {
     espnowStart();  // no-op once started; starts it after a config.json change
+    mark(SEC_R_TLM);  // diag_cpu: telemetry queue and send
     broadcastTelemetry();  // Queue telemetry message if needed
     telemetryFifo_sendMessage();  // Send one telemetry message from queue (throttled to 100ms)
     stage(ST_RADIO);
+    mark(SEC_R_CMD);  // diag_cpu: answers, commands, MON frames
     espnowService();  // PONG answers and THRU test frames
     espnowCommands();  // config commands (CMD/ACK) and restarts
     monitorLinkService();  // MON frames: "monitor heard" and PC time events
+    mark(SEC_R_LOG);  // diag_cpu: log frames
     if (espnow_started) telemlog_poll(millis(), telemetrySend);  // live log frames, INFO, backfill
   }
   if (radio_due) wifiTestService(millis());  // "wifi test": its steps and lines
   if (radio_due && wifiWanted() && radioSlotOpen()) {  // radio_mode "wifi": the same frames as UDP; nothing here waits for the network
     wifiStart();  // no-op once started; starts it after a config.json change
     stage(ST_RADIO);
+    mark(SEC_R_WIFI);  // diag_cpu: association, beacon, mDNS, page server start
+#ifdef STEP4
+    // STEP4: association watch, reconnect, beacons, mDNS, scan lines and the page server start at 20 Hz; their
+    // readers work in seconds. The server datagrams (commands, STOP) stay at the radio rate.
+    static uint32_t wifi_slow_ms = 0;
+    if (millis() - wifi_slow_ms >= 50) {
+      wifi_slow_ms = millis();
+      wifilink::service(wifi_slow_ms);
+      web::service(wifi_slow_ms);
+    } else {
+      wifilink::serviceFast(millis());
+    }
+#else
     wifilink::service(millis());  // association watch, reconnect, server beacon, mDNS answer, scan lines
     web::service(millis());  // starts the page server once the station is connected
+#endif
+#ifdef WIFI_SEND_AFTER_STEP
+    // Test build (2026-10-29, control step timing): the UDP sends only in the 5 ms after a control step. A send waits
+    // for the Wi-Fi driver and network stack (bench: up to 3 ms); before a frame it delayed the control step to 4.9 ms.
+    // The radio part runs every 4 ms, so each 10 ms frame period has a pass in the 5 ms after its step.
+    const bool wifi_send_ok = (uint32_t)(micros() - control_last_us) < 5000;
+#else
+    const bool wifi_send_ok = true;
+#endif
+    mark(SEC_R_TLM);
     broadcastTelemetry();  // Queue telemetry message if needed
-    wifiTelemetryFifoSend();  // ... and send one from the queue over UDP (throttled to 100ms)
+    if (wifi_send_ok) wifiTelemetryFifoSend();  // ... and send one from the queue over UDP (throttled to 100ms)
+    mark(SEC_R_CMD);  // diag_cpu: commands and page requests
     espnowCommands();  // config commands (CMD/ACK), STOP and restarts from the server, as over ESP-NOW
     webcfg::service(millis());  // a settings page request (src/web_settings.cpp)
     webtlm::service(millis());  // a telemetry page request: a copy of the newest values (src/web_telemetry.cpp)
@@ -696,7 +723,16 @@ void radioService(){
     // poll before the server is known lost the first records of each start (event 19 "associated") and every record
     // of an association loss. Held back, the SLOW stream (events, status) goes out in order once the server is
     // known, as far as its RAM ring reaches (TELEMLOG_SLOW_SLOTS); the FAST stream skips to its newest frames.
-    if (wifilink::ready()) telemlog_poll(millis(), wifiTelemetrySend);  // live log frames, INFO, backfill
+    mark(SEC_R_LOG);
+#ifdef WIFI_SEND_DRAIN
+    // Test build: one live FAST frame per poll and fewer send passes let the FAST backlog pass its limit (3) and skip
+    // frames (bench: 22 in 277 s). Poll again while the window lasts, at most 3 polls a pass; a poll with no frame due
+    // sends nothing (INFO and backfill keep their own timers).
+    for (int i = 0; i < 3 && wifilink::ready() && (uint32_t)(micros() - control_last_us) < 5000; i++)
+      telemlog_poll(millis(), wifiTelemetrySend);
+#else
+    if (wifi_send_ok && wifilink::ready()) telemlog_poll(millis(), wifiTelemetrySend);  // live log frames, INFO, backfill
+#endif
   } else if (!radio_wifi) {
     wifilink::scanService();  // espnow mode: the lines of a "wifi scan"
   }

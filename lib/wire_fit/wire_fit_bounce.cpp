@@ -1,16 +1,39 @@
 // Wire position solve on a filtered, decimated buffer: see wire_fit_bounce.h.
-#ifdef __GNUC__
+#if defined(__GNUC__) && defined(WF_OS)
+#pragma GCC optimize("Os")  // test: the solve at -Os (instruction cache)
+#elif defined(__GNUC__)
 #pragma GCC optimize("O2")
 #endif
 #include "wire_fit_bounce.h"
 #include <math.h>
+#if defined(WF_STOP_DBG) || defined(WF_START_DBG)
+#include <stdio.h>
+#endif
+#ifdef WF_XF
+#include "wf_xf.h"
+#endif
+#ifdef WF_FASTMATH
+#include "wf_fastmath.h"
+#define WF_LOGF(x) fastLogf(x)          // test build: fixed-point log and atan2 (wf_fastmath.h)
+#define WF_ATAN2F(y, x) fastAtan2f(y, x)
+#else
+#define WF_LOGF(x) logf(x)
+#define WF_ATAN2F(y, x) atan2f(y, x)
+#endif
 #if defined(ESP_PLATFORM) && defined(WF_IRAM)
 #include "esp_attr.h"
 #define WF_FAST IRAM_ATTR             // the cost loop in internal RAM, away from flash cache misses
 #else
 #define WF_FAST
 #endif
+#ifndef WF_LAM_MAX
+#define WF_LAM_MAX 1e6f              // test: the damping at which a start gives up
+#endif
 
+#ifdef DIAG_STEPTIME
+// step timing diagnostic: a solve with the closed-form starts runs (src/diag_steptime.cpp)
+extern volatile uint8_t g_st_heavy_now, g_st_heavy_seen;
+#endif
 namespace wirefit {
 
 namespace {
@@ -23,8 +46,8 @@ inline float wrapPi(float a) { while (a > PI_F) a -= 2 * PI_F; while (a <= -PI_F
 // Predicted reading (ln r, doubled angle) for the signed distance d, direction psi, vertical distance H; Jacobian
 inline void predict(float d, float c, float s, float H, float& L, float& Phi, float J[2][3]) {
   const float q0 = H * H * c * c + d * d, q = q0 > 1e-9f ? q0 : 1e-9f, R2 = d * d + H * H, iq = 1 / q, iR = 1 / R2;
-  L = 0.5f * logf(R2 * R2 * iq);
-  Phi = 2 * atan2f(d, H * c);
+  L = 0.5f * WF_LOGF(R2 * R2 * iq);
+  Phi = 2 * WF_ATAN2F(d, H * c);
   J[0][0] = 2 * d * iR - d * iq;
   J[0][1] = H * H * c * s * iq;
   J[0][2] = 2 * H * iR - H * c * c * iq;
@@ -39,10 +62,18 @@ inline void predictB(float d, float c, float s, float H, float b, float& L, floa
   const float R2 = d * d + H * H, u = 2 / R2;
   const float dud = -u * 2 * d / R2, duH = -u * 2 * H / R2;
   const float X = H * c * u, Y = d * u + b, M0 = X * X + Y * Y, M = M0 > 1e-12f ? M0 : 1e-12f, iM = 1 / M;
-  L = 0.69314718f - 0.5f * logf(M);
-  Phi = 2 * atan2f(Y, X);
+  L = 0.69314718f - 0.5f * WF_LOGF(M);
+  Phi = 2 * WF_ATAN2F(Y, X);
   const float dX[4] = {H * c * dud, -H * s * u, c * u + H * c * duH, 0}, dY[4] = {u + d * dud, 0, d * duH, 1};
+#ifdef WF_SOLVE_1B  // 2026-10-29: 6 % slower on the board (two Rx boards), faster on the PC; off by default
+  // dY[1] = 0 and dX[3] = 0 left out of the rows (the same values; a zero product adds nothing)
+  J[0][0] = -(X * dX[0] + Y * dY[0]) * iM; J[1][0] = 2 * (X * dY[0] - Y * dX[0]) * iM;
+  J[0][1] = -(X * dX[1]) * iM;             J[1][1] = 2 * (-(Y * dX[1])) * iM;
+  J[0][2] = -(X * dX[2] + Y * dY[2]) * iM; J[1][2] = 2 * (X * dY[2] - Y * dX[2]) * iM;
+  J[0][3] = -Y * iM;                      J[1][3] = 2 * X * iM;   // dY[3] = 1
+#else
   for (int i = 0; i < 4; i++) { J[0][i] = -(X * dX[i] + Y * dY[i]) * iM; J[1][i] = 2 * (X * dY[i] - Y * dX[i]) * iM; }
+#endif
 }
 
 bool solveN(float A[4][4], const float* b, float* x, int n) {   // A x = b, Gaussian elimination with pivots
@@ -114,9 +145,107 @@ void WireFitBounce::frame(float ds, float dTheta, bool have, float x, float y, f
 }
 
 // Robust cost of p = (d, psi, H[, b]) over the m samples of w_; with g and A: the gradient and Gauss-Newton matrix
+#ifdef WF_XF
+// atan2(y, x) on whole numbers: angle in Q29 rad (the fastAtan2f polynomial, wf_fastmath.h)
+XF_FN int32_t xatan2q29(xf y, xf x) {
+  XF_CNT(4);
+  if (y.m == 0 && x.m == 0) return 0;
+  const xf ay = {y.m < 0 ? -y.m : y.m, y.e}, ax = {x.m < 0 ? -x.m : x.m, x.e};
+  const bool swap = ay.m != 0 && (ax.m == 0 || ay.e > ax.e || (ay.e == ax.e && ay.m > ax.m));
+  const xf a = swap ? xmul(ax, xrecip(ay)) : xmul(ay, xrecip(ax));   // [0, 1]
+  int32_t aq = 0;                                                    // Q30
+  if (a.m != 0) { const int32_t sh = -30 - a.e; aq = sh <= 0 ? (a.m >> 0) : (sh >= 31 ? 0 : a.m >> sh); }
+  if (aq > 1073741824) aq = 1073741824;
+  const int32_t t = (int32_t)(((int64_t)aq * aq) >> 29);            // a^2, Q31
+  static const int32_t C[10] = {1073741821, -357913393, 214729366, -153132481, 117469492,
+                                -89894352, 61701025, -32982674, 11468335, -1872285};
+  int32_t acc = C[9];
+  for (int k = 8; k >= 0; k--) acc = C[k] + (int32_t)(((int64_t)acc * t) >> 31);
+  int32_t f = (int32_t)(((int64_t)aq * acc) >> 31);                 // atan(a), Q29
+  if (swap) f = 843314857 - f;                                       // pi/2 - atan(a)
+  if (x.m < 0) f = 1686629713 - f;                                   // pi - angle
+  return y.m < 0 ? -f : f;
+}
+static inline int32_t xq(xf v, int q) {   // v * 2^q as a whole number (|v| * 2^q < 2^31)
+  if (v.m == 0) return 0;
+  const int32_t sh = -q - v.e;
+  if (sh <= 0) return v.m << (-sh);
+  return sh >= 31 ? 0 : v.m >> sh;
+}
+#endif
+
 WF_FAST float WireFitBounce::cost(const float* p, int m, float* g, float A[4][4]) const {
   float f = 0;
   const int np = bc.bgField ? 4 : 3;
+#ifdef WF_XF
+  if (bc.bgField) {
+    // the same model and cost as below, in inline whole-number floating point (wf_xf.h)
+#ifdef WF_XSC
+    float spf, cpf; xsincos(p[1], spf, cpf);
+#else
+    const float spf = sinf(p[1]), cpf = cosf(p[1]);
+#endif
+    const xf sp = xfromf(spf), cp = xfromf(cpf), p0 = xfromf(p[0]), H = xfromf(p[2]), b = xfromf(p[3]);
+    const xf H2 = xmul(H, H), Mmin = xfromf(1e-12f), LN2 = xfromf(0.69314718f);
+    const xf Z = {0, XF_ZERO_E};
+    xf fx = Z, gx[4] = {Z, Z, Z, Z}, Ax[4][4];
+    for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) Ax[i][j] = Z;
+    const int32_t PI27 = 421657428, TWOPI27 = 843314857;
+    for (int k = 0; k < m; k++) {
+      const W& w = w_[k];
+      const xf wdx = xfromf(w.dx), wdy = xfromf(w.dy), sdt = xfromf(w.sdt), cdt = xfromf(w.cdt);
+      const xf dk = xsub(xadd(p0, xmul(wdx, sp)), xmul(wdy, cp)), gk = xadd(xmul(wdx, cp), xmul(wdy, sp));
+      const xf c = xadd(xmul(cp, cdt), xmul(sp, sdt)), s = xsub(xmul(sp, cdt), xmul(cp, sdt));
+      // predictB
+      const xf R2 = xadd(xmul(dk, dk), H2), iR2 = xrecip(R2), u = xmuli(iR2, 1);
+      const xf dud = xneg(xmul(xmul(u, xmuli(dk, 1)), iR2)), duH = xneg(xmul(xmul(u, xmuli(H, 1)), iR2));
+      const xf Hc = xmul(H, c);
+      const xf X = xmul(Hc, u), Y = xadd(xmul(dk, u), b);
+      xf M = xadd(xmul(X, X), xmul(Y, Y));
+      if (!xgt(M, Mmin)) M = Mmin;
+      const xf iM = xrecip(M);
+      const xf L = xsub(LN2, xmuli(xlog(M), -1));
+      const int32_t Phi27 = xatan2q29(Y, X) >> 1;                     // 2 atan2, Q27... (Q29 angle = Q28 doubled)
+      const xf dX[4] = {xmul(Hc, dud), xneg(xmul(xmul(H, s), u)), xadd(xmul(c, u), xmul(Hc, duH)), Z};
+      const xf dY[4] = {xadd(u, xmul(dk, dud)), Z, xmul(dk, duH), {1073741824, -30}};
+      xf J0[4], J1[4];
+      XF_NOUNROLL
+      for (int i = 0; i < 4; i++) {
+        J0[i] = xneg(xmul(xadd(xmul(X, dX[i]), xmul(Y, dY[i])), iM));
+        J1[i] = xmuli(xmul(xsub(xmul(X, dY[i]), xmul(Y, dX[i])), iM), 1);
+      }
+      // residuals
+      const xf e0 = xsub(xfromf(w.L), L);
+      int32_t d27 = xq(xfromf(w.Phi), 27) - Phi27;
+      while (d27 > PI27) d27 -= TWOPI27;
+      while (d27 <= -PI27) d27 += TWOPI27;
+      const xf e1 = xnorm(d27, -27);
+      const xf iL2 = xfromf(w.iL2), iA2 = xfromf(w.iA2);
+      const xf nis = xadd(xmul(xmul(e0, e0), iL2), xmul(xmul(e1, e1), iA2));
+      const xf ONE = {1073741824, -30}, FOUR = {1073741824, -28};
+      fx = xadd(fx, xmul(xlog(xadd(ONE, xmuli(nis, -2))), {1610612736, -29}));   // 0.5 (NU + 2) = 3
+      evals_++;
+      if (!g) continue;
+      const xf wt = xmul({1610612736, -28}, xrecip(xadd(FOUR, nis)));           // (NU + 2) / (NU + nis)
+      const xf r0[4] = {J0[0], xadd(xmul(J0[0], gk), J0[1]), J0[2], J0[3]};
+      const xf r1[4] = {J1[0], xadd(xmul(J1[0], gk), J1[1]), J1[2], J1[3]};
+      const xf a0 = xmul(wt, iL2), a1 = xmul(wt, iA2);
+      XF_NOUNROLL
+      for (int i = 0; i < 4; i++) {
+        const xf u0 = xmul(a0, r0[i]), u1 = xmul(a1, r1[i]);
+        gx[i] = xadd(gx[i], xadd(xmul(u0, e0), xmul(u1, e1)));
+        XF_NOUNROLL
+        for (int j = i; j < 4; j++) Ax[i][j] = xadd(Ax[i][j], xadd(xmul(u0, r0[j]), xmul(u1, r1[j])));
+      }
+    }
+    f = xtof(fx);
+    if (g) for (int i = 0; i < 4; i++) { g[i] = xtof(gx[i]); for (int j = i; j < 4; j++) A[i][j] = xtof(Ax[i][j]); }
+  } else
+#endif
+#ifdef WF_XF_ONLY   // size measurement only: the float path left out (bgField must be true)
+  {}
+#else
+  {
   if (g) for (int i = 0; i < np; i++) { g[i] = 0; for (int j = 0; j < np; j++) A[i][j] = 0; }
   const float sp = sinf(p[1]), cp = cosf(p[1]);
   for (int k = 0; k < m; k++) {
@@ -133,7 +262,7 @@ WF_FAST float WireFitBounce::cost(const float* p, int m, float* g, float A[4][4]
     }
     const float e0 = w.L - L, e1 = wrapPi(w.Phi - Phi);
     const float nis = e0 * e0 * w.iL2 + e1 * e1 * w.iA2;
-    f += 0.5f * (NU + 2) * logf(1 + nis / NU);
+    f += 0.5f * (NU + 2) * WF_LOGF(1 + nis / NU);
     evals_++;
     if (!g) continue;
     const float wt = (NU + 2) / (NU + nis);                       // Student-t weight (iteratively reweighted)
@@ -142,10 +271,19 @@ WF_FAST float WireFitBounce::cost(const float* p, int m, float* g, float A[4][4]
     const float r1[4] = {J[1][0], J[1][0] * gk + J[1][1], J[1][2], J[1][3]};
     const float a0 = wt * w.iL2, a1 = wt * w.iA2;
     for (int i = 0; i < np; i++) {
+#ifdef WF_SOLVE_1B
+      const float u0 = a0 * r0[i], u1 = a1 * r1[i];   // once per row (the same products, the same order)
+      g[i] += u0 * e0 + u1 * e1;
+      for (int j = i; j < np; j++) A[i][j] += u0 * r0[j] + u1 * r1[j];
+#else
       g[i] += a0 * r0[i] * e0 + a1 * r1[i] * e1;
       for (int j = i; j < np; j++) A[i][j] += a0 * r0[i] * r0[j] + a1 * r1[i] * r1[j];
+#endif
     }
   }
+  }   // float path
+#endif
+  if (g) a22Data_ = A[2][2];
   if (prior_ && Vc_ > 0) {   // the carried height: a Gaussian prior on H
     const float e = Hc_ - p[2], iv = 1 / Vc_;
     f += 0.5f * e * e * iv;
@@ -175,15 +313,26 @@ bool WireFitBounce::prepare(BounceResult& res) {
     const BounceSample& b = sample(k);
     if (nw.s - b.s > bc.windowM) break;
     if (!(b.r > 0) || b.r > cfg.rMax) continue;
+#ifdef WF_DECIM
+    // test: every WF_DECIM-th sample, each with WF_DECIM times the weight (the same information if neighbours repeat)
+    { static int kk = 0; if (k == n_ - 1) kk = 0; if (kk++ % WF_DECIM) continue; }
+#endif
     W& w = w_[m++];
     const float ex = b.px - nw.px, ey = b.py - nw.py;
     w.dx = cn * ex + sn * ey; w.dy = -sn * ex + cn * ey;
     const float dth = b.th - nw.th;
+#if defined(WF_XF) && defined(WF_XSC)
+    xsincos(dth, w.sdt, w.cdt);         // test: fast sin and cos (wf_xf.h)
+#else
     w.sdt = sinf(dth); w.cdt = cosf(dth);
-    w.L = logf(b.r);
-    w.Phi = 2 * atan2f(b.x, b.y);
+#endif
+    w.L = WF_LOGF(b.r);
+    w.Phi = 2 * WF_ATAN2F(b.x, b.y);
     const float sL = cfg.sigmaLnR + cfg.sigmaLnRPerM * b.r, sA = 2 * (cfg.sigmaAngDeg + cfg.sigmaAngDegPerM * b.r) * D2R;
     w.iL2 = 1 / (sL * sL); w.iA2 = 1 / (sA * sA);
+#ifdef WF_DECIM
+    w.iL2 *= WF_DECIM; w.iA2 *= WF_DECIM;
+#endif
   }
   res.n = m;
   pm_ = m;
@@ -216,6 +365,9 @@ BounceResult WireFitBounce::iterate(bool exhaustive) {
     static const float HS[4] = {0.1f, 0.2f, 0.35f, 0.5f};      // start values only: H is free in the solve
     const bool search = !warm_ || exhaustive || ++sinceRestart_ >= bc.restartEvery;
     if (search) sinceRestart_ = 0;
+#ifdef DIAG_STEPTIME
+    if (search) { g_st_heavy_now = 1; g_st_heavy_seen = 1; }
+#endif
     const int nh = !search ? 0 : (warm_ ? 1 : 4);
     for (int h = 0; h < nh; h++) {
       float H = warm_ ? warmP_[2] : HS[h];
@@ -251,44 +403,77 @@ BounceResult WireFitBounce::iterate(bool exhaustive) {
   // damped Gauss-Newton from each start
   const int np = bc.bgField ? 4 : 3;
   float best = 1e30f, bp[4] = {0, 0, 0, 0};
+  float Ab[4][4] = {}, a22b = 0;       // the Gauss-Newton matrix at the answer (with the prior) and its data-only H entry
+  int bs = -1;
   for (int s = 0; s < ns; s++) {
     float p[4] = {starts[s][0], starts[s][1], starts[s][2], starts[s][3]}, g[4], A[4][4];
-    float f = cost(p, m, g, A), lam = 1e-3f;
+    float f = cost(p, m, g, A), lam = 1e-3f, a22 = a22Data_;
+#ifdef WF_START_DBG
+    const int ev0 = evals_; float ftrace[16]; int nft = 0; ftrace[nft++] = f;
+#endif
     for (int it = 0; it < bc.iters; it++) {
       float Ad[4][4], dp[4] = {0, 0, 0, 0};
       for (int i = 0; i < np; i++) for (int j = 0; j < np; j++) Ad[i][j] = A[i][j] + (i == j ? lam * (A[i][i] + 1e-6f) : 0);
       if (!solveN(Ad, g, dp, np)) break;
+#ifdef WF_PRED_STOP
+      // test: the quadratic model's gain for this step; below the stop rule's gain the step cannot pass it: stop
+      // without the evaluation (a rejected step costs one full evaluation)
+      { float gd = 0, q2 = 0; for (int i = 0; i < np; i++) { gd += g[i] * dp[i]; for (int j = 0; j < np; j++) q2 += dp[i] * A[i][j] * dp[j]; }
+        if (gd - 0.5f * q2 < WF_PRED_STOP * 1e-4f * (1 + f)) break; }
+#endif
       float q[4] = {p[0] + dp[0], wrapPi(p[1] + dp[1]), p[2] + dp[2], p[3] + dp[3]};
       if (q[2] < bc.hMin) q[2] = bc.hMin;
       if (q[2] > bc.hMax) q[2] = bc.hMax;
       float g2[4], A2[4][4];
       const float f2 = cost(q, m, g2, A2);
+#ifdef WF_STOP_DBG
+      fprintf(stderr, "%s\n", f2 < f ? "A" : "R");
+#endif
       if (f2 < f) {
         const float gain = f - f2;
         for (int i = 0; i < np; i++) { p[i] = q[i]; g[i] = g2[i]; for (int j = 0; j < np; j++) A[i][j] = A2[i][j]; }
-        f = f2; lam *= 0.3f;
+        f = f2; lam *= 0.3f; a22 = a22Data_;
+#ifdef WF_START_DBG
+        if (nft < 16) ftrace[nft++] = f;
+#endif
         if (gain < 1e-4f * (1 + f)) break;
-      } else { lam *= 10; if (lam > 1e6f) break; }
+#ifdef WF_STOP_SD
+        // test: stop when the step was under WF_STOP_SD of the answer's own uncertainty (step' A step, A at the answer)
+        { float s2 = 0; for (int i = 0; i < np; i++) for (int j = 0; j < np; j++) s2 += dp[i] * A[i][j] * dp[j];
+#ifdef WF_STOP_DBG
+          fprintf(stderr, "it %d s2 %g gain %g f %g lam %g\n", it, s2, gain, f, lam);
+#endif
+          if (s2 < WF_STOP_SD * WF_STOP_SD) break; }
+#endif
+      } else { lam *= 10; if (lam > WF_LAM_MAX) break; }
     }
-    if (f < best) { best = f; bp[0] = p[0]; bp[1] = p[1]; bp[2] = p[2]; bp[3] = p[3]; }
+#ifdef WF_START_DBG
+    { fprintf(stderr, "ST %d %d %d %d %.6g %.6g", ns, s, (evals_ - ev0) / (m > 0 ? m : 1) + 1, f < best ? 1 : 0, f, best);
+      for (int i = 0; i < nft; i++) fprintf(stderr, " %.6g", ftrace[i]); fputc('\n', stderr); }
+#endif
+    if (f < best) {
+      best = f; bs = s; bp[0] = p[0]; bp[1] = p[1]; bp[2] = p[2]; bp[3] = p[3];
+      for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) Ab[i][j] = A[i][j];
+      a22b = a22;
+    }
   }
+  // the uncertainties below use the matrix of the answer that the last step already holds (no new evaluation);
+  // with no start, the matrix at the zero answer as before
+  if (bs < 0) { float g[4]; cost(bp, m, g, Ab); evals_ -= m; a22b = a22Data_; }
   // the wire direction uncertainty: the psi entry of the inverse Gauss-Newton matrix at the answer, with the height
   // prior as in the solve. Driving square-on, the distance falls at nearly the full speed for any angle from 60 to 90 deg
   // (sin 60 = 0.87), so the matrix holds little psi information there and the entry grows
   {
-    float g[4], A[4][4], e1[4] = {0, 1, 0, 0}, col[4] = {0, 0, 0, 0};
-    cost(bp, m, g, A);
-    evals_ -= m;
-    res.psiSd = solveN(A, e1, col, np) && col[1] > 0 ? sqrtf(col[1]) / D2R : 180.0f;
+    float e1[4] = {0, 1, 0, 0}, col[4] = {0, 0, 0, 0};
+    res.psiSd = solveN(Ab, e1, col, np) && col[1] > 0 ? sqrtf(col[1]) / D2R : 180.0f;
     if (res.psiSd > 180.0f) res.psiSd = 180.0f;
   }
   // the fit's own height information (its data only): the H entry of the inverse Gauss-Newton matrix, no prior
   {
     prior_ = false;
-    float g[4], A[4][4], e2[4] = {0, 0, 1, 0}, col[4] = {0, 0, 0, 0};
-    cost(bp, m, g, A);
-    evals_ -= m;
-    res.Hsd = solveN(A, e2, col, np) && col[2] > 0 ? sqrtf(col[2]) : 1e3f;
+    float e2[4] = {0, 0, 1, 0}, col[4] = {0, 0, 0, 0};
+    Ab[2][2] = a22b;                   // the data only: no prior
+    res.Hsd = solveN(Ab, e2, col, np) && col[2] > 0 ? sqrtf(col[2]) : 1e3f;
     // refine the carried estimate: each sample sits in about m solves, so one solve adds 1 / m of its information
     if (bc.carryH && col[2] > 0) {
       const float iFit = 1 / (col[2] * m), iC = 1 / Vc_;
@@ -304,7 +489,7 @@ BounceResult WireFitBounce::iterate(bool exhaustive) {
   warmPx_ = nw.px; warmPy_ = nw.py; warmTh_ = nw.th;
   res.valid = true;
   res.d = bp[0]; res.psiDeg = bp[1] / D2R; res.betaDeg = asinf(sinf(bp[1])) / D2R; res.H = bp[2]; res.cost = best; res.bg = bp[3];
-  res.starts = ns; res.evals = evals_;
+  res.starts = ns; res.evals = evals_; res.bestStart = bs;
   res.refX = nw.px; res.refY = nw.py; res.refTh = nw.th;
   return res;
 }

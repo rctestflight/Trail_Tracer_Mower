@@ -24,9 +24,9 @@ void ApproachFit::Line::add(real w, real s, real z) {
 
 // Slope of z against s at the last frame: the straight line, or the curvature term when it is significant (the wire
 // or the field bends over the span; the heading that counts is the one at the decision).
-bool ApproachFit::Line::slope(real sLast, real& b, real& sb, real& zNow, real& bLin, real& F) const {
+bool ApproachFit::Line::slope(real sLast, uint16_t minN, real& b, real& sb, real& zNow, real& bLin, real& F) const {
   const real Css = C[0][0], Csz = C[0][2], Czz = C[2][2];
-  if (n < 5 || !(Css > 0)) return false;
+  if (n < minN || !(Css > 0)) return false;
   bLin = Csz / Css;
   real rss = Czz - bLin * Csz;
   if (rss < 0) rss = 0;
@@ -83,7 +83,7 @@ bool ApproachFit::solve(FitResult& r, int8_t polSide) const {
   r.n = n_;
   r.span = span();
   real b, sb, dNow, bLin, F;
-  if (!d_.slope(sLast_, b, sb, dNow, bLin, F)) return false;
+  if (!d_.slope(sLast_, minN_, b, sb, dNow, bLin, F)) return false;
   // Distance fit: |sin(psi)| = |slope|; toward the wire when |d| falls at the last frame
   const real sn = clamp1(fabs(b));
   const real lr = polSide ? polSide : (side_ < 0 ? -1 : 1), toward = (dNow * b < 0) ? 1 : -1;
@@ -97,7 +97,7 @@ bool ApproachFit::solve(FitResult& r, int8_t polSide) const {
   // loop (the rest of the loop adds to the strength), the offset fit reads low with a coil roll (the vertical field
   // leaks into the sideways part); a low heading turns too little.
   real bx, sbx, xNow, bxLin, Fx;
-  if (x_.slope(sLast_, bx, sbx, xNow, bxLin, Fx)) {
+  if (x_.slope(sLast_, minN_, bx, sbx, xNow, bxLin, Fx)) {
     const real psiX = lr * toward * atan(fabs(bx)) * R2D;
     r.psiXDeg = (float)psiX;
     if (fabs(psiX) > fabs(psi)) { psi = psiX; sig = sbx / (1 + bx * bx) * R2D; }

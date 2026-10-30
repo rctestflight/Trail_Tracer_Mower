@@ -1,5 +1,10 @@
 // Rover autopilot: see rover_autopilot.h for the states and the readings.
 #include "rover_autopilot.h"
+#ifdef DIAG_SOLVE_FEED
+#include "solve_timing_frames.h"
+volatile bool g_diagSolveFeed = false;
+volatile uint32_t g_diagSolves = 0;
+#endif
 #include <math.h>
 #if defined(BASICS_DEBUG) || defined(ROVER_WIRE_SOLVE)
 #include <stdio.h>
@@ -10,6 +15,11 @@
 #ifdef ESP_PLATFORM
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#ifdef DIAG_STEPTIME
+#include "esp_timer.h"
+void steptime_onSolve(uint32_t start_us, uint32_t done_us, uint32_t pick_us, bool heavy);
+extern volatile uint8_t g_st_heavy_now, g_st_heavy_seen;  // src/diag_steptime.cpp
+#endif
 #endif
 #endif
 
@@ -97,6 +107,7 @@ const char* decisionName(DecisionCode c) {
     case DEC_PROBE: return "probe";
     case DEC_FOLLOW_END: return "follow-end";
     case DEC_SQUARE_ON: return "square-on";
+    case DEC_SONAR: return "sonar";
   }
   return "?";
 }
@@ -109,6 +120,7 @@ void Autopilot::reset() {
   txWait = false;
   lostT_ = stopT_ = startT_ = 0;
   armed_ = beaconArmed_ = joinArmed_ = true;
+  sonarTurn_ = false;
   sqArmed_ = true; sqPeak_ = 0; entryDone_ = entryArc_ = false;
   settle_ = hold_ = wasHold_ = false;
   startCheck_ = true;
@@ -170,6 +182,11 @@ void Autopilot::releaseSolve() {
 // one tick for it. On the PC (emulator) the same steps run at once
 #ifdef ESP_PLATFORM
 static Autopilot* sSolveAp = nullptr;
+#ifdef DIAG_STEPTIME
+// step timing diagnostic: the solve answer delay (start, answer, pickup by the control step; src/diag_steptime.cpp)
+static volatile uint32_t sStartUs = 0, sDoneUs = 0;
+static volatile bool sHeavy = false;
+#endif
 static void solveTaskFn(void*) {
   for (;;) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
@@ -181,6 +198,14 @@ static void solveTaskFn(void*) {
 void Autopilot::solveTaskRun() {
 #ifdef ESP_PLATFORM
   sRes_ = wfb_->iterate();
+#ifdef DIAG_STEPTIME
+  sDoneUs = (uint32_t)esp_timer_get_time();
+  sHeavy = g_st_heavy_now;
+  g_st_heavy_now = 0;
+#endif
+#ifdef DIAG_SOLVE_FEED
+  g_diagSolves++;
+#endif
   __atomic_store_n(&sState_, (uint8_t)2, __ATOMIC_RELEASE);
 #endif
 }
@@ -190,6 +215,9 @@ void Autopilot::solveStep() {
   if (__atomic_load_n(&sState_, __ATOMIC_ACQUIRE) == 2) {
     wres_ = sRes_;
     sState_ = 0;
+#ifdef DIAG_STEPTIME
+    steptime_onSolve(sStartUs, sDoneUs, (uint32_t)esp_timer_get_time(), sHeavy);
+#endif
   }
   if (sState_ != 0 || wfb_->total() == wTotal_) return;   // busy: the next free step takes the newest sample
   wTotal_ = wfb_->total();
@@ -202,12 +230,26 @@ void Autopilot::solveStep() {
     sSolveAp = this;
     TaskHandle_t t = nullptr;
     // 4 kB stack: iterate() needs under 1 kB of locals; the soft-float library calls add little
-    if (xTaskCreate(solveTaskFn, "wsolve", 4096, nullptr, uxTaskPriorityGet(nullptr), &t) != pdPASS) {
+#ifdef WF_SOLVE_LOWPRIO
+    // one priority under the loop: the control step runs first, the solve in the loop's waits
+    const UBaseType_t pr = uxTaskPriorityGet(nullptr) > 0 ? uxTaskPriorityGet(nullptr) - 1 : 0;
+#elif defined(WF_LOOP_ABOVE)
+    // the control step one priority above the solve (2026-10-29): the loop task goes up
+    // one level, the solve stays at the loop's old level (nothing else runs at levels 1 to 4)
+    const UBaseType_t pr = uxTaskPriorityGet(nullptr);
+    vTaskPrioritySet(nullptr, pr + 1);
+#else
+    const UBaseType_t pr = uxTaskPriorityGet(nullptr);
+#endif
+    if (xTaskCreate(solveTaskFn, "wsolve", 4096, nullptr, pr, &t) != pdPASS) {
       toFault(FAULT_NO_MEMORY);
       return;
     }
     sTask_ = t;
   }
+#ifdef DIAG_STEPTIME
+  sStartUs = (uint32_t)esp_timer_get_time();
+#endif
   __atomic_store_n(&sState_, (uint8_t)1, __ATOMIC_RELEASE);
   xTaskNotifyGive((TaskHandle_t)sTask_);
 #else
@@ -309,6 +351,8 @@ void Autopilot::decide(DecisionCode c, float turnDeg, int8_t side) {
   }
   dec.psiDeg = dec.fit.valid ? dec.fit.psiDeg : 0;
   dec.solveOk = false;
+  dec.sonar = 0;
+  dec.sonarMm = 0;
 }
 
 // The approach fit is good enough when its uncertainty is under the limit.
@@ -430,7 +474,41 @@ void Autopilot::leadApply() {
   lead_ = leadWant_;
 }
 
+// The counts in packets at the update period of this step (period factor r, lib/frame_pid/frame_period.h): a count of
+// N packets becomes max(1, round(N / r)). At r = 1 every count keeps its value. Also the wire solve: its samples stay
+// at 10 a second (decim in packets); its other counts are in samples or solves and need no change (SJ_MIN_N, the
+// 3-sample minimum, restartEvery: one search a second at 10 solves a second).
+static int periodCount(int n, float r) {
+  if (r == 1.0f) return n;
+  const long k = lroundf(n / r);
+  return k < 1 ? 1 : (int)k;
+}
+
+void Autopilot::periodApply(const Inputs& in) {
+#ifdef ROVER_WIRE_SOLVE
+  if (wfb_) {
+    wfb_->bc.decim = periodCount(WF_BOUNCE_DECIM, in.periodR);
+#ifdef WF_LAG_TIME
+    // Build flag WF_LAG_TIME (2026-10-30; set in the default build): the pose lag in time, half an
+    // update period (the Rx window) plus 1.7 ms (Rx processing and the frame on the UART), in packets
+    if (in.periodS > 0) {
+      const long lag = lroundf((0.5f * in.periodS + 0.0017f) / in.periodS);
+      wfb_->bc.lagFrames = lag < 0 ? 0 : (int)lag;
+    }
+#endif
+  }
+#endif
+  if (in.periodR == periodR_) return;
+  periodR_ = in.periodR;
+  wrongN_ = periodR_ == 1.0f ? WRONG_FRAMES : (float)periodCount((int)WRONG_FRAMES, periodR_);
+  bMedN_ = periodCount(B_MED, periodR_);
+  if (bMedN_ > B_MED) bMedN_ = B_MED;
+  bN_ = bI_ = 0;   // the median history starts again at the new length
+  fit_.setMinN((uint16_t)periodCount(5, periodR_));
+}
+
 Output Autopilot::step(const Inputs& in0) {
+  periodApply(in0);
   s2SeenT_ = (in0.inRange2 && in0.R2 > 0) ? 0 : s2SeenT_ + in0.dt;
   // Sensor 2 leads but reads nothing while sensor 1 reads, for 0.5 s: sensor 1 takes over
   if (lead_ == 2 && !bb_ && !(in0.inRange2 && in0.R2 > 0) && in0.inRange) {
@@ -625,6 +703,14 @@ Output Autopilot::stepStates(const Inputs& in) {
     }
     // the gyro input reads clockwise positive (the reference rover logs; the emulator copies it); the solve takes
     // counterclockwise
+#ifdef DIAG_SOLVE_FEED
+    if (g_diagSolveFeed) {   // diagnostic build: 40 s of recorded lawn frames, in a loop, replace the solve input
+      static int k = 0;
+      const int16_t* f = solveTimingFrames[k];
+      k = (k + 1) % SOLVE_TIMING_FRAMES;
+      wfb_->frame(f[0] * 1e-5f, f[1] * 1e-5f, f[4] > 0, f[2] * 1e-3f, f[3] * 1e-3f, f[4] * 1e-3f);
+    } else
+#endif
     wfb_->frame(in.v * in.dt, -in.yawRate * in.dt, in.inRange && in.R > 0, in.x, in.y, in.R);
     solveStep();
   }
@@ -632,8 +718,8 @@ Output Autopilot::stepStates(const Inputs& in) {
   // The wire side and the radius median: basics, and the estimator return join (it is the basics join)
   if (basics() || kWireSolve) {
     bHist_[bI_] = (in.inRange && in.R > 0) ? in.R : B_LOST_FAR;
-    bI_ = (bI_ + 1) % B_MED;
-    if (bN_ < B_MED) bN_++;
+    bI_ = (bI_ + 1) % bMedN_;
+    if (bN_ < bMedN_) bN_++;
     basicsSide(in);
   }
   if (state == FAULT) return o;
@@ -727,6 +813,13 @@ Output Autopilot::stepStates(const Inputs& in) {
       switch (sub) {
         case SUB_BSTOP:
           if (!stopped(in)) return o;
+          if (sonarTurn_) {   // the sonar (sonarCheck): the beacon turn's stop, then its turn with no spread
+            sonarTurn_ = false;
+            if (twoWay()) { reverseTurn(0.0f, false); return o; }   // Reverse bounce: the other drive direction
+            startPivot(PI_F, sonarDir_);                             // Bounce: 180 deg on the spot
+            sub = SUB_BPIVOT;
+            return o;
+          }
           if (twoWay()) {   // change the drive direction, the nose turned by the spread
             const float sp = (2 * rnd() - 1) * cfg.beaconSpreadDeg * D2R;
             decide(DEC_BEACON, sp / D2R, 0);
@@ -853,6 +946,7 @@ Output Autopilot::stepStates(const Inputs& in) {
         stopT_ = 0;
         return o;
       }
+      if (sonarCheck(in)) return o;   // the sonar: the same stop and turn (Bounce, Reverse bounce; roam drive only)
       if (!armed_) entryDone_ = entryArc_ = false;   // a new approach: its own probe on entry
       if (!armed_ || !joinArmed_) {
         if (!rd.valid) armed_ = joinArmed_ = true;
@@ -1064,7 +1158,7 @@ Output Autopilot::stepStates(const Inputs& in) {
         if (in.heading == -goal && fabsf(in.v) > STOP_SPEED) wrongCount_++;
         else wrongCount_ = 0;
         const bool beaconWrong = in.exitBeacon && exitArmed_ && !entrySeen_;
-        if (wrongCount_ >= WRONG_FRAMES || beaconWrong) {
+        if (wrongCount_ >= wrongN_ || beaconWrong) {
           decide(DEC_REVERSE, 180, 0);
           sub = SUB_REVERSE_STOP;
           stopT_ = 0;
@@ -1653,6 +1747,36 @@ bool Autopilot::entryProbe(const Inputs& in) {
   return true;
 }
 #endif
+
+// ===== Sonar (0.7.5, the Arduino Nano: sonar 1 and 2 face forward, 3 and 4 back) =====
+// Called in the straight roam drive only: state ROAM, no sub-step (no stop, turn, probe, entry arc, square-on turn or
+// bounce under way), not in the pivot rule's hold, polarity not outside, after the beacon check. Not in RETURN, JOIN,
+// FOLLOW, DEPART, DOCK or FAULT, and not in Join then leave or follow-only (they do not use the sonar). Bounce: sonar 1
+// or 2 near: stop and turn 180 deg on the spot. Reverse bounce: the sonars that face the drive direction (1 and 2
+// forward, 3 and 4 in reverse) near: stop and drive the other way. Both reuse the stop and turn of the beacon turn
+// (SUB_BSTOP, then SUB_BPIVOT or reverseTurn), with no spread. The decision is logged at the trigger, with the
+// nearest near sonar of the drive direction and its distance. No sonar near: no effect (no random number drawn).
+bool Autopilot::sonarCheck(const Inputs& in) {
+  if (!in.sonarNear || state != ROAM || cfg.followOnly || basics()) return false;
+  const uint8_t ahead = (reverseBounce() && dir_ < 0) ? 0x0C : 0x03;
+  const uint8_t m = in.sonarNear & ahead;
+  if (!m) return false;
+  int k = -1;
+  for (int i = 0; i < 4; i++)
+    if (((m >> i) & 1) && (k < 0 || in.sonarMm[i] < in.sonarMm[k])) k = i;
+  sonarTurn_ = true;
+  float turn = 0;
+  if (!twoWay()) {
+    sonarDir_ = rnd() < 0.5f ? 1 : -1;
+    turn = sonarDir_ * 180.0f;
+  }
+  decide(DEC_SONAR, turn, 0);
+  dec.sonar = (uint8_t)(k + 1);
+  dec.sonarMm = in.sonarMm[k];
+  sub = SUB_BSTOP;
+  stopT_ = 0;
+  return true;
+}
 
 // ===== Sweeping turns =====
 // A driven arc: the nose turns by angle (rad) in the sense rot (+1 counterclockwise) while the rover drives in the

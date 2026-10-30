@@ -54,6 +54,8 @@ class ApproachFit {
   void add(float x, float y, float R, float H, int8_t inside);   // inside: polarity, +1, -1, 0 not known
   bool solve(FitResult& r, int8_t polSide = 0) const;              // polSide: polarity, +1 wire left, 0 not known
   uint16_t count() const { return n_; }
+  // The least packets for a heading: 5 at 10 ms packets; the autopilot sets the same time at its update period
+  void setMinN(uint16_t n) { minN_ = n < 3 ? 3 : n; }
   float span() const { return n_ ? (float)(sMax_ - sMin_) : 0.0f; }
 
  private:
@@ -62,13 +64,14 @@ class ApproachFit {
     real W = 0, m[3] = {}, C[3][3] = {};
     uint16_t n = 0;
     void add(real w, real s, real z);
-    bool slope(real sLast, real& b, real& sb, real& zNow, real& bLin, real& F) const;
+    bool slope(real sLast, uint16_t minN, real& b, real& sb, real& zNow, real& bLin, real& F) const;
   };
   Line d_;                  // distance from the radius
   Line x_;                  // |lateral wire offset|
   real side_ = 0;           // weighted sum of the offset sign (left positive)
   real s_ = 0, sMin_ = 0, sMax_ = 0, sLast_ = 0;
   uint16_t n_ = 0;
+  uint16_t minN_ = 5;
 };
 
 }  // namespace rover

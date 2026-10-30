@@ -41,7 +41,17 @@ const char* const STAGE_NAMES[] = {"setup", "usb", "update", "packet", "radio", 
 RTC_NOINIT_ATTR LastState last_state;
 const uint32_t LAST_STATE_MAGIC = 0x4C535431;  // "LST1"
 const char* const SEC_NAMES[SEC_N] = {"usb", "update", "bridge", "monitor", "drive", "msc", "packet", "rover", "sample",
-                                      "stmcmd", "radio", "log", "bench", "debug", "mpu"};
+                                      "stmcmd", "radio", "log", "bench", "debug", "mpu", "wait",
+                                      "r_tlm", "r_cmd", "r_log", "r_wifi", "imu",
+#ifdef DIAG_CTRL_PROF
+                                      "c_pre", "c_pid", "c_ap", "c_out",
+#endif
+                                      };
+#ifdef DIAG_STEPTIME
+const char* const* cpuSectionNames(int* n) { *n = SEC_N; return SEC_NAMES; }  // src/diag_steptime.cpp
+#endif
+uint8_t pass_kind = 0;
+uint64_t mark_cycles = 0;
 bool safe_mode = false;
 // Void Setup --------------------------------------------------------------------------------------------------------------
 #ifdef BOOT_TRACE

@@ -54,7 +54,7 @@ TLM(wire_inside,       I8,  1,   "",    0, 10HZ, "Polarity detection", "Inside t
 TLM(wire_heading,      I8,  1,   "",    0, 10HZ, "Polarity detection", "Heading round the loop (+1 clockwise, -1 counterclockwise, 0 not known)")
 // 0.6.28: the rover's last decision (lib/rover_autopilot, Decision), set in src/main.cpp; a new decision: a new seq
 TLM(rover_dec_seq,     U16, 1,   "",    0, 10HZ, "Rover decisions", "Decision number (mod 65536): changes at each decision")
-TLM(rover_dec_code,    U8,  1,   "",    0, 10HZ, "Rover decisions", "Decision: 1 bounce, 3 join, 4 follow, 5 reverse, 6 beacon, 7 dock, 8 depart, 9 return, 10 fault, 11 Tx off, 12 Tx on, 13 start, 14 turn back, 15 probe, 16 follow time end")
+TLM(rover_dec_code,    U8,  1,   "",    0, 10HZ, "Rover decisions", "Decision: 1 bounce, 3 join, 4 follow, 5 reverse, 6 beacon, 7 dock, 8 depart, 9 return, 10 fault, 11 Tx off, 12 Tx on, 13 start, 14 turn back, 15 probe, 16 follow time end, 17 square-on, 18 sonar")
 TLM(rover_dec_side,    I8,  1,   "",    0, 10HZ, "Rover decisions", "Wire side used (+1 left, -1 right)")
 TLM(rover_dec_psi_deg, I16, 0.1, "deg", 1, 10HZ, "Rover decisions", "Fitted wire heading at the decision (0: no fit)")
 TLM(rover_dec_turn_deg, I16, 0.1, "deg", 1, 10HZ, "Rover decisions", "Planned turn (+ left)")
@@ -69,3 +69,9 @@ TLM(wire_inside_pct,   U8,  1,   "%",   0, 10HZ, "Polarity detection", "Inside f
 TLM(rover_dec_solve_deg, I16, 0.1, "deg", 1, 10HZ, "Rover decisions", "Wire solve at the decision: the wire direction in the rover frame (+ counterclockwise from the heading; no value: no solve answer)")
 TLM(rover_dec_solve_mm,  U16, 1,   "mm",  0, 10HZ, "Rover decisions", "Wire solve at the decision: horizontal distance from the solve's sensor to the wire (no value: no solve answer)")
 TLM(rover_dec_solve_sensor, U8, 1, "",  0, 10HZ, "Rover decisions", "Wire solve at the decision: the sensor it took, 1 or 2 (Reverse bounce: sensor 2 leads in reverse; no value: no solve answer)")
+// 0.7.5: the four sonar distances of the last complete Nano record (src/main.cpp readSonar(), sonarRecordDone()), raw, in the
+// Nano's unit (mm); 0 = no echo. No value: no record since the start. Sonar 1 and 2 face forward, 3 and 4 back.
+TLM(sonar1_mm,         U16, 1,   "mm",  0, LOG,  "Sonar", "Sonar 1 distance, front (last Nano record; 0: no echo; no value: no record yet)")
+TLM(sonar2_mm,         U16, 1,   "mm",  0, LOG,  "Sonar", "Sonar 2 distance, front (last Nano record; 0: no echo; no value: no record yet)")
+TLM(sonar3_mm,         U16, 1,   "mm",  0, LOG,  "Sonar", "Sonar 3 distance, back (last Nano record; 0: no echo; no value: no record yet)")
+TLM(sonar4_mm,         U16, 1,   "mm",  0, LOG,  "Sonar", "Sonar 4 distance, back (last Nano record; 0: no echo; no value: no record yet)")

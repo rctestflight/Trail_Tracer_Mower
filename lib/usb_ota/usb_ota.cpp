@@ -1,7 +1,6 @@
 #include "usb_ota.h"
 
 #include <Preferences.h>
-#include <Update.h>
 
 #include "esp_flash.h"
 #include "esp_ota_ops.h"
@@ -19,6 +18,14 @@ namespace usb_ota {
 namespace {
 
 Hooks h;
+// The ESP32 image writer: esp_ota_* direct, no heap buffer. The Arduino Update writer took a 4 KB heap block at its
+// start; during a page upload the Wi-Fi receive buffers split the heap and that block failed ("begin No Error").
+esp_ota_handle_t ota_h = 0;
+const esp_partition_t* ota_part = nullptr;
+void image_abort() {
+  if (ota_h) esp_ota_abort(ota_h);
+  ota_h = 0;
+}
 bool active = false, want_confirm = false, need_crc = false;  // need_crc: "begin ... crc", every line has a CRC-32
 uint32_t size_ = 0, written = 0;
 uint8_t sha_expected[32];
@@ -45,10 +52,10 @@ uint32_t part_written = 0, part_erased = 0;
 uint16_t dl_port = 80;
 char dl_host[24], dl_path[128], dl_err[96];
 unsigned dl_stack_free = 0;        // least free stack of the download task, bytes
-constexpr size_t DL_BUF = 2048;    // receive buffer (Update keeps its own 4 KB flash buffer); 2 KB: heap for Wi-Fi
+constexpr size_t DL_BUF = 2048;    // receive buffer; 2 KB: heap for Wi-Fi
 size_t dl_buf_len = DL_BUF;         // the buffer in use: 2048 B, or 1024 B when the heap has no 2 KB block
 constexpr int DL_RCVBUF = 2 * 1436; // the socket keeps at most 2 TCP segments waiting (Wi-Fi receive buffers)
-uint32_t dl_heap[5];                // free heap: command, after Update.begin, after the task start, connected, buffer
+uint32_t dl_heap[5];                // free heap: command, after the writer start, after the task start, connected, buffer
 constexpr uint32_t DL_STALL_MS = 30000;
 // An upload fed by the caller (push_begin): the same writers; dl_got counts the bytes, dl_size 0 = not known yet.
 bool dl_push = false;              // the download state belongs to an upload, not to "ota url" or fetch_start
@@ -105,11 +112,13 @@ bool start_image(unsigned long size, char* err, size_t cap, const char** slot) {
     snprintf(err, cap, "size %lu over slot %lu", size, next ? (unsigned long)next->size : 0UL);
     return false;
   }
-  // An earlier writer that stopped part way (a page upload cut off) can leave the Update writer open with active
-  // false: Update.begin then refuses with no error until a restart. Close it first.
+  // An earlier writer that stopped part way (a page upload cut off) can leave the writer open: close it first.
   if (held) { snprintf(err, cap, "an ESP32 image waits for its restart"); return false; }
-  if (active || Update.isRunning()) Update.abort();
-  if (!Update.begin(size, U_FLASH)) { snprintf(err, cap, "begin %s", Update.errorString()); active = false; return false; }
+  image_abort();
+  // Sequential writes: each 4 KB sector erased just before its first write (no whole-slot erase at the start)
+  const esp_err_t e = esp_ota_begin(next, OTA_WITH_SEQUENTIAL_WRITES, &ota_h);
+  if (e != ESP_OK) { ota_h = 0; snprintf(err, cap, "begin %s", esp_err_to_name(e)); active = false; return false; }
+  ota_part = next;
   mbedtls_sha256_init(&sha);
   mbedtls_sha256_starts_ret(&sha, 0);
   active = true; size_ = size; written = 0;
@@ -120,16 +129,18 @@ bool start_image(unsigned long size, char* err, size_t cap, const char** slot) {
 bool write_chunk(const uint8_t* buf, size_t n, char* err, size_t cap) {
   if (written == 0) {
     const char* e = image_error(buf, n);
-    if (e) { Update.abort(); active = false; snprintf(err, cap, "image: %s", e); return false; }
+    if (e) { image_abort(); active = false; snprintf(err, cap, "image: %s", e); return false; }
   }
-  if (Update.write((uint8_t*)buf, n) != n) { snprintf(err, cap, "write %s", Update.errorString()); return false; }
+  if (written + n > size_) { snprintf(err, cap, "write past the size %lu", (unsigned long)size_); return false; }
+  const esp_err_t e = esp_ota_write(ota_h, buf, n);
+  if (e != ESP_OK) { snprintf(err, cap, "write %s", esp_err_to_name(e)); return false; }
   mbedtls_sha256_update_ret(&sha, buf, n);
   written += n;
   return true;
 }
 
-// Size and SHA-256, then the slot select (Update.end checks the image again); the confirm flag for the new image.
-// at_received: an upload of unknown size; Update.begin had the slot size, the image ends at the bytes received.
+// Size and SHA-256, then the image check (esp_ota_end) and the slot select; the confirm flag for the new image.
+// at_received: an upload of unknown size; the writer had the slot size, the image ends at the bytes received.
 bool finish_image(char* err, size_t cap, bool at_received = false) {
   if (!active || written != size_) {
     snprintf(err, cap, "end at %lu of %lu", (unsigned long)written, (unsigned long)size_);
@@ -138,8 +149,11 @@ bool finish_image(char* err, size_t cap, bool at_received = false) {
   uint8_t got[32];
   mbedtls_sha256_finish_ret(&sha, got);
   mbedtls_sha256_free(&sha);
-  if (sha_given && memcmp(got, sha_expected, 32)) { Update.abort(); active = false; snprintf(err, cap, "sha256 mismatch"); return false; }
-  if (!Update.end(at_received)) { active = false; snprintf(err, cap, "end %s", Update.errorString()); return false; }
+  if (sha_given && memcmp(got, sha_expected, 32)) { image_abort(); active = false; snprintf(err, cap, "sha256 mismatch"); return false; }
+  esp_err_t e = esp_ota_end(ota_h);  // frees the handle in every case
+  ota_h = 0;
+  if (e == ESP_OK) e = esp_ota_set_boot_partition(ota_part);
+  if (e != ESP_OK) { active = false; snprintf(err, cap, "end %s", esp_err_to_name(e)); return false; }
   active = false;
   set_confirm_flag(want_confirm);
   return true;
@@ -319,7 +333,7 @@ void dl_task(void*) {
   const char* e = dl_run(err, sizeof(err));
   dl_ms = millis() - dl_t0;
   if (e) {
-    if (dl_kind == K_ESP && active) Update.abort();  // the boot slot stays: only Update.end selects the new slot
+    if (dl_kind == K_ESP && active) image_abort();  // the boot slot stays: only finish_image selects the new slot
     if (dl_kind == K_ESP) active = false;
     snprintf(dl_err, sizeof(dl_err), "%s", e);
   }
@@ -394,7 +408,7 @@ __attribute__((noinline)) void url_command(const char* arg) {
   sha_given = true;
   dl_size = size;
   if (!dl_launch()) {
-    Update.abort();
+    image_abort();
     active = false;
     o.println("OTA error no memory for the download task");
     return;
@@ -504,7 +518,7 @@ FetchResult fetch_poll(uint32_t* got, const char** reason) {
 
 namespace {
 void push_fail(const char* why) {
-  if (dl_kind == K_ESP && active) Update.abort();  // the boot slot stays: only Update.end selects the new slot
+  if (dl_kind == K_ESP && active) image_abort();  // the boot slot stays: only finish_image selects the new slot
   if (dl_kind == K_ESP) active = false;
   if (why != dl_err) snprintf(dl_err, sizeof(dl_err), "%s", why);
   dl_ms = millis() - dl_t0;
@@ -536,7 +550,7 @@ bool push_begin(const esp_partition_t* part, unsigned long size, const char* sha
   } else {
     const esp_partition_t* next = esp_ota_get_next_update_partition(nullptr);
     const char* slot = "";
-    // Size not known: the whole slot; Update.write refuses bytes past it, and push_end ends at the bytes received.
+    // Size not known: the whole slot; write_chunk refuses bytes past it, and push_end ends at the bytes received.
     if (!start_image(size ? size : (next ? next->size : 0), err, cap, &slot)) return false;
     want_confirm = false;
     need_crc = false;
@@ -679,7 +693,7 @@ void command(const char* arg) {
   }
   if (!strcmp(arg, "abort")) {
     if (busy()) { dl_abort = true; o.println("OTA abort: the download stops"); return; }  // the task aborts the writer
-    if (active) Update.abort();
+    if (active) image_abort();
     active = false;
     o.println("OTA aborted");
     return;

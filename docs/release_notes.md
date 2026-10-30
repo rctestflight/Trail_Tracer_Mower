@@ -3,6 +3,102 @@
 Newest first. Each release gives what changed for the user, the settings that the user must set or check, and what
 is not tested. The full change history for developers is in `include/firmware_version.h`.
 
+## 0.7.5 (draft)
+
+This release follows 0.7.4. It adds CPU savings, the sonar stream of an Arduino Nano (commit 89b5e40) and the sonar
+behaviour. Without a sonar, the rover drives as in 0.7.4.
+
+### Changes
+
+- **Sonar behaviour.** The Rx reads the four sonar distances that the Arduino Nano sends on the former PWM input 4
+  (UART0 RX, GPIO33, 115200 baud, records `a,b,c,d`). Sonar 1 and 2 face forward, sonar 3 and 4 face back.
+  - Bounce: when sonar 1 or 2 reads under the Sonar trigger distance for the Sonar readings in a row, the rover stops
+    and turns 180 deg on the spot, then roams on.
+  - Reverse bounce: when sonar 1 or 2 reads near while the rover drives forward, or sonar 3 or 4 while it drives
+    backward, the rover stops and drives the other way.
+  - The sonar acts only in the straight roam drive. It does not act in a turn, a stop, a probe, on the wire (join,
+    follow, depart), in a return, at the dock, outside the loop, or in Join then leave and follow only.
+  - A reading of 0 (no echo) never counts as near. If no complete record arrives for 0.5 s, the rover ignores the
+    sonar until records arrive again.
+- **Log.** Each sonar trigger is an event (event 24 "sonar": the sonar number, its distance and the action), and so
+  is each stop and return of the Nano stream. The log samples hold the four sonar distances (`sonar1_mm` to
+  `sonar4_mm`). The decision list shows each trigger as decision 18 "sonar".
+- **Quiet USB console.** The USB coil print is off. The once-a-second HB line prints only when the new setting USB
+  heartbeat is on, or after the USB command `verbose on`. The `Sonar: a,b,c,d` print stays.
+- **CPU savings:** faster maths, the flash cache, the faster wire solve, the control loop above the solve, the IMU on
+  the non-blocking I2C bus, and every count in packets kept in time at any update period. The rover also works at the
+  update period of 20 ms (50 updates a second).
+- **Wire solve timing.** The wire solve pairs each Rx reading with the rover position of half an update period plus
+  1.7 ms before (1 update at 10 ms and at 20 ms). Before, it took the position 10 updates
+  before, from an Rx filter that Rx STM32 2.2.2 no longer has. PC emulator, Bounce: wire angle error p90 7.5 deg
+  against 8.7 deg, wire distance error p90 0.034 m against 0.087 m (20 ms).
+- **Settings save refused during a run.** A save (command or the 6 s button press) during a run is refused with the
+  reason; the setting works at once and stays until a restart. Stop the rover, then save.
+- New LED patterns, closer to the original Trail Tracer. The green LED no longer blinks for a Monitor Rx.
+
+### Settings to set or check
+
+- **Sonar trigger distance** (`rover_sonar_mm`, group Rover: Bounce and Reverse bounce): default 400 mm. 0 = sonar
+  off. The unit is the Nano's; the firmware assumes mm.
+- **Sonar readings in a row** (`rover_sonar_count`): default 3.
+- **USB heartbeat** (`usb_heartbeat`, group Radio and log): default off. Turn it on for the USB tools that read the
+  HB line (`tools/ota_upload.py`).
+- **Current direction of Tx channel 1** (`tx_dir_ch1`): the default is now 2 (counterclockwise). A value saved on the
+  Rx stays; an Rx with no saved value (new or erased) takes 2. Check it: a wrong value makes the rover fault at the
+  start.
+- **Update period 20 ms.** Stop the rover (no run: a save during a run is refused). Then over USB, or as a command
+  from the telemetry program:
+
+  ```
+  set dsp_frame_period_us 20000
+  save
+  ```
+
+### Not tested
+
+- On a real rover or with a real Nano. The record rate and the unit of the Nano are not known: the 0.5 s stream
+  limit assumes 10 to 20 records a second.
+- The sonar behaviour is tested in the PC emulator only, at the 20 ms update period, 600 s each in Bounce and
+  Reverse bounce, with sonar records injected at 20 a second.
+
+## 0.7.4
+
+This release follows 0.7.3. It fixes the update refusal. The rover drives as in 0.7.3.
+
+### Changes
+
+- **Updates no longer fail with "ESP32 firmware refused: begin No Error".** The Rx needed one large block of memory
+  at the start of each ESP32 install. During a Wi-Fi upload that block was often not free, most of all while a run
+  was active, and the update page refused the install. The Rx now writes the image with no large block. Bench result:
+  20 of 20 installs with the run active (10 ESP32 image only, 10 full package).
+- The firmware is 38 KB smaller. The build leaves out the tables for C++ exceptions, a language feature that the
+  rover code does not use. No change in behaviour. Bench test: a forced crash on an Rx board still left its crash
+  record after the restart, with the full chain of calls back to the crash command.
+
+### Settings to set or check
+
+- None.
+
+### Not tested
+
+- On a real rover. Tested on one Rx board on Wi-Fi, without motors.
+- Known issue: once, 2 min after an update, the test Rx board dropped off Wi-Fi. Three repeats, each with 10 min of
+  watch, gave no drop. The cause is not known. If the page is lost after the update, power-cycle the Rx.
+
+### Update
+
+- The fix works from the next update onward. The install of 0.7.4 itself still runs the old install code of the
+  version on the Rx, so follow the steps below for this one update.
+
+1. Park the rover with the wheels still. On the settings page, press **Restart**. Wait until the page shows
+   "Restarted." (about 30 s).
+2. If the page shows **Stop the vehicle**, press it.
+3. Wait 1 min. Do not start the rover.
+4. On the update page, install the 0.7.4 package. The Rx restarts by itself in about 1 min.
+5. If the update page refuses the install, wait 20 s and install again.
+
+- Bench result for these steps: 25 of 25 installs passed at the first try on one Rx board (20 from 0.7.3, 5 from 0.7.1).
+
 ## 0.7.3
 
 This release follows 0.7.2. It adds one change only.

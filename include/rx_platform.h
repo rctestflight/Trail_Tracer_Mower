@@ -176,6 +176,12 @@ enum ButtonAction { BTN_NONE = 0, BTN_AUTO_ON = 1, BTN_CRUISE = 2, BTN_CENTRE_CA
 void buttonEvent(ButtonAction action, uint32_t held_ms, const char* text);
 
 /**
+ * @brief 0.7.5: one log event for the sonar (event 24, rec::EV_SONAR): a = the sonar number 1 to 4 of a trigger (b = its
+ * distance, text = the action), or a = 0 for the Nano stream (b = 1 records arrive, 0 no record: the sonar is ignored).
+ */
+void sonarEvent(int32_t a, int32_t b, const char* text);
+
+/**
  * @brief USB serial commands, USB link events and the heartbeat line each second.
  */
 void benchService();
@@ -262,6 +268,11 @@ void espPacketFifo_addCmdFloat(uint32_t cid, float cmd);
  * @return the frame period in seconds
  */
 double stmFramePeriodS();
+/**
+ * @brief The period factor: the update period in effect / 10 ms (lib/frame_pid/frame_period.h), for the constants
+ * that count packets. 1 at 10 ms, 2 at 20 ms; computed again when stmFramePeriodS() changes.
+ */
+double periodRatio();
 
 // ===== Servo outputs =====
 // PWM OUT configuration
@@ -361,7 +372,12 @@ void odrive_requestEncoderEstimates();
 // ===== Gyro (MPU6050) =====
 
 /** @brief The gyro and accelerometer: mpu.getGyroZ() is the yaw rate in deg/s. */
+#ifdef IMU_I2C_NB
+#include "imu_nb.h"
+extern ImuNb mpu;  // test build: I2C transfers that never hold the loop (lib/i2c_nb)
+#else
 extern MPU6050 mpu;
+#endif
 /** @brief true once the gyro calibration is done and the yaw rate is a number. */
 extern bool gyro_ready;
 extern int16_t imu_roll16;   // the accelerometer roll, 65 536 = one turn; 0 with no IMU
@@ -375,6 +391,15 @@ extern bool imu_halt;
  *        "MPU6050 calibration complete".
  */
 void serviceMpu();
+/** @brief Test build IMU_I2C_NB: takes the newest finished IMU read, before a use of the values. Empty otherwise. */
+void imuTake(uint8_t site = 3);  // site: 0 autopilot step, 1 motor output step, 2 IMU service (test build counts)
+#ifdef IMU_SAVE
+int16_t imuRoll16();       // the roll from the newest sample, computed once per sample when asked
+double gyroHeadingDeg();   // the heading from the whole-number integral
+#define IMU_ROLL16() imuRoll16()
+#else
+#define IMU_ROLL16() imu_roll16
+#endif
 
 // ===== USB text =====
 
@@ -391,7 +416,20 @@ extern LastState last_state;
 inline void stage(uint8_t st) { last_state.stage = st; last_state.uptime_ms = millis(); }
 // Loop parts for the CPU profiler (cpuprof::section; bench "cpu"). A part runs until the next mark.
 enum : uint8_t { SEC_USB = 0, SEC_UPDATE, SEC_BRIDGE, SEC_MONITOR, SEC_DRIVE, SEC_MSC, SEC_PACKET, SEC_ROVER, SEC_SAMPLE,
-                 SEC_STMCMD, SEC_RADIO, SEC_LOG, SEC_BENCH, SEC_DEBUG, SEC_MPU, SEC_N };
+                 SEC_STMCMD, SEC_RADIO, SEC_LOG, SEC_BENCH, SEC_DEBUG, SEC_MPU, SEC_WAIT,
+                 SEC_R_TLM, SEC_R_CMD, SEC_R_LOG, SEC_R_WIFI, SEC_IMU,  // imu: the IMU sample take and read start (test build IMU_I2C_NB)
+#ifdef DIAG_CTRL_PROF
+                 SEC_C_PRE, SEC_C_PID, SEC_C_AP, SEC_C_OUT,  // diag: parts of the control step
+#endif
+                 SEC_N };  // diag_cpu: the end-of-pass wait; radio sub-parts
+// Diagnostic build (diag_cpu): the kind of the loop pass that runs now (cpuprof::passEnd, rtprof::passKind); the CPU cycles
+// inside mark() (the cost of the part marks, bench "cpu").
+extern uint8_t pass_kind;
+extern uint64_t mark_cycles;
 // One mark per loop part: the CPU profiler (shares) and the real-time path timing (wall time per part and pass).
 /** @brief Starts a loop part for the CPU profiler (bench command "cpu"): the time until the next mark counts to it. */
-inline void mark(uint8_t s) { cpuprof::section(s); rtprof::part(s); last_state.section = s; }
+inline void mark(uint8_t s) {
+  const uint32_t c0 = ESP.getCycleCount();
+  cpuprof::section(s); rtprof::part(s); last_state.section = s;
+  mark_cycles += ESP.getCycleCount() - c0;
+}

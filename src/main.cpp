@@ -14,6 +14,7 @@
 #include <math.h>
 #include <PID_v1.h>
 #include "frame_pid.h"     // the steering PIDs stepped once per STM32 frame (lib/frame_pid)
+#include "frame_period.h"  // packet counts, steps and filter weights kept in time at any update period (lib/frame_pid)
 #include "rover_autopilot.h"
 #include "rctf_wfrx_status_bits.h"
 #include "rctf_wfrx_exp32.h"
@@ -26,6 +27,7 @@ static const char* TAG = "wfrx";
 // Units are passed through exactly as sent by the Nano.
 static uint32_t sonar_ranges[4] = {};
 static bool sonar_pending = false;
+static void sonarRecordDone();  // 0.7.5: each complete record: the near counts and the log values (below)
 
 static void readSonar() {
   static uint32_t fields[4] = {};
@@ -40,6 +42,7 @@ static void readSonar() {
       if (!bad && field == 3 && digits) {
         for (unsigned i = 0; i < 4; ++i) sonar_ranges[i] = fields[i];
         sonar_pending = true;
+        sonarRecordDone();
       }
       for (unsigned i = 0; i < 4; ++i) fields[i] = 0;
       field = 0;
@@ -60,6 +63,55 @@ static void readSonar() {
       }
     }
   }
+}
+
+// ===== Sonar behaviour (0.7.5; settings rover_sonar_mm, rover_sonar_count; lib/rover_autopilot sonarCheck) =====
+// Per sonar: the number of complete records in a row with a reading under the sonar trigger distance. A reading of 0
+// (no echo) or at or over the distance sets the count to 0. The autopilot gets bit i of rover_sonar_near when sonar i+1
+// has the set count, and only while the stream is fresh. No Nano (every bench board): no record, the mask stays 0, no
+// event, and the autopilot runs as before.
+// SONAR_STALE_MS: no complete record for this long: the rover ignores the sonar (the counts start again from 0) and
+// logs one event; the next record logs one event again. 500 ms: the Nano record rate is not documented (commit
+// 89b5e40 gives none; the planning estimate is 10 to 20 records a second), so 500 ms is 5 to 10 missed records, longer
+// than any gap of a running Nano, and at the roam speed (0.5 m/s) 0.25 m of drive, under the 0.4 m trigger distance.
+static const uint32_t SONAR_STALE_MS = 500;
+static uint8_t sonar_count[4] = {};
+static uint32_t sonar_record_ms = 0;
+static bool sonar_have = false;    // a record came since the start
+static bool sonar_stale = true;    // no fresh record: the sonar is ignored
+uint8_t rover_sonar_near = 0;      // bit i: sonar i+1 near for the set count (roverStep: rover::Inputs::sonarNear)
+
+static void sonarRecordDone() {
+  const uint32_t trig = g_deviceConfig.rover_sonar_mm > 0 ? (uint32_t)g_deviceConfig.rover_sonar_mm : 0;
+  for (unsigned i = 0; i < 4; ++i) {
+    const uint32_t v = sonar_ranges[i];
+    sonar_count[i] = (v != 0 && v < trig) ? (uint8_t)(sonar_count[i] < 255 ? sonar_count[i] + 1 : 255) : 0;
+  }
+  sonar_record_ms = millis();
+  sonar_have = true;
+  tlm_set(TLM_sonar1_mm, (float)(sonar_ranges[0] < 65534u ? sonar_ranges[0] : 65534u));
+  tlm_set(TLM_sonar2_mm, (float)(sonar_ranges[1] < 65534u ? sonar_ranges[1] : 65534u));
+  tlm_set(TLM_sonar3_mm, (float)(sonar_ranges[2] < 65534u ? sonar_ranges[2] : 65534u));
+  tlm_set(TLM_sonar4_mm, (float)(sonar_ranges[3] < 65534u ? sonar_ranges[3] : 65534u));
+}
+
+// Each loop pass, after readSonar(): the stale rule, its events, and the near mask.
+static void sonarService() {
+  if (!sonar_have) return;
+  const bool stale = (uint32_t)(millis() - sonar_record_ms) > SONAR_STALE_MS;
+  if (stale != sonar_stale) {
+    sonar_stale = stale;
+    if (stale) for (unsigned i = 0; i < 4; ++i) sonar_count[i] = 0;
+    char t[64];
+    if (stale) snprintf(t, sizeof t, "Nano stream: no record for %lu ms, sonar ignored", (unsigned long)SONAR_STALE_MS);
+    else snprintf(t, sizeof t, "Nano stream: records arrive");
+    sonarEvent(0, stale ? 0 : 1, t);
+  }
+  uint8_t near = 0;
+  const uint8_t need = g_deviceConfig.rover_sonar_count ? g_deviceConfig.rover_sonar_count : 1;
+  if (!sonar_stale && g_deviceConfig.rover_sonar_mm > 0)
+    for (unsigned i = 0; i < 4; ++i) if (sonar_count[i] >= need) near |= (uint8_t)(1u << i);
+  rover_sonar_near = near;
 }
 
 // ===== Rover autopilot values =====
@@ -132,6 +184,19 @@ bool odrive_rc_active = false;
 #define ODRIVE_RC_UPDATE_MS 12  // Example control period.
 #define ODRIVE_RC_SIGNAL_TIMEOUT_MS 250
 uint32_t odrive_rc_update_millis = 0;
+// The gyro rate PID: its last step (micros), and a step of the 12 ms resend since the last packet step. The packet step
+// after a resend step takes the time since that step, not the update period (at 20 ms the resend runs between packets).
+uint32_t rate_pid_us = 0;
+bool rate_resend_stepped = false;
+
+// The period factor (lib/frame_pid/frame_period.h) of the update period in effect: computed again when
+// stmFramePeriodS() changes (the Rx answer to CID 18; 10 ms until it answers).
+double periodRatio() {
+  static double period_s = -1.0, r = 1.0;
+  const double p = stmFramePeriodS();
+  if (p != period_s) { period_s = p; r = fperiod::ratio(p); }
+  return r;
+}
 #define ODRIVE_OUTPUT_TIMEOUT_MS 250
 #define ODRIVE_DRIVE_SCALE_RPS 1.5f // Full throttle [rev/s].
 #define ODRIVE_TURN_SCALE_RPS  1.5f // Full steering [rev/s]; combined maximum is 2.3 rev/s.
@@ -482,6 +547,7 @@ void odrive_setDriveOutput(double throttle_us, double steering_us, bool enabled)
 // frame_now: called with a new STM32 frame (the CAN commands go out with every frame). loop() also calls it
 // every pass: with no frame for ODRIVE_RC_UPDATE_MS it sends the last commands again (ODrive watchdog floor).
 void odrive_outputUpdate(bool frame_now) {
+  imuTake(1);  // the newest IMU sample (test build IMU_I2C_NB; empty otherwise)
   const uint32_t now = millis();
   const bool motor_idle_requested = digitalRead(MOTOR_ARM_SWITCH_PIN) == LOW;
   const bool arm_switch_high = !motor_idle_requested;
@@ -498,7 +564,15 @@ void odrive_outputUpdate(bool frame_now) {
   odrive_arm_switch_was_high = arm_switch_high;
   if (motor_idle_requested && odrive_rc_active) odrive_stopRc();
   if (!frame_now && now - odrive_rc_update_millis < ODRIVE_RC_UPDATE_MS) return;
-  const double dt_s = frame_now ? stmFramePeriodS() : constrain((now - odrive_rc_update_millis) / 1000.0, 0.001, 0.1);
+  // dt of the gyro rate PID step: the true time since its last step. A packet step with no resend step since the last
+  // packet step, or any packet step at period factor 1: the update period (as before; at 10 ms a late packet can let
+  // the resend run, and the packet step after it keeps the old dt). The resend at period factor 1 (it runs only when
+  // packets stop): the time since the last pass, in ms (as before); else in us.
+  const uint32_t now_us = micros();
+  const double dt_since = constrain((now_us - rate_pid_us) * 1e-6, 0.001, 0.1);
+  const double dt_s = frame_now ? ((rate_resend_stepped && periodRatio() != 1.0) ? dt_since : stmFramePeriodS())
+                                : (periodRatio() == 1.0 ? constrain((now - odrive_rc_update_millis) / 1000.0, 0.001, 0.1) : dt_since);
+  if (frame_now) rate_resend_stepped = false;
   odrive_rc_update_millis = now;
   const bool rc_ready = !motor_idle_requested && can_init_ok && odrive_output_enabled &&
     now - odrive_output_millis <= ODRIVE_OUTPUT_TIMEOUT_MS &&
@@ -516,6 +590,8 @@ void odrive_outputUpdate(bool frame_now) {
     steeringRatePID.SetMode(AUTOMATIC);
     framePidCompute(steeringRatePID, steeringRateFramePid, steering_rate_target_dps, steering_rate_input_dps,
                     &steering_rate_output, -1.0, 1.0, dt_s);  // was steeringRatePID.Compute()
+    rate_pid_us = now_us;
+    if (!frame_now) rate_resend_stepped = true;
     // Keep the existing motor-mixer polarity; PID direction is configured separately.
     odrive_steer_command = -(float)steering_rate_output;
     // Skid steering: opposite motor mounting directions on the two sides.
@@ -586,6 +662,10 @@ void odrive_updateBuzzer() {
 
 // ===== setup(): runs once at power-on =====
 void setup() {
+#ifdef DIAG_QIO_BOOT
+  extern void qioBoot();
+  qioBoot();  // diag_s2q: the flash cache in QIO mode from here (src/diag_qio.cpp)
+#endif
   // Board start: the Rx STM32 serial line, the crash counter, the settings from the USB drive.
   // A board started as the PC monitor does only that job: no vehicle code starts.
   if (platformBegin()) return;
@@ -595,6 +675,10 @@ void setup() {
 
   // Board: radio mode, web pages, telemetry log, USB serial, updates, Rx STM32 serial port
   platformStart();
+#ifdef DIAG_QIO_BOOT
+  extern void qioReport();
+  qioReport();  // the QIO boot result on USB (release: a log event)
+#endif
 
   // Configure pins
   pinMode(nLED, OUTPUT);
@@ -671,12 +755,17 @@ void setup() {
 }
 
 // ===== loop(): runs again and again =====
+#ifdef LOOP_NO_RETURN
+static void loopPass() {
+#else
 void loop() {
+#endif
   // Board first: watchdog, USB, updates. During an update, the PC monitor job or a bench pass-through, the board
   // uses the whole pass and the vehicle code waits.
   if (platformLoopStart()) return;
 
   readSonar();
+  sonarService();
 
   // Button, every 10 ms
   static uint32_t last_button_update = 0;
@@ -701,6 +790,9 @@ void loop() {
 
   // A new frame from the Rx STM32: the control step
   if (rxFrameReady()) {
+#ifdef DIAG_CTRL_PROF
+    mark(SEC_C_PRE);  // diag: the control step parts
+#endif
     // update the double X position from the float in the latest STM32 packet
     live_position = stmPacket.items.s1_x;
     if (rover_active) live_position *= roverFollowSign();  // the Rx quadrant state, learned from steady follow
@@ -715,8 +807,10 @@ void loop() {
     // Filter and condition BTx signals
     BTx1Signal = constrain(stmPacket.items.s1_btx_radius[0], 10, (BTxThreshold + 2));
     BTx2Signal = constrain(stmPacket.items.s1_btx_radius[1], 10, (BTxThreshold + 2));
-    BTx1Signal = BTxFilterAlpha * BTx1Signal + (1 - BTxFilterAlpha) * BTx1LastDistance;
-    BTx2Signal = BTxFilterAlpha * BTx2Signal + (1 - BTxFilterAlpha) * BTx2LastDistance;
+    // alpha per packet at 10 ms; the same time constant at any update period (frame_period.h)
+    const float btx_a = fperiod::weight(BTxFilterAlpha, periodRatio());
+    BTx1Signal = btx_a * BTx1Signal + (1 - btx_a) * BTx1LastDistance;
+    BTx2Signal = btx_a * BTx2Signal + (1 - btx_a) * BTx2LastDistance;
     BTx1LastDistance = BTx1Signal;
     BTx2LastDistance = BTx2Signal;
 
@@ -732,10 +826,11 @@ void loop() {
     if(sine_wave_enabled){
       bool sine_wave_allowed = (loop_now_ms >= sine_swerve_disabled_until_ms) && !sine_wave_force_disabled;
       double blend_target = sine_wave_allowed ? 1.0 : 0.0;
+      const double snap = fperiod::step(SineSwerveSnapRate, periodRatio());  // per packet at 10 ms
       if(sine_wave_blend < blend_target){
-        sine_wave_blend = fmin(blend_target, sine_wave_blend + SineSwerveSnapRate);
+        sine_wave_blend = fmin(blend_target, sine_wave_blend + snap);
       }else if(sine_wave_blend > blend_target){
-        sine_wave_blend = fmax(blend_target, sine_wave_blend - SineSwerveSnapRate);
+        sine_wave_blend = fmax(blend_target, sine_wave_blend - snap);
       }
 
       double time_sec = loop_now_ms / 1000.0;
@@ -745,6 +840,9 @@ void loop() {
       sine_wave_blend = 0.0;
     }
 
+#ifdef DIAG_CTRL_PROF
+    mark(SEC_C_PID);
+#endif
     // Steering control
     low_pass_compute = framePidCompute(steeringPID, steeringFramePid, target_x_pos, live_position, &pid_output,
         PWM_OUT_1_MIN - PWM_OUT_1_DEFAULT, PWM_OUT_1_MAX - PWM_OUT_1_DEFAULT, stmFramePeriodS());  // was steeringPID.Compute()
@@ -817,7 +915,7 @@ void loop() {
 
       if(creep_active){
         double target_throttle = CREEP_THROTTLE;
-        double step = fabs(BTxAccelRate);
+        double step = fperiod::step(fabs(BTxAccelRate), periodRatio());  // us per packet at 10 ms
         creep_throttle = (step <= 0.0) ? target_throttle
           : (creep_throttle < target_throttle) ? fmin(creep_throttle + step, target_throttle)
           : (creep_throttle > target_throttle) ? fmax(creep_throttle - step, target_throttle)
@@ -825,7 +923,7 @@ void loop() {
         throttle = (int)lround(creep_throttle);
       }else if(creep_returning){
         double target_throttle = creep_return_base;
-        double step = fabs(BTxAccelRate);
+        double step = fperiod::step(fabs(BTxAccelRate), periodRatio());  // us per packet at 10 ms
         creep_throttle = (step <= 0.0) ? target_throttle
           : (creep_throttle < target_throttle) ? fmin(creep_throttle + step, target_throttle)
           : (creep_throttle > target_throttle) ? fmax(creep_throttle - step, target_throttle)
@@ -900,7 +998,11 @@ void loop() {
 
     mark(SEC_ROVER);  // CPU profiler: the autopilot part
     roverStep();  // Mode 2 with rover_enabled: the autopilot replaces throttle and steering_output
+#ifdef DIAG_CTRL_PROF
+    mark(SEC_C_OUT);
+#else
     mark(SEC_PACKET);  // CPU profiler: back to the frame part
+#endif
 
 
      // Check for faults before commanding skid steering and remaining servo outputs.
@@ -929,6 +1031,9 @@ void loop() {
      }
     rtprof::commandSet();  // real-time path timing (lib/rt_prof) (the drive command now comes from this frame)
     odrive_outputUpdate(true);  // the CAN commands of this frame, now (loop() keeps the 12 ms floor)
+#ifdef DIAG_CTRL_PROF
+    mark(SEC_PACKET);
+#endif
 
     // LED blink for stuckDetector
     static uint32_t stuck_led_last_ms = 0;
@@ -1085,6 +1190,29 @@ void loop() {
   loopEnd();
 } // End of main loop -------------------------------------------------------------------------
 
+#ifdef LOOP_NO_RETURN
+// Test build (2026-10-29, control step timing): loop() never returns to the Arduino core. On a single-core chip the
+// core sleeps 5 ms every 2 s between two loop() calls (yieldIfNecessary), so that the idle task runs; a frame then
+// waits up to 5 ms for its control step (bench: the worst frame-to-step delays on a 2 s grid). The pass already
+// waits for the next frame edge (loopEnd), and the idle task runs there. What the core does after each loop() call:
+// the task watchdog reset (here, below) and serial events (none defined in this firmware). A pass with no wait for
+// 1 s (bench pass-through, monitor and update paths poll) gets a 1 tick sleep, as the core gave it.
+#include "esp_task_wdt.h"
+extern bool loopTaskWDTEnabled;
+extern uint32_t loop_waits;  // src/platform/board.inc: the end-of-pass waits
+void loop() {
+  uint32_t last_wait_ms = millis();
+  for (;;) {
+    const uint32_t w0 = loop_waits;
+    loopPass();
+    if (loopTaskWDTEnabled) esp_task_wdt_reset();
+    const uint32_t now = millis();
+    if (loop_waits != w0) last_wait_ms = now;
+    else if (now - last_wait_ms >= 1000) { vTaskDelay(1); last_wait_ms = millis(); }
+  }
+}
+#endif
+
 // Cruise Control logic ---------------------------------------------------------
 uint16_t driveMode(){
   // Passthrough input throttle command until PWM_IN_3 goes above 1500µs for 500ms, then latch on to the last throttle command.
@@ -1133,7 +1261,7 @@ uint16_t driveMode(){
         drive_mode_timer = 0;
       }
 
-      if(drive_mode_timer > 50){ // switch to cruise control mode after 50 cycles (500ms)
+      if(drive_mode_timer > (uint32_t)fperiod::count(50, periodRatio())){ // switch to cruise control mode after 50 cycles (500ms) at 10 ms packets
         drive_mode_status = 1;
       }
 
@@ -1162,12 +1290,15 @@ uint16_t driveMode(){
       }
 
       if(!btx_throttle_override_active){
+        // 1 us per packet (5 us for the fast slow-down) at 10 ms packets; the same rate in us/s at any update period
+        static double dm1_carry[3] = {0, 0, 0};
+        const double pr = periodRatio();
         if(throttle_input_pwm > 1550 && throttle_micros < PWM_OUT_2_MAX)  {  // Accelerate
-          throttle_micros++;
+          throttle_micros = (uint16_t)min<int>(PWM_OUT_2_MAX, throttle_micros + fperiod::wholeSteps(1, pr, dm1_carry[0]));
         }else if(throttle_input_pwm < 1450 && throttle_input_pwm > 1150 && throttle_micros > PWM_OUT_2_DEFAULT){  // decelerate
-          throttle_micros--;
+          throttle_micros = (uint16_t)max<int>(PWM_OUT_2_DEFAULT, throttle_micros - fperiod::wholeSteps(1, pr, dm1_carry[1]));
         }else if(throttle_input_pwm > 800 && throttle_input_pwm < 1100){  // slow down quickly
-          throttle_micros = throttle_micros - 5;
+          throttle_micros = throttle_micros - fperiod::wholeSteps(5, pr, dm1_carry[2]);
         }
       }
 
@@ -1195,18 +1326,13 @@ uint16_t driveMode(){
 
       // Ramped throttle in case 2: cruise when selected, otherwise creep.
       if(!btx_throttle_override_active){
-        if(case2_use_cruise){
-          if(case2_throttle_current < CRUISE_THROTTLE){
-            case2_throttle_current++;
-          }else if(case2_throttle_current > CRUISE_THROTTLE){
-            case2_throttle_current--;
-          }
-        }else{
-          if(case2_throttle_current < CREEP_THROTTLE){
-            case2_throttle_current++;
-          }else if(case2_throttle_current > CREEP_THROTTLE){
-            case2_throttle_current--;
-          }
+        // 1 us per packet at 10 ms packets; the same rate in us/s at any update period
+        static double dm2_carry = 0;
+        const int target = case2_use_cruise ? CRUISE_THROTTLE : CREEP_THROTTLE;
+        if(case2_throttle_current < target){
+          case2_throttle_current = min<int>(target, case2_throttle_current + fperiod::wholeSteps(1, periodRatio(), dm2_carry));
+        }else if(case2_throttle_current > target){
+          case2_throttle_current = max<int>(target, case2_throttle_current - fperiod::wholeSteps(1, periodRatio(), dm2_carry));
         }
       }
 
@@ -1323,11 +1449,28 @@ void button3sPressEvent(){
   digitalWrite(nLED, 0);  // Low = ON
 }
 
+// No setting save in run mode (2026-10-29): a save is refused, not held until the stop. A flash write halts
+// the processor and breaks the even control loop. The "save" command and the 6 s button save ask here; a refusal keeps
+// the setting live in memory, and its text says why. Returns nullptr when a save may run.
+bool vehicleStationary();  // src/platform/telemetry.inc: the stop rule
+const char* roverSaveRefusal() {
+  if (drive_mode_status == 2) return "refused in run mode: a save stops the control loop; the setting is live, save after the run";
+  if (!vehicleStationary()) return "refused: the vehicle moves; stop it first";  // a flash write halts the processor
+  return nullptr;
+}
+
 void button6sPressEvent(){
   pid_direction = (pid_direction == DIRECT) ? REVERSE : DIRECT;
   steeringPID.SetControllerDirection(pid_direction);
   g_deviceConfig.pid_direction = pid_direction;
   ESP_LOGI(TAG, "btn: 6s press -> pid_direction=%d", pid_direction);
+  if (const char* why = roverSaveRefusal()) {  // no save in run mode: the direction is live, not saved
+    usbOut.printf("CFG 4 save=%s\n", why);
+    buttonEvent(BTN_STEER_DIR, (uint32_t)bttn_long_counter * 10u,
+                pid_direction == DIRECT ? "steering direction normal, not saved: run mode, save after the run"
+                                        : "steering direction reversed, not saved: run mode, save after the run");
+    return;
+  }
   const bool saved = msc_fat_save_all(&g_deviceConfig);
   if (!saved) {
     usbOut.println("Warning: failed to persist pid_direction to config file");
@@ -1423,7 +1566,7 @@ int BTxFollow(int base_throttle, double &btx_throttle, bool &btx_throttle_init, 
     target_throttle = PWM_OUT_2_DEFAULT;
   }
 
-  double step = fabs(BTxAccelRate);
+  double step = fperiod::step(fabs(BTxAccelRate), periodRatio());  // us per packet at 10 ms
   if(step <= 0.0){
     btx_throttle = target_throttle;
   }else if(btx_throttle < target_throttle){
@@ -1646,6 +1789,7 @@ float roverFollowSign(){
 }
 
 void roverStep(){
+  imuTake(0);  // the newest IMU sample (test build IMU_I2C_NB; empty otherwise)
   const bool want = rover_enabled && drive_mode_status == 2;
   const uint32_t now_us = micros();
   float dt = rover_last_packet_us ? (now_us - rover_last_packet_us) * 1e-6f : 0.01f;
@@ -1667,6 +1811,8 @@ void roverStep(){
   const uint32_t now_ms = millis();
   rover::Inputs in;
   in.dt = dt;
+  in.periodR = (float)periodRatio();
+  in.periodS = (float)stmFramePeriodS();
   in.inRange = !WFRX_STATUS_GET_BIT(sb, WFRX_STATUS_S1_SIGNAL_LOST)
             && !WFRX_STATUS_GET_BIT(sb, WFRX_STATUS_S1_SIGNAL_OVERLOAD)
             && !WFRX_STATUS_GET_BIT(sb, WFRX_STATUS_S1_SIGNAL_DISABLED);
@@ -1676,7 +1822,7 @@ void roverStep(){
   // IMU roll correction (optional): a roll turns the field in the coil plane; turn x and y back by the accelerometer
   // roll. The radius does not change.
   if (g_deviceConfig.rover_imu_roll && gyro_ready) {
-    const float a = (g_deviceConfig.rover_imu_roll == 2 ? 1.0f : -1.0f) * imu_roll16 * (float)(M_PI / 32768.0);
+    const float a = (g_deviceConfig.rover_imu_roll == 2 ? 1.0f : -1.0f) * IMU_ROLL16() * (float)(M_PI / 32768.0);
     const float x = in.x, y = in.y, c = cosf(a), s = sinf(a);
     in.x = x * c - y * s;
     in.y = x * s + y * c;
@@ -1691,7 +1837,7 @@ void roverStep(){
   in.y2 = stmPacket.items.s2_y * 0.001f;
   in.R2 = stmPacket.items.s2_radius * 0.001f;
   if (g_deviceConfig.rover_imu_roll && gyro_ready) {   // the same roll correction as sensor 1
-    const float a = (g_deviceConfig.rover_imu_roll == 2 ? 1.0f : -1.0f) * imu_roll16 * (float)(M_PI / 32768.0);
+    const float a = (g_deviceConfig.rover_imu_roll == 2 ? 1.0f : -1.0f) * IMU_ROLL16() * (float)(M_PI / 32768.0);
     const float x = in.x2, y = in.y2, c = cosf(a), s = sinf(a);
     in.x2 = x * c - y * s;
     in.y2 = x * s + y * c;
@@ -1738,7 +1884,11 @@ void roverStep(){
   // Return: distance driven since the last charge, or battery voltage (filtered: it sags under load).
   rover_driven_m += travel_mps * dt;
   const float vb = stmPacket.items.vbatt;
-  rover_vbatt_filt = (rover_vbatt_filt <= 0.0f) ? vb : 0.99f * rover_vbatt_filt + 0.01f * vb;
+  if (periodRatio() == 1.0) rover_vbatt_filt = (rover_vbatt_filt <= 0.0f) ? vb : 0.99f * rover_vbatt_filt + 0.01f * vb;
+  else {  // 0.01 per packet at 10 ms: the same time constant (1 s) at any update period
+    const float a = fperiod::weight(0.01f, periodRatio());
+    rover_vbatt_filt = (rover_vbatt_filt <= 0.0f) ? vb : (1.0f - a) * rover_vbatt_filt + a * vb;
+  }
   if(rover_seek_vbatt > 0 && rover_vbatt_filt > 1.0f && rover_vbatt_filt < rover_seek_vbatt) rover_need_charge = true;
   in.needCharge = rover_need_charge;
 
@@ -1746,15 +1896,25 @@ void roverStep(){
   // threshold); entry and exit by mower channel number with the follower's signals (BTx1Signal, BTx2Signal).
   for (int c = 0; c < 2; c++) {
     const float r = constrain(stmPacket.items.s1_btx_radius[c], 10.0f, 2000.0f);
-    rover_btx_mm[c] = BTxFilterAlpha * r + (1 - BTxFilterAlpha) * rover_btx_mm[c];
+    const float a = fperiod::weight(BTxFilterAlpha, periodRatio());  // alpha per packet at 10 ms
+    rover_btx_mm[c] = a * r + (1 - a) * rover_btx_mm[c];
   }
   in.beaconRange = fminf(rover_btx_mm[0], rover_btx_mm[1]) * 0.001f;
   const float btx_signal[3] = {(float)BTxThreshold + 1.0f, BTx1Signal, BTx2Signal};
   in.entryBeacon = rover_entry_btx != 0 && btx_signal[rover_entry_btx] < BTxThreshold;
   in.exitBeacon = rover_exit_btx != 0 && btx_signal[rover_exit_btx] < BTxThreshold;
+  // Sonar (sonarService): the near mask and the last record; 0 with no Nano
+  in.sonarNear = rover_sonar_near;
+  for (int i = 0; i < 4; i++) in.sonarMm[i] = (uint16_t)(sonar_ranges[i] < 65535u ? sonar_ranges[i] : 65535u);
 
   const float prev_w = rover_out.w;
+#ifdef DIAG_CTRL_PROF
+  mark(SEC_C_AP);
+#endif
   rover_out = roverAp.step(in);
+#ifdef DIAG_CTRL_PROF
+  mark(SEC_ROVER);
+#endif
   // A pivot ended: clear the rate loop integral, or it keeps the vehicle turning for seconds after the pivot.
   if (prev_w != 0.0f && rover_out.w == 0.0f && !rover_out.external) steeringRateReset();
 
@@ -1778,6 +1938,16 @@ void roverStep(){
       tlm_set(TLM_rover_dec_solve_deg, NAN);   // no solve answer: no value
       tlm_set(TLM_rover_dec_solve_mm, NAN);
       tlm_set(TLM_rover_dec_solve_sensor, NAN);
+    }
+    if (d.code == rover::DEC_SONAR) {   // one log event per sonar trigger: sonar, distance, action
+      char t[72];
+      if (roverAp.cfg.bounceStyle == 2)
+        snprintf(t, sizeof t, "sonar %u at %u mm: stop, drive %s", (unsigned)d.sonar, (unsigned)d.sonarMm,
+                 roverAp.driveDir() > 0 ? "backward" : "forward");
+      else
+        snprintf(t, sizeof t, "sonar %u at %u mm: stop, turn 180 deg %s", (unsigned)d.sonar, (unsigned)d.sonarMm,
+                 d.turnDeg > 0 ? "left" : "right");
+      sonarEvent(d.sonar, d.sonarMm, t);
     }
     if (usb_verbose)
       usbOut.printf("ROVER %s %s d=%.2f X=%.2f psi=%.0f turn=%.0f side=%d fault=%d\n", rover::stateName(roverAp.state),

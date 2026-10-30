@@ -197,6 +197,13 @@ static uint32_t receive(uint32_t now_ms) {
 }
 
 uint32_t pollRx(uint32_t now_ms) { return s_started ? receive(now_ms) : 0; }
+// STEP4 (CPU target 60 %, test builds): the server datagrams (CMD, STOP, RESTART, REQ) and the blast test at the radio
+// rate; service() (association watch, reconnect, beacons, mDNS, scan lines) at its own lower rate.
+void serviceFast(uint32_t now_ms) {
+  if (!s_started) return;
+  receive(now_ms);
+  blastService(now_ms);
+}
 
 static void mdnsService(uint32_t now_ms) {
   if (!s_mdns_ok) return;

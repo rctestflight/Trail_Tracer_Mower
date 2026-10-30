@@ -28,8 +28,12 @@ struct BounceSample {
 };
 
 struct BounceConfig {
-  int decim = 10;                      // frames per buffer sample: 100 Hz frames to 10 Hz samples (4 cm at 0.4 m/s;
+#ifndef WF_BOUNCE_DECIM
+#define WF_BOUNCE_DECIM 10
+#endif
+  int decim = WF_BOUNCE_DECIM;         // frames per buffer sample: 100 Hz frames to 10 Hz samples (4 cm at 0.4 m/s;
                                        // the field changes over the vertical distance, about 0.2 m)
+                                       // (the autopilot sets it to the same 10 Hz at its update period: periodApply)
   float windowM = 1.0f;                // m of travel before the trigger that the solve uses
   int iters = 15;                      // damped Gauss-Newton steps per start
   int restartEvery = 10;               // solves between searches from the closed-form candidates; the others start
@@ -47,6 +51,7 @@ struct BounceConfig {
                                        // the loop: inside a loop every part adds vertical field in one direction)
   int lagFrames = 10;                  // the reading pairs with the pose this many frames back: the Rx filter (a
                                        // boxcar of filter_n = 20 frames) delays the reading by (20 - 1) / 2 frames
+                                       // (build flag WF_LAG_TIME: the autopilot sets it in time, periodApply)
 };
 
 struct BounceResult {
@@ -57,6 +62,7 @@ struct BounceResult {
   float psiSd = 0;                     // deg: the fit's wire direction uncertainty (1 standard deviation, with the
                                        // carried height prior). Near square-on the drive gives little direction information
   int n = 0, starts = 0, evals = 0;    // samples used, starts tried, model evaluations
+  int bestStart = -1;                  // the start the answer came from (index into the starts tried)
   float refX = 0, refY = 0, refTh = 0; // the pose of the sample the answer belongs to (now() moves it from there)
 };
 
@@ -118,6 +124,7 @@ class WireFitBounce {
   float lastP_[4] = {0, 0, 0, 0}, lastF_ = 0;
   float Hc_ = 0, Vc_ = 0, lastS_ = 0;  // carried height estimate, its variance, travel at the last solve
   mutable bool prior_ = false;         // cost() adds the carried height as a prior
+  mutable float a22Data_ = 0;          // cost(): the H entry of the Gauss-Newton matrix before the prior (data only)
 };
 
 }  // namespace wirefit

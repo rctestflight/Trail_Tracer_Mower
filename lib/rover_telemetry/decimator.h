@@ -79,4 +79,26 @@ class ChannelDecimator {
   uint32_t ms_ = 0, pms_ = 0;
 };
 
+// STEP4 (CPU target 60 %, test builds): ChannelDecimator for whole-number inputs (the 8-bin coil values, 24 bits).
+// The sums are exact (64-bit), so the output is the exact triangle average; the float version rounds each sum. Cost
+// per input: integer additions and one integer multiplication per channel (no soft-float), floats only per output.
+class IntChannelDecimator {
+ public:
+  static const int MAX_CH = 64;
+  explicit IntChannelDecimator(int channels) : nch_(channels < MAX_CH ? channels : MAX_CH) {}
+  void setRate(int out_hz);
+  int rate() const { return rate_; }
+  int factor() const { return n_; }
+  bool push(const int32_t* in, uint32_t ms, float* out, uint32_t* out_ms);
+
+ private:
+  int nch_;
+  int rate_ = DECIM_IN_HZ;
+  int n_ = 1;
+  int i_ = 0;
+  int blocks_ = 0;
+  int64_t s_[MAX_CH] = {}, m_[MAX_CH] = {}, ps_[MAX_CH] = {}, pm_[MAX_CH] = {};
+  uint32_t ms_ = 0, pms_ = 0;
+};
+
 }  // namespace rec

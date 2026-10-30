@@ -44,7 +44,9 @@
                               // no record made: both 0xFFFFFFFF; records made but none held: oldest = newest + 1
 #define TELEMLOG_NO_SEQ 0xFFFFFFFFu
 
+#ifndef TELEMLOG_LIVE_FAST_MAX_BACKLOG  // test builds may set it (2026-10-29: Wi-Fi send window)
 #define TELEMLOG_LIVE_FAST_MAX_BACKLOG 3   // live FAST frames further behind are skipped (they stay in the ring)
+#endif
 #define TELEMLOG_BACKFILL_PERIOD_MS 20     // 50 backfill frames per second at most
 #define TELEMLOG_INFO_PERIOD_MS 1000
 #define TELEMLOG_REQ_QUEUE 8

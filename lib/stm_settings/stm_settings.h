@@ -46,8 +46,9 @@ const float VSTOP_MAX_V = 16.0f;         // WFRX_CHARGE_VOLTAGE_MAX
 const float IMAX_MAX_A = 6.0f;           // WFRX_CHARGE_CURRENT_MAX
 const int32_t TIME_MAX_S = 3600;         // WFRX_CHARGE_TIME_MAX_SECONDS
 
-const uint32_t REPLY_TIMEOUT_MS = 100;   // 10 packets
-const uint32_t REPLY_TIMEOUT_V2_MS = 35; // v2: 3 frames, so the third send stays in the 10-frame repeat window
+const uint32_t REPLY_TIMEOUT_MS = 100;   // 10 packets at 10 ms (setPeriodRatio: the same packets at any update period)
+const uint32_t REPLY_TIMEOUT_V2_MS = 35; // v2: 3 frames, so the third send stays in the 10-frame repeat window (at 10 ms;
+                                         // setPeriodRatio scales it)
 const uint32_t SAVE_TIMEOUT_MS = 300;    // command 3: STM32 flash page erase and write
 const uint8_t MAX_TRIES = 3;             // sends of one command, the first included
 const uint32_t CHECK_PERIOD_MS = 2000;   // one read-back each 2 s: the five settings in 10 s
@@ -112,6 +113,9 @@ class Link {
   // v2: one valid frame and its answer fields (present = resp_cid != 0).
   void onAnswerV2(uint32_t now_ms, uint32_t status_bits, bool present, uint8_t seq, uint8_t cid8, uint8_t index, uint8_t status, uint32_t value);
   void setV2(bool v2) { v2_ = v2; }
+  // The period factor (update period / 10 ms, lib/frame_pid/frame_period.h): the answer timeouts, counted in packets,
+  // scale with it. The save timeout (a flash write time) does not.
+  void setPeriodRatio(double r) { period_r_ = r > 0 ? r : 1.0; }
   bool v2() const { return v2_; }
   void setSeq(uint8_t s) { seq_ = s; }      // a random start: an ESP32 restart then cannot repeat the last seq
   uint8_t seq() const { return cur_seq_; }  // seq of the command that next() gave (v2)
@@ -159,6 +163,7 @@ class Link {
   uint32_t sent_raw_[SLOTS] = {};   // the value of the last write, as sent
   uint32_t held_[SLOTS] = {};       // heldValue() of it
   bool v2_ = false;
+  double period_r_ = 1.0;
   uint8_t seq_ = 0, cur_seq_ = 0;
   bool reset_seen_ = false;
   uint32_t check_want_ = 0;  // the value a read-back expects, taken when it is sent

@@ -3,6 +3,23 @@
 #pragma once
 
 // Change history
+//   0.7.5: 0.7.4 + the CPU savings (fast maths, flash cache in QIO mode, faster wire solve, control loop above the
+//     solve, non-blocking I2C, IMU savings, every count in packets in time) + the save refusal in run mode, merged
+//     with 89b5e40 (the Nano sonar stream on UART0 RX GPIO33, LED patterns, MON LED blip removed, USB coil print off,
+//     tx_dir_ch1 default 2), plus the sonar behaviour.
+//     New settings rover_sonar_mm (Sonar trigger distance, 400 mm; 0 = off) and rover_sonar_count (Sonar readings in a
+//     row, 3). Bounce: sonar 1 or 2 near for the count in the roam drive: stop, turn 180 deg on the spot. Reverse bounce:
+//     the sonars of the drive direction (1 and 2 forward, 3 and 4 in reverse): stop, drive the other way. Both reuse
+//     the stop and turn of the beacon turn (SUB_BSTOP), no spread. A reading of 0 never counts; no record for 500 ms:
+//     the sonar is ignored. Decision 18 sonar; event 24 sonar (trigger: sonar, distance, action; the stream state);
+//     log values sonar1_mm to sonar4_mm (log rate). No Nano: no behaviour change. The HB line prints only with the new
+//     setting usb_heartbeat (USB heartbeat, default off) or after "verbose on"
+//   0.7.4: 0.7.3 + the update fix + the build without exception tables. The ESP32 image writer writes to flash with
+//     the esp_ota calls direct; the Arduino Update writer took a 4 KB heap block when the first image bytes came, and
+//     during a page upload the Wi-Fi receive buffers split the heap (largest block 2.3 KB): "begin No Error". 0.7.x
+//     holds 9 KB more heap during a run (the wire solve), and the run is active after a restart, so most page
+//     installs failed. Bench (one Rx board, Wi-Fi, run active): 10 of 10 single image, 10 of 10 package. Build flags
+//     -fno-exceptions -fno-asynchronous-unwind-tables: 38 KB less flash. No behaviour change, no settings change.
 //   0.7.3: square-on guard in the roam and return drives, every roam mode (0.7.2 + this guard only). Square-on over
 //     the wire the coils read no nearer than about 2 x the height, so a Bounce return could miss its join distance
 //     and cross the wire (a 0.7.1 field run). Near the wire (solve distance within the bounce distance plus the turn
@@ -388,12 +405,12 @@
 #if defined(OTA_TEST_VERSION)
 #define ROVER_FW_VERSION OTA_TEST_VERSION  // OTA test images (envs ota_a, ota_b, ota_test_crash)
 #elif defined(BENCH_FAKE_IMU)
-#define ROVER_FW_VERSION "0.7.3+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.7.5+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #elif defined(SETTINGS_NEWKEY)
-#define ROVER_FW_VERSION "0.7.3-newkey"  // bench build: one more table line (test_new_setting)
+#define ROVER_FW_VERSION "0.7.5-newkey"  // bench build: one more table line (test_new_setting)
 #elif defined(TELEMETRY_NEWVALUE)
-#define ROVER_FW_VERSION "0.7.3-newvalue"  // bench build: the example lines of include/user_telemetry.h
+#define ROVER_FW_VERSION "0.7.5-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.7.3"
+#define ROVER_FW_VERSION "0.7.5"
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A

@@ -102,8 +102,19 @@ bool sendODriveCAN(uint8_t nodeID, uint8_t commandID,
   if (nodeID > 0x3F || commandID > 0x1F || length > 8 ||
       (!remote && length && !data) || !can_init_ok) return false;
   twai_status_info_t status;
+#ifdef STEP4
+  // STEP4: one bus state read per batch of sends in the same millisecond (the frame's 6 or 12 sends), not one per send
+  static uint32_t state_ms = 0;
+  static bool state_ok = false;
+  if (!state_ok || millis() != state_ms) {
+    state_ms = millis();
+    state_ok = twai_get_status_info(&status) == ESP_OK && status.state == TWAI_STATE_RUNNING;
+  }
+  if (!state_ok) return false;
+#else
   if (twai_get_status_info(&status) != ESP_OK ||
       status.state != TWAI_STATE_RUNNING) return false;
+#endif
   twai_message_t frame = {};
   frame.identifier = (static_cast<uint32_t>(nodeID) << 5) | commandID;
   frame.data_length_code = length;

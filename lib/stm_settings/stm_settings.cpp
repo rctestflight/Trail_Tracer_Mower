@@ -219,7 +219,9 @@ void Link::onPacket(uint32_t now_ms, uint32_t status_bits, uint32_t rid, uint32_
 
 bool Link::next(uint32_t now_ms, uint32_t* cid, uint32_t* raw) {
   if (waiting_) {
-    const uint32_t timeout = idOf(cur_.cid) == 3 ? SAVE_TIMEOUT_MS : v2_ ? REPLY_TIMEOUT_V2_MS : REPLY_TIMEOUT_MS;
+    const uint32_t reply = v2_ ? REPLY_TIMEOUT_V2_MS : REPLY_TIMEOUT_MS;
+    const uint32_t timeout = idOf(cur_.cid) == 3 ? SAVE_TIMEOUT_MS
+                           : period_r_ == 1.0 ? reply : (uint32_t)(reply * period_r_ + 0.5);
     if (!resend_now_ && now_ms - sent_ms_ < timeout) return false;
     if (resend_now_ || (retryable(cur_.cid, v2_) && tries_ < MAX_TRIES)) {
       resend_now_ = false;

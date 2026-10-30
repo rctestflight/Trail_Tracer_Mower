@@ -273,6 +273,7 @@ void binPollService(){
   stmLink.push(20, 0, (uint8_t)bin_poll_idx);
 }
 
+const char* roverSaveRefusal();  // src/main.cpp
 uint8_t configCommandRun(const char* t, bool over_espnow, String& reply){
   char key[48] = {0}, value[64] = {0};
   String out;
@@ -292,8 +293,8 @@ uint8_t configCommandRun(const char* t, bool over_espnow, String& reply){
     return ok ? 0 : 4;
   }
   if (!strcmp(t, "save")) {
-    // Run model (0.5.95): a save only while stopped. A flash write halts everything else for its time.
-    if (drive_mode_status == 2 || !vehicleStationary()) { reply = "save=Stop the vehicle first"; return 4; }  // a flash write stops the CPU
+    // 2026-10-29: no save in run mode, and none while the vehicle moves (roverSaveRefusal, src/main.cpp)
+    if (const char* why = roverSaveRefusal()) { reply = String("save=") + why; return 4; }
     usbOut.drain(100);  // the USB output empty first: no USB transfer runs into the flash write
     // NVS and config.json (design choice 2026-10-10: a save is a save of the file). config.json overrides
     // NVS at boot, so an NVS-only save of a key that the file holds was lost at the next boot.

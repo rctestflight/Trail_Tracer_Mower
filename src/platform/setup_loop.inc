@@ -17,7 +17,11 @@ bool platformBegin(){
   Serial.flush();
 #endif
   cpuprof::begin();  // CPU profiler: loopTask is the task that runs setup()
+  rtprof::setWaitPart(SEC_WAIT);  // diag_cpu: the wait is not active time
   loop_task_handle = xTaskGetCurrentTaskHandle();  // 0.5.98: the frame edge wakes loop()
+#ifdef DIAG_FP_COUNT
+  { extern void fpCountSetLoopTask(); fpCountSetLoopTask(); }
+#endif
   const bool monitor_boot = monitor_once == MONITOR_ONCE_MAGIC && esp_reset_reason() == ESP_RST_SW;
   monitor_once = 0;  // never sticky
   {
@@ -130,6 +134,9 @@ void setupDone(){
 
 bool platformLoopStart(){
   if (!rtc_wdt_test) rtc_wdt_feed();  // 0.5.94: the RTC watchdog (setup); bench "rtcwdt test" stops the feed
+  cpuprof::passEnd(pass_kind);  // diag_cpu: the pass before this one ended
+  rtprof::passKind(pass_kind);
+  pass_kind = 0;
   if (monitor_role_on) { mark(SEC_MONITOR); monitor_role::loop(); return true; }
 #ifdef OTA_TEST_CRASH
   // OTA test image (env ota_test_crash): a new image that panics 2 s after start in the vehicle boot. It panics only
@@ -227,6 +234,12 @@ void benchService(){
   static uint32_t bench_last_us = 0;
   if (Serial.available() || due(bench_last_us, SERVICE_PERIOD_US)) benchSerial();  // USB serial commands for the bench tests
   usbEventService();
+#ifdef DIAG_STEPTIME
+  { extern void steptimeService(); steptimeService(); }  // the "steps" report, one line a pass
+#endif
+#ifdef DIAG_SOLVE_FEED
+  { extern void fpCheckService(); fpCheckService(); }  // bench "fpcheck": one solve per pass
+#endif
   static uint32_t bench_print_ms = 0;
   if (millis() - bench_print_ms >= 1000) {
     bench_print_ms = millis();
@@ -236,7 +249,11 @@ void benchService(){
       loop_max_us = 0;
       loop_exec_count = 0;
     } else {
-      // Optional heartbeat output (disabled below). Keep the CPU sampling and status updates active.
+      // The HB line (0.7.5 rule): the vehicle prints it when the setting "USB heartbeat" (usb_heartbeat) is on, or after
+      // "verbose on" this boot. Off by default: a quiet USB console for the user (commit 89b5e40). The bench tools read
+      // the line, and it keeps an idle USB link busy (an idle ESP32-S2 USB link can stop for good; seen in tests).
+      // The monitor role does not run this code: its own 1 s "beat" line (src/monitor_role.cpp) prints always.
+      // The CPU sampling and status updates below run in any case.
       static uint32_t hb_last_packets = 0;
       if (safe_mode) usbOut.printf("SAFE MODE after %lu crash resets: no telemetry, no ESP-NOW\n", (unsigned long)crash_count);
       if (imu_halt) usbOut.println("IMU HALT: no drive (MPU6050 failed at start-up, imu_required=true)");
@@ -244,12 +261,17 @@ void benchService(){
       // control = control passes; cpu, loop, drive = CPU load % of the last second (lib/cpu_prof load()).
       cpuprof::load((1u << SEC_DRIVE) | (1u << SEC_PACKET) | (1u << SEC_ROVER) | (1u << SEC_MPU), &cpu_busy_pct, &cpu_loop_pct, &cpu_drive_pct);
       static uint32_t hb_last_frames = 0;
-      // usbOut.printf("HB ms=%lu packets=%lu control=%lu mode=%d espnow=%d gyro=%d heap=%lu maxblk=%lu psram=%lu dtr=%d cpu=%u loop=%u drive=%u\n",
-      //   (unsigned long)millis(), (unsigned long)(stmDec.st.frames - hb_last_frames),
-      //   (unsigned long)((main_loop_counter - hb_last_packets + MAIN_LOOP_PERIOD) % MAIN_LOOP_PERIOD), (int)drive_mode_status, (int)espnow_started, (int)mpu_ok,
-      //   (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMaxAllocHeap(), (unsigned long)ESP.getPsramSize(),
-      //   (int)tud_cdc_connected(), (unsigned)cpu_busy_pct, (unsigned)cpu_loop_pct, (unsigned)cpu_drive_pct);
+      if (g_deviceConfig.usb_heartbeat || usb_verbose)
+        usbOut.printf("HB ms=%lu packets=%lu control=%lu mode=%d espnow=%d gyro=%d heap=%lu maxblk=%lu psram=%lu dtr=%d cpu=%u loop=%u drive=%u\n",
+          (unsigned long)millis(), (unsigned long)(stmDec.st.frames - hb_last_frames),
+          (unsigned long)((main_loop_counter - hb_last_packets + MAIN_LOOP_PERIOD) % MAIN_LOOP_PERIOD), (int)drive_mode_status, (int)espnow_started, (int)mpu_ok,
+          (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMaxAllocHeap(), (unsigned long)ESP.getPsramSize(),
+          (int)tud_cdc_connected(), (unsigned)cpu_busy_pct, (unsigned)cpu_loop_pct, (unsigned)cpu_drive_pct);
       hb_last_frames = stmDec.st.frames;
+#ifdef DIAG_SOLVE_FEED
+      usbOut.printf("DIAG steps=%lu fmax_us=%lu feed=%d solves=%lu\n", (unsigned long)diag_steps, (unsigned long)diag_fmax_us, (int)g_diagSolveFeed, (unsigned long)g_diagSolves);
+      diag_steps = diag_fmax_us = 0; g_diagSolves = 0;
+#endif
       if (usb_verbose && (usbOut.dropped || usb_guard::restarts() || usb_guard::full_resets()))
         usbOut.printf("USB dropped=%lu guard_reconnects=%lu full_resets=%lu stalls=%lu\n", (unsigned long)usbOut.dropped,
                       (unsigned long)usb_guard::restarts(), (unsigned long)usb_guard::full_resets(),
@@ -270,6 +292,18 @@ void loopEnd(){
   // load is the real work. Raw stream, bridge and monitor modes return earlier and keep polling.
   if (data_ready == 0 && Serial1.available() < stm_v2_len && !Serial.available()) {
     loop_waits++;
-    ulTaskNotifyTake(pdTRUE, LOOP_WAIT_MS);
+    mark(SEC_WAIT);  // diag_cpu: the wait is a part of its own (not the mpu part)
+#ifdef DIAG_STEPTIME
+    extern void steptime_onWait(uint32_t t0_us, uint32_t t1_us, bool woken, int avail);
+    const uint32_t w0_us = (uint32_t)esp_timer_get_time();
+    const int w_av = Serial1.available();
+    const bool w_got = ulTaskNotifyTake(pdTRUE, LOOP_WAIT_MS) != 0;
+    rtprof::wake(w_got ? 1 : 0);
+    steptime_onWait(w0_us, (uint32_t)esp_timer_get_time(), w_got, w_av);  // diag: the loop's sleeps (src/diag_steptime.cpp)
+#else
+    rtprof::wake(ulTaskNotifyTake(pdTRUE, LOOP_WAIT_MS) ? 1 : 0);
+#endif
+  } else {
+    rtprof::wake(2);
   }
 }

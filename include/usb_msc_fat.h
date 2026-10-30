@@ -204,6 +204,10 @@ bool msc_fat_key_at(const DeviceConfig* cfg, int index, String* line);
 // Settings in the log: fn once per "list" line, in "list" order (cmd_key: 0 or "set" only). Returns the line count.
 int msc_fat_each_line(const DeviceConfig* cfg, void (*fn)(void* ctx, int index, const char* key, const char* value),
                       void* ctx);
+// The "list" lines of g_deviceConfig, "key=value\n" each (cmd_key: 0 or "set"), built once and kept until a setting,
+// a DSP value in effect or the Wi-Fi network changes. on_change: called at a rebuild that changes the text.
+const String* msc_fat_lines();
+void msc_fat_lines_on_change(void (*fn)(const String& old_text, const String& new_text));
 void msc_fat_saved_config(DeviceConfig* out);  // 0.6.15: the settings of the next start (defaults, then NVS)
 bool msc_fat_key_pair_at(const DeviceConfig* active, const DeviceConfig* saved, int index, String* line);  // "list saved"
 

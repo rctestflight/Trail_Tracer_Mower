@@ -1,3 +1,6 @@
+#ifdef DIAG_STEPTIME
+void steptime_onStep(uint8_t seq);  // src/diag_steptime.cpp
+#endif
 // The link to the Rx STM32: frame interrupt, frame read and decode, commands, start handshake, DSP settings,
 // sweep and polarity records.
 // Part of the platform translation unit (src/rx_platform.cpp); shared declarations in platform_internal.h.
@@ -433,7 +436,7 @@ bool uartFrameOn() { return !uart_force_old && !uartFramePaused() && (stmDec.sta
 int16_t uartRoll() {
   if (uart_roll_src == 1) return uart_roll_fixed;
   if (uart_roll_src == 2) return (int16_t)(uint16_t)((millis() % 10000u) * 65536u / 10000u);
-  return imu_roll16;
+  return IMU_ROLL16();
 }
 // 0.5.128: the Rx UART frame goes from the frame edge interrupt (receiveStmUart) straight into the UART transmit FIFO.
 // loop() builds the frames after each good Rx STM32 frame (uartRefresh): the block alone in a double buffer, and a
@@ -504,6 +507,9 @@ void uartRefresh() {
 // One command to the Rx STM32: with the Rx UART frame it waits in the pending slot for the next frame build; else the
 // 10 B command frame goes now (older apps, "uart off", "uart pause").
 void stmTx(uint8_t seq, uint8_t cid8, uint8_t idx, uint32_t raw) {
+#ifdef DIAG_LAT2
+  rtprof::stmTxAt();
+#endif
   if (!uartFrameOn()) {
     uint8_t f[ESP_FRAME_LEN];
     stmv2::encodeCmd(seq, cid8, idx, raw, f);
@@ -612,6 +618,7 @@ void espPacketFifo_sendCmd(){
   }
   if (v2 && stm_v2_backlog) { uart_skip_backlog++; return; }  // frames wait: this one is old; the command goes with the newest frame
   uint32_t cid, raw;
+  stmLink.setPeriodRatio(periodRatio());  // the answer timeouts in packets at the update period in effect
   if (!stmLink.next(now, &cid, &raw)) { if (v2) stmTxIdle(); return; }
   if (!v2) {
     EspTxPacket p;
@@ -919,6 +926,7 @@ bool stmReadFrame(){
     last_computed_crc = computed_crc;
     ok = computed_crc == stmPacket.items.crc;
     rtprof::frameDecoded();
+    if (!pass_kind) pass_kind = 1;  // diag_cpu: this pass read a frame
     if (ok && stm_link_ver == 0) { stm_link_ver = 1; usbOut.println("STM link v1: 122 B packets"); }
   } else if (stm_link_ver == 2 || (stm_link_ver == 0 && (n == (int)STM_FRAME_LEN || n == (int)STM_FRAME_LEN_V3))) {
     // 0.6.0: an unknown link learns layout 2 from a whole frame of 128 B (version 2) or 144 B (version 3); 0.5.128
@@ -945,6 +953,7 @@ bool stmReadFrame(){
     const uint32_t c2 = ESP.getCycleCount();
     rt_ans_cyc += c2 - c1a;
     rtprof::frameDecoded();
+    if (!pass_kind) pass_kind = 1;  // diag_cpu: this pass read a frame
     rt_read_cyc += c1 - c0; rt_dec_cyc += c2 - c1; rt_bench_n++;
     if (c1 - c0 > rt_read_max) rt_read_max = c1 - c0;
     if (c2 - c1 > rt_dec_max) rt_dec_max = c2 - c1;
@@ -969,8 +978,17 @@ bool stmReadFrame(){
     // 0.5.102: the bin record takes 100 Hz input (rec::DECIM_IN_HZ): one frame each 10 ms. Up to 0.5.101 it took every
     // frame, so at 2.35 ms frames its records came 4.25 times too often, with the wrong time step, at 4.25 times the
     // cost (about 280 us a frame).
+    // 2026-10-30: at a period factor other than 1 (update period 20 ms: 2), each frame goes in as one input per 10 ms of
+    // update period (the frame's values held over its period), so the filter has its 100 inputs a second, the record its
+    // set rate and its period label the true period. Period factor 1: the 10 ms clock grid, as before.
     static uint32_t bins_last_us = 0;
-    if (ok && (uint32_t)(micros() - bins_last_us) >= 10000) {
+    static double bins_hold = 0;
+    if (ok && periodRatio() != 1.0) {
+      bins_hold += periodRatio();
+      const int k = (int)bins_hold;
+      bins_hold -= k;
+      if (k > 0) telemetryBins(k);
+    } else if (ok && (uint32_t)(micros() - bins_last_us) >= 10000) {
       bins_last_us += 10000;
       if ((uint32_t)(micros() - bins_last_us) >= 10000) bins_last_us = micros();  // a gap: start the grid again
       telemetryBins();
@@ -1105,6 +1123,11 @@ void dspSettingsCheck(const DeviceConfig& cfg){
 // rxFrameDone() takes the time of the part.
 static uint32_t loop_min_us = 0xFFFFFFFF;
 static uint32_t loop_max_us = 0;
+#ifdef DIAG_SOLVE_FEED
+extern volatile bool g_diagSolveFeed;
+extern volatile uint32_t g_diagSolves;
+uint32_t diag_steps = 0, diag_fmax_us = 0;   // diagnostic build: control steps and the longest frame part in each HB second
+#endif
 static uint32_t loop_exec_count = 0;
 static bool frame_part_ran = false;      // this pass read frames: rxFrameDone() counts its time
 static uint32_t frame_part_start_us = 0;
@@ -1167,6 +1190,9 @@ bool rxFrameReady(){
     return false;  // a bad frame: counted in stmReadFrame (crc_error_count)
   }
   control_last_us = micros();
+#ifdef DIAG_STEPTIME
+  steptime_onStep(stmDec.lastSeq());  // diag: control step timing (src/diag_steptime.cpp)
+#endif
   // 0.5.122: the frame to the Rx STM32 goes right after the frame read, before the control step. The Rx STM32 reads
   // its receive ring at each frame tick; sent at the end of the control step (up to about 2.5 ms later), a 16 B frame
   // could cross the next tick and arrive in two windows (bad CRC and length counts).
@@ -1178,6 +1204,7 @@ bool rxFrameReady(){
     boot_first_packet_ms = millis();
     usbOut.printf("FIRST_PACKET ms=%lu\n", (unsigned long)boot_first_packet_ms);
   }
+  pass_kind = 2;  // diag_cpu: this pass runs the control step
   return true;
 }
 
@@ -1187,6 +1214,9 @@ void rxFrameDone(){
   if(loop_elapsed_us < loop_min_us) loop_min_us = loop_elapsed_us;
   if(loop_elapsed_us > loop_max_us) loop_max_us = loop_elapsed_us;
   if(loop_elapsed_us > telem_loop_max_us) telem_loop_max_us = loop_elapsed_us;
+#ifdef DIAG_SOLVE_FEED
+  if(loop_elapsed_us > diag_fmax_us) diag_fmax_us = loop_elapsed_us;
+#endif
   loop_exec_count++;
 }
 

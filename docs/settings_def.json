@@ -1690,6 +1690,35 @@
       "group": "Rover: every roam mode",
       "description": "Join then leave and Reverse bounce: the tightest turn the rover drives, as the radius of its turn. A larger radius slips the wheels less and spares the lawn. 0: the rover turns on the spot",
       "label": "Turn radius"
+    },
+    "rover_sonar_mm": {
+      "type": "int",
+      "unit": "mm",
+      "min": 0,
+      "max": 10000,
+      "default": 400,
+      "live": true,
+      "group": "Rover: Bounce and Reverse bounce",
+      "description": "Bounce and Reverse bounce, in the roam drive only: when sonar 1 or 2 (front) reads under this distance for the readings in a row, Bounce stops and turns 180 deg and Reverse bounce stops and drives the other way; in Reverse bounce sonar 3 or 4 (back) does the same while the rover drives backward. It keeps the rover off objects on the lawn. Higher: the rover turns farther from an object, also at objects it would pass. Lower: the rover comes closer before it turns, and the stop can take it into the object. A reading of 0 (no echo) never counts. 0 = sonar off. The unit is the Nano's (mm)",
+      "label": "Sonar trigger distance"
+    },
+    "rover_sonar_count": {
+      "type": "int",
+      "min": 1,
+      "max": 50,
+      "default": 3,
+      "live": true,
+      "group": "Rover: Bounce and Reverse bounce",
+      "description": "Bounce and Reverse bounce: the number of sonar records in a row under the sonar trigger distance before the rover acts. One reading at or over the distance, or of 0, starts the count again. It stops one false echo (grass, a bump) from turning the rover. Higher: fewer false turns, but the rover drives on for longer before it turns (one record more each Nano period). Lower: a faster turn, more false turns",
+      "label": "Sonar readings in a row"
+    },
+    "usb_heartbeat": {
+      "type": "bool",
+      "default": false,
+      "live": true,
+      "group": "Radio and log",
+      "description": "On: the vehicle prints the HB line on USB once a second (time, Rx packets, control passes, drive mode, memory, CPU load). The bench tools read it, and it keeps an idle USB link busy (an idle ESP32-S2 USB link can stop). Off (default): a quiet USB console for the user; the line then prints only after the USB command 'verbose on' (this start only). The monitor role prints its own 1 s line in any case",
+      "label": "USB heartbeat"
     }
   }
 }

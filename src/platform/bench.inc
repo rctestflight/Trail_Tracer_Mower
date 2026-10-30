@@ -747,14 +747,22 @@ void benchSerial(){
       espnow_thru_active = false;
       usbOut.printf("BENCH thru stopped sent=%lu\n", (unsigned long)espnow_thru_seq);
     } else if (!strcmp(line, "tasks")) {  // bench: the FreeRTOS tasks by name (the framework has no task list): priority, least free stack
-      static const char* const names[] = {"loopTask", "usbd", "wifi", "tiT", "esp_timer", "sys_evt", "arduino_events",
-                                          "mdns", "Tmr Svc", "IDLE"};
-      usbOut.printf("TASKS count=%u (named below: %u)\n", (unsigned)uxTaskGetNumberOfTasks(), (unsigned)(sizeof(names) / sizeof(names[0])));
-      for (const char* nm : names) {
-        TaskHandle_t h = xTaskGetHandle(nm);
-        if (!h) { usbOut.printf("TASK %s none\n", nm); continue; }
-        usbOut.printf("TASK %s prio=%u stack_free_min=%u B\n", nm, (unsigned)uxTaskPriorityGet(h), (unsigned)uxTaskGetStackHighWaterMark(h));
+      // diag_cpu: every task (task_snapshot pxTaskGetNext, the scheduler held while the list is read), and the heap
+      // heap for this report only (2026-10-29: static, the 576 bytes came off the free heap for good)
+      struct TaskRow { char nm[configMAX_TASK_NAME_LEN]; unsigned prio, free; };
+      std::unique_ptr<TaskRow[]> tl(new (std::nothrow) TaskRow[24]);
+      if (!tl) { usbOut.println("TASKS refused: no heap"); continue; }
+      int nt = 0;
+      vTaskSuspendAll();
+      for (TaskHandle_t h = pxTaskGetNext(nullptr); h && nt < 24; h = pxTaskGetNext(h), nt++) {
+        strlcpy(tl[nt].nm, pcTaskGetTaskName(h), sizeof(tl[nt].nm));
+        tl[nt].prio = (unsigned)uxTaskPriorityGet(h);
+        tl[nt].free = (unsigned)uxTaskGetStackHighWaterMark(h);
       }
+      xTaskResumeAll();
+      usbOut.printf("TASKS count=%u listed=%d heap_free=%lu heap_largest_block=%lu heap_min_free=%lu\n", (unsigned)uxTaskGetNumberOfTasks(),
+                    nt, (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMaxAllocHeap(), (unsigned long)ESP.getMinFreeHeap());
+      for (int i = 0; i < nt; i++) usbOut.printf("TASK %s prio=%u stack_free_min=%u B\n", tl[i].nm, tl[i].prio, tl[i].free);
     } else if (!strcmp(line, "nvs")) {  // bench: NVS entry counts; a write adds used entries (the proof of no repeating writes)
       nvs_stats_t ns;
       if (nvs_get_stats(NULL, &ns) == ESP_OK)
@@ -820,6 +828,18 @@ void benchSerial(){
       usbOut.println("BTN0 window: restart; the erase window opens for 3 s");
       usbOut.drain(200);
       restartApp();
+#ifdef DIAG_IMU_STAT
+    } else if (!strcmp(line, "imustat")) {
+      imuStatReport();
+#ifdef IMU_I2C_NB
+    } else if (!strcmp(line, "imumath")) {
+      imuMathBench();
+#endif
+#ifdef DIAG_IMU_PROF
+    } else if (!strcmp(line, "imuprof")) {
+      imuProfReport();
+#endif
+#endif
     } else if (!strcmp(line, "boot")) {
       usbOut.printf("BOOT rover-firmware %s reset=%d setup_ms=%lu first_packet_ms=%lu espnow_start_ms=%lu espnow=%d mac=%s board=%s\n",
         ROVER_FW_VERSION, (int)esp_reset_reason(), (unsigned long)boot_setup_ms, (unsigned long)boot_first_packet_ms,
@@ -858,6 +878,11 @@ void benchSerial(){
       const float w = strtof(line + 10, nullptr);
       if (w > 0) scan_wire = w;
       usbOut.printf("SCAN wire level %.0f\n", scan_wire);
+#ifdef DIAG_LAT2
+    } else if (!strcmp(line, "lat2")) {
+      char lb[260];
+      for (int i = 0; rtprof::lat2Line(i, lb, sizeof lb) > 0; i++) usbOut.println(lb);
+#endif
     } else if (!strcmp(line, "rt")) {
       // bench: real-time path timing since the last "rt" (lib/rt_prof): frame edge -> control -> CAN, loop passes
       static int64_t rt_t0 = 0;
@@ -869,10 +894,13 @@ void benchSerial(){
       const uint32_t per = (rt_t0 && frames > rt_f0) ? (uint32_t)((now - rt_t0) / (frames - rt_f0))
                                                      : (isfinite(eff) && eff > 0 ? (uint32_t)eff : 10000u);
       rt_t0 = now; rt_f0 = frames;
-      std::unique_ptr<char[]> bp(new (std::nothrow) char[1100]);  // 0.6.33: heap for this report only
+#ifdef DIAG_NO_RT  // size-limited builds: the rt report left out for the update slot
+      usbOut.println("RT not in this build");
+#else
+      std::unique_ptr<char[]> bp(new (std::nothrow) char[1400]);  // 0.6.33: heap for this report only
       if (!bp) { usbOut.println("RT refused: no heap"); continue; }
       char* const b = bp.get();
-      rtprof::report(b, 1100, SEC_NAMES, SEC_N, per);
+      rtprof::report(b, 1400, SEC_NAMES, SEC_N, per);
       static uint32_t rt_sent0 = 0, rt_writes0 = 0, rt_retries0 = 0;
       const stmset::Counters& lc = stmLink.counters();
       usbOut.printf("%s | waits=%lu catchup=%lu usb_stalls=%lu usb_reconnects=%lu stm_cmds=%lu stm_writes=%lu stm_retries=%lu%c", b,
@@ -882,6 +910,9 @@ void benchSerial(){
       rt_sent0 = lc.sent; rt_writes0 = lc.writes; rt_retries0 = lc.retries;
       stm_catchup_frames = 0;
       loop_waits = 0;
+      rtprof::report2(b, 1400, SEC_NAMES, SEC_N);  // diag_cpu: pass kinds, wakes, wall time per part
+      usbOut.printf("%s%c", b, 10);
+#endif
     } else if (!strncmp(line, "raw ", 4)) {
       rawCommand(line + 4);
     } else if (!strncmp(line, "usbload ", 8)) {
@@ -950,11 +981,50 @@ void benchSerial(){
       }
       (void)z; (void)dz;
       usbOut.printf("%s (loop overhead included)\n", lb);
+#ifdef DIAG_QIO
+    } else if (!strcmp(line, "qio reset")) {  // diag_qio: clear the one-attempt record (bench test of the cap)
+      extern void qioResetRecord();
+      qioResetRecord();
+    } else if (!strcmp(line, "qio") || !strcmp(line, "qio on")) {  // diag_qio: flash cache read mode (src/diag_qio.cpp)
+      extern void qioCommand(bool);
+      qioCommand(line[3] == ' ');
+#endif
+#ifdef DIAG_SOLVE_FEED
+    } else if (!strcmp(line, "fpcheck") || !strcmp(line, "fpcheck v")) {  // float library and wire solve checksums (src/fp_check.cpp); v: each solve
+      extern void fpCheckStart(bool);
+      fpCheckStart(line[7] == ' ');
+    } else if (!strcmp(line, "solvefeed on") || !strcmp(line, "solvefeed off")) {   // diagnostic build: lawn frames into the wire solve
+      g_diagSolveFeed = !strcmp(line, "solvefeed on");
+      usbOut.printf("SOLVEFEED %s\n", g_diagSolveFeed ? "on" : "off");
+#endif
+#ifdef DIAG_FP_COUNT
+    } else if (!strcmp(line, "fp")) {  // diag_fp: soft-float calls by loop part and task since the last "fp" (src/fp_count.cpp)
+      extern void fpCountReport(const char* const*, int);
+      fpCountReport(SEC_NAMES, SEC_N);
+    } else if (!strcmp(line, "fp bench")) {
+      extern void fpCountBench();
+      fpCountBench();
+#endif
+#ifdef DIAG_STEPTIME
+    } else if (!strcmp(line, "steps") || !strcmp(line, "steps reset")) {  // diag: control step timing (src/diag_steptime.cpp)
+      extern void steptimeReport(bool);
+      steptimeReport(line[5] == ' ');
+#endif
     } else if (!strcmp(line, "cpu")) {
       // bench: CPU share per FreeRTOS task and per loop part since the last "cpu" (lib/cpu_prof)
-      char b[900];
-      cpuprof::report(b, sizeof(b), SEC_NAMES, SEC_N);
-      usbOut.printf("%s%c", b, 10);
+      // heap for this report only (2026-10-29: static, the 1100 bytes came off the free heap for good)
+      const size_t bn = 1100;
+      std::unique_ptr<char[]> b(new (std::nothrow) char[bn]);
+      if (!b) { usbOut.println("CPU refused: no heap"); continue; }
+      cpuprof::report(b.get(), bn, SEC_NAMES, SEC_N);
+      usbOut.printf("%s%c", b.get(), 10);
+      // diag_cpu: the cost of the part marks (CPU cycles inside mark()) since the last "cpu"
+      static int64_t mk_t0 = 0;
+      const int64_t mk_now = esp_timer_get_time();
+      const uint64_t mk = mark_cycles;
+      mark_cycles = 0;
+      if (mk_t0) usbOut.printf("CPU2 marks=%.2f%% of the CPU%c", 100.0 * mk / getCpuFrequencyMhz() / (double)(mk_now - mk_t0), 10);
+      mk_t0 = mk_now;
     } else if (!strcmp(line, "stat")) {
       benchPrintCounters("BENCH stat", 0, 0, 0);
       const stmset::Counters& c = stmLink.counters();
@@ -977,6 +1047,33 @@ void benchSerial(){
         usbOut.printf("CFG 0 %s\n", kv.c_str());
       }
       usbOut.printf("CFG 0 end %d def %d\n", n_keys, SETTINGS_DEF_VERSION);  // key count; settings_def.json version
+#ifdef DIAG_STEPTIME
+#ifndef DIAG_NO_LISTCHECK  // the step-timing images near the flash limit leave it out
+    } else if (!strcmp(line, "listcheck")) {  // test builds: the cached "list" lines against a fresh build (no values)
+      extern void msc_fat_list_check(int* n, int* diff, uint32_t* build_us, uint32_t* cached_us);
+      int n = 0, d = 0;
+      uint32_t bu = 0, cu = 0;
+      msc_fat_list_check(&n, &d, &bu, &cu);
+      usbOut.printf("LISTCHECK n=%d diff=%d build_us=%lu cached_us=%lu\n", n, d, (unsigned long)bu, (unsigned long)cu);
+#endif
+    } else if (!strcmp(line, "lcstat")) {  // test builds: the "list" line cache rebuilds and their cause
+      extern uint32_t lc_rebuilds, lc_why_cfg, lc_why_eff, lc_why_wifi, lc_build_max_us, lc_cb_max_us, lc_saved_builds;
+      extern int lc_cfg_off, lc_eff_idx;
+      usbOut.printf("LCSTAT saved_list_builds=%lu ", (unsigned long)lc_saved_builds);
+      usbOut.printf("rebuilds=%lu cfg=%lu eff=%lu wifi=%lu last_cfg_off=%d last_eff=%d build_max_us=%lu change_events_max_us=%lu\n",
+        (unsigned long)lc_rebuilds, (unsigned long)lc_why_cfg, (unsigned long)lc_why_eff, (unsigned long)lc_why_wifi, lc_cfg_off,
+        lc_eff_idx, (unsigned long)lc_build_max_us, (unsigned long)lc_cb_max_us);
+#endif
+#ifdef DIAG_RLIST
+    } else if (!strcmp(line, "rlist saved")) {
+      // test builds (2026-10-29): "list saved" as from the radio (one key every 5 ms); the ACKs go to a dummy address
+      static const uint8_t dummy[6] = {0x02, 0, 0, 0, 0, 0x01};
+      memcpy(espnow_cmd_mac, dummy, 6);
+      espnow_cmd_seq = 1;
+      strcpy(espnow_cmd_text, "list saved");
+      espnow_cmd_pending = true;
+      usbOut.println("RLIST started");
+#endif
     } else if (!strcmp(line, "list saved")) {
       // 0.6.15: each setting with the value it takes at the next start (stored, else the default)
       const DeviceConfig* saved = savedConfigLoad();

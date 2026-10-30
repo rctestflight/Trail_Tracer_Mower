@@ -12,16 +12,28 @@ uint32_t dt_decoded_ms = 0;  // when it came
 // rate telemetry_bins_hz (0 = off), on |v| and on v of each coil: the record holds the filtered |v| with the
 // sign of the filtered v (as the STMCOIL8 line). One FAST record per output. The filter is on the heap.
 extern bool safe_mode;
+#ifdef STEP4
+rec::IntChannelDecimator* telem_bins_decim = nullptr;  // STEP4: whole-number sums (exact), no soft-float per input
+typedef int32_t BinIn;
+#else
 rec::ChannelDecimator* telem_bins_decim = nullptr;
-void telemetryBins(){
+typedef float BinIn;
+#endif
+// inputs: the inputs this frame stands for (one per 10 ms of update period; 1 at 10 ms), each the same values, timed
+// 10 ms apart up to now.
+void telemetryBins(int inputs){
   const int hz = g_deviceConfig.telemetry_bins_hz;
   if (safe_mode || !g_deviceConfig.telemetry_enabled || hz <= 0) return;
   if (!telem_bins_decim) {
+#ifdef STEP4
+    telem_bins_decim = new rec::IntChannelDecimator(2 * WFRX_BINS * 2 * 2);
+#else
     telem_bins_decim = new rec::ChannelDecimator(2 * WFRX_BINS * 2 * 2);
+#endif
     telem_bins_decim->setRate(hz);
   }
   if (telem_bins_decim->rate() != hz) telem_bins_decim->setRate(hz);
-  float in[2 * WFRX_BINS * 2 * 2] = {};  // [sensor][bin][coil][|v|, v]
+  BinIn in[2 * WFRX_BINS * 2 * 2] = {};  // [sensor][bin][coil][|v|, v]
   bool seen[2] = {false, false};
   for (unsigned k = 0; k < WFRX_RESULTS; k++) {
     const unsigned sn = (stmDec.lanes >> k) & 1u;  // the sensor this lane reads; both lanes on one sensor: lane 1
@@ -30,27 +42,30 @@ void telemetryBins(){
     for (unsigned bn = 0; bn < WFRX_BINS; bn++) {
       const int32_t v[2] = {wfrx_int24_get(stmDec.coil[k][bn].v1), wfrx_int24_get(stmDec.coil[k][bn].v2)};
       for (unsigned c = 0; c < 2; c++) {
-        float* p = in + ((sn * WFRX_BINS + bn) * 2 + c) * 2;
-        p[0] = (float)(v[c] < 0 ? -v[c] : v[c]);
-        p[1] = (float)v[c];
+        BinIn* p = in + ((sn * WFRX_BINS + bn) * 2 + c) * 2;
+        p[0] = (BinIn)(v[c] < 0 ? -v[c] : v[c]);
+        p[1] = (BinIn)v[c];
       }
     }
   }
   float out[2 * WFRX_BINS * 2 * 2];
   uint32_t out_ms;
-  if (!telem_bins_decim->push(in, millis(), out, &out_ms)) return;
-  int32_t v[WFRX_BINS][4];
-  for (unsigned bn = 0; bn < WFRX_BINS; bn++)
-    for (unsigned sn = 0; sn < 2; sn++)
-      for (unsigned c = 0; c < 2; c++) {
-        const float* p = out + ((sn * WFRX_BINS + bn) * 2 + c) * 2;
-        const int32_t m = (int32_t)lroundf(p[0]);
-        v[bn][sn * 2 + c] = !seen[sn] || stm_bin_hz[bn] <= 0 ? rec::BINS_NONE : p[1] < 0 ? -m : m;
-      }
-  uint8_t body[rec::BINS_BYTES];
-  const int f = telem_bins_decim->factor();
-  const int n = rec::packBins(body, (uint8_t)(f < 255 ? f : 255), (uint16_t)(1000 / telem_bins_decim->rate()), stm_bin_hz, v);
-  telemlog_add(TELEMLOG_FAST, out_ms, body, (size_t)n);
+  const uint32_t now_ms = millis();
+  for (int i = 0; i < inputs; i++) {
+    if (!telem_bins_decim->push(in, now_ms - 10u * (uint32_t)(inputs - 1 - i), out, &out_ms)) continue;
+    int32_t v[WFRX_BINS][4];
+    for (unsigned bn = 0; bn < WFRX_BINS; bn++)
+      for (unsigned sn = 0; sn < 2; sn++)
+        for (unsigned c = 0; c < 2; c++) {
+          const float* p = out + ((sn * WFRX_BINS + bn) * 2 + c) * 2;
+          const int32_t m = (int32_t)lroundf(p[0]);
+          v[bn][sn * 2 + c] = !seen[sn] || stm_bin_hz[bn] <= 0 ? rec::BINS_NONE : p[1] < 0 ? -m : m;
+        }
+    uint8_t body[rec::BINS_BYTES];
+    const int f = telem_bins_decim->factor();
+    const int n = rec::packBins(body, (uint8_t)(f < 255 ? f : 255), (uint16_t)(1000 / telem_bins_decim->rate()), stm_bin_hz, v);
+    telemlog_add(TELEMLOG_FAST, out_ms, body, (size_t)n);
+  }
 }
 // 0.6.11: the dual tone polarity items of the Rx STM32 extension slot (2.1.134+) into the telemetry table: id 9 the sign
 // (+1, -1, 0 none yet), id 10 the spread of the sign angle (deg x 10), per sensor (index bit 4) and Tx channel (bits 0-3,
@@ -278,22 +293,43 @@ void telemetrySample(){
     const uint32_t age = now - odrive_vel_millis[k];
     s.enc_age_ms[k] = (!odrive_vel_received[k] || age > 254) ? 255 : (uint8_t)age;
   }
+#ifdef IMU_SAVE
+  s.heading = (uint16_t)lround(fmod(fmod(gyroHeadingDeg(), 360.0) + 360.0, 360.0) * (65536.0 / 360.0));
+#else
   s.heading = (uint16_t)lround(fmod(fmod(gyro_heading_deg, 360.0) + 360.0, 360.0) * (65536.0 / 360.0));
+#endif
   telem_packets++;
+#ifdef DIAG_SOLVE_FEED
+  diag_steps++;
+#endif
   // Log rate: the anti-alias filter and decimation (lib/rover_telemetry/decimator.h). Its state is
   // on the heap (static RAM is full). A rate change clears the filter.
   if (!telem_decim) return;
   if (telem_decim->rate() != g_deviceConfig.telemetry_rate_hz) telem_decim->setRate(g_deviceConfig.telemetry_rate_hz);
-  rec::Sample o;
-  if (!telem_decim->push(s, &o)) return;
-  const uint8_t rate = (uint8_t)telem_decim->rate();
-  if (!telem_block.fits(o, rate)) {  // 65 s since the block began, or another block type or rate: store it as it is
-    telemlog_add(TELEMLOG_FAST, telem_block.ms(), telem_block.body(), (size_t)telem_block.size());
-    telem_block.clear();
-  }
-  if (telem_block.add(o, rate)) {
-    telemlog_add(TELEMLOG_FAST, telem_block.ms(), telem_block.body(), (size_t)telem_block.size());
-    telem_block.clear();
+  // 2026-10-30: the filter takes 100 inputs a second (rec::DECIM_IN_HZ). At a period factor other than 1 (update period
+  // 20 ms: 2), this packet goes in as one input per 10 ms of update period, its values held over the period and timed
+  // 10 ms apart up to the packet: the log has its set rate and the rate byte is true. Period factor 1: one input.
+  static double hold = 0;
+  int inputs = 1;
+  if (periodRatio() != 1.0) {
+    hold += periodRatio();
+    inputs = (int)hold;
+    hold -= inputs;
+  } else hold = 0;
+  for (int i = 0; i < inputs; i++) {
+    rec::Sample in = s;
+    in.ms = s.ms - 10u * (uint32_t)(inputs - 1 - i);
+    rec::Sample o;
+    if (!telem_decim->push(in, &o)) continue;
+    const uint8_t rate = (uint8_t)telem_decim->rate();
+    if (!telem_block.fits(o, rate)) {  // 65 s since the block began, or another block type or rate: store it as it is
+      telemlog_add(TELEMLOG_FAST, telem_block.ms(), telem_block.body(), (size_t)telem_block.size());
+      telem_block.clear();
+    }
+    if (telem_block.add(o, rate)) {
+      telemlog_add(TELEMLOG_FAST, telem_block.ms(), telem_block.body(), (size_t)telem_block.size());
+      telem_block.clear();
+    }
   }
 }
 
@@ -375,6 +411,10 @@ void webTelemetryCopy(tlmpage::Snapshot* s){
 
 void buttonEvent(ButtonAction action, uint32_t held_ms, const char* text){
   telemetryEvent(rec::EV_BUTTON, (int32_t)action, (int32_t)held_ms, text);
+}
+
+void sonarEvent(int32_t a, int32_t b, const char* text){
+  telemetryEvent(rec::EV_SONAR, a, b, text);
 }
 
 void telemetryEvents(){
@@ -484,22 +524,16 @@ void telemetryDumpStep(){
 // that differs from the last logged state, from any source (app, USB, config.json, the DSP values the Rx STM32
 // reports): a = "list" index, b = 0 and text "key old -> new"; a longer text goes as b = 1 "key old", b = 2 "key new".
 // The fleet key (cmd_key) and the Wi-Fi password give only "set" or not (msc_fat_each_line).
-// The state is on the heap (static RAM is full): one pointer here.
+// The state is on the heap (static RAM is full): one pointer here. The lines: the cached "list" lines (msc_fat_lines,
+// 2026-10-29), rebuilt only at a change of a setting, a DSP value in effect or the Wi-Fi network; the rebuild calls
+// settingsChanged() with the last logged state and the new one.
 struct TelemSettings {
-  String* lines = nullptr;  // the last logged state: "key=value\n" for each "list" line
-  DeviceConfig cfg;         // the settings and DSP values of that state: a difference triggers a check
-  double eff[DSP_EFF_N];
-  uint32_t dump_ms = 0, check_ms = 0, full_ms = 0, part_ms = 0;
+  uint32_t dump_ms = 0, check_ms = 0, part_ms = 0;
   int dump_pos = -1, dump_part = 0, dump_parts = 0;
   uint16_t dump_no = 0;
 };
 static TelemSettings* telem_set = nullptr;
-static const uint32_t SET_DUMP_MS = 600000, SET_FULL_MS = 60000, SET_CHECK_MS = 200, SET_PART_MS = 50;
-
-static void settingsLineAdd(void* ctx, int, const char* key, const char* value){
-  String& s = *(String*)ctx;
-  s += key; s += '='; s += value; s += '\n';
-}
+static const uint32_t SET_DUMP_MS = 600000, SET_CHECK_MS = 200, SET_PART_MS = 50;
 
 // Line i of "key=value\n" text: start and length (no newline); false past the end.
 static bool settingsLine(const String& s, int& pos, int& len){
@@ -509,47 +543,39 @@ static bool settingsLine(const String& s, int& pos, int& len){
   return true;
 }
 
-// Build the lines now; log a change event for each line that differs from the last logged state; keep the new state.
-static void settingsCheck(){
-  String* now = new String();
-  now->reserve(telem_set->lines ? telem_set->lines->length() + 64 : 4096);
-  msc_fat_each_line(&g_deviceConfig, settingsLineAdd, now);
-  memcpy(&telem_set->cfg, &g_deviceConfig, sizeof(DeviceConfig));
-  memcpy(telem_set->eff, g_dsp_eff, sizeof(telem_set->eff));
-  if (telem_set->lines && *telem_set->lines != *now) {
-    int po = 0, pn = 0, lo = 0, ln = 0, idx = 0;
-    while (settingsLine(*now, pn, ln)) {
-      const String line = now->substring(pn, pn + ln);
-      const int eq = line.indexOf('=');
-      const String key = line.substring(0, eq);
-      // The old line with this key: the same index when the key list is the same, else a search
-      String old;
-      if (settingsLine(*telem_set->lines, po, lo) && telem_set->lines->substring(po, po + eq + 1) == key + "=")
-        old = telem_set->lines->substring(po + eq + 1, po + lo);
-      else {
-        const int k = telem_set->lines->startsWith(key + "=") ? 0 : telem_set->lines->indexOf("\n" + key + "=");
-        if (k >= 0) {
-          const int vs = k + (k ? 1 : 0) + key.length() + 1, ve = telem_set->lines->indexOf('\n', vs);
-          old = telem_set->lines->substring(vs, ve < 0 ? telem_set->lines->length() : ve);
-        } else old = "(none)";
-      }
-      const String val = line.substring(eq + 1);
-      if (old != val) {
-        const String text = key + " " + old + " -> " + val;
-        if ((int)text.length() <= rec::EVENT_MAX - 11) telemetryEvent(rec::EV_SETTING_CHANGE, idx, 0, text.c_str());
-        else {
-          telemetryEvent(rec::EV_SETTING_CHANGE, idx, 1, (key + " " + old).c_str());
-          telemetryEvent(rec::EV_SETTING_CHANGE, idx, 2, (key + " " + val).c_str());
-        }
-      }
-      pn += ln + 1;
-      if (po < (int)telem_set->lines->length()) po += lo + 1;
-      idx++;
+// A change event for each line of now that differs from the last logged state (was).
+static void settingsChanged(const String& was, const String& now){
+  if (!telem_set) return;
+  int po = 0, pn = 0, lo = 0, ln = 0, idx = 0;
+  while (settingsLine(now, pn, ln)) {
+    const String line = now.substring(pn, pn + ln);
+    const int eq = line.indexOf('=');
+    const String key = line.substring(0, eq);
+    // The old line with this key: the same index when the key list is the same, else a search
+    String old;
+    if (settingsLine(was, po, lo) && was.substring(po, po + eq + 1) == key + "=")
+      old = was.substring(po + eq + 1, po + lo);
+    else {
+      const int k = was.startsWith(key + "=") ? 0 : was.indexOf("\n" + key + "=");
+      if (k >= 0) {
+        const int vs = k + (k ? 1 : 0) + key.length() + 1, ve = was.indexOf('\n', vs);
+        old = was.substring(vs, ve < 0 ? was.length() : ve);
+      } else old = "(none)";
     }
-    if (telem_set->dump_pos >= 0) telem_set->dump_ms = 0;  // a dump in progress starts again with the new state
+    const String val = line.substring(eq + 1);
+    if (old != val) {
+      const String text = key + " " + old + " -> " + val;
+      if ((int)text.length() <= rec::EVENT_MAX - 11) telemetryEvent(rec::EV_SETTING_CHANGE, idx, 0, text.c_str());
+      else {
+        telemetryEvent(rec::EV_SETTING_CHANGE, idx, 1, (key + " " + old).c_str());
+        telemetryEvent(rec::EV_SETTING_CHANGE, idx, 2, (key + " " + val).c_str());
+      }
+    }
+    pn += ln + 1;
+    if (po < (int)was.length()) po += lo + 1;
+    idx++;
   }
-  delete telem_set->lines;
-  telem_set->lines = now;
+  if (telem_set->dump_pos >= 0) telem_set->dump_ms = 0;  // a dump in progress starts again with the new state
 }
 
 static void telemetrySettingsStep(){
@@ -557,37 +583,33 @@ static void telemetrySettingsStep(){
   const uint32_t ms = millis();
   if (!telem_set) {  // first pass after boot: the state, then the first dump
     telem_set = new TelemSettings();
-    settingsCheck();
-    telem_set->full_ms = ms;
+    msc_fat_lines_on_change(settingsChanged);
     telem_set->dump_ms = 0;
   }
-  if (ms - telem_set->check_ms >= SET_CHECK_MS) {  // a settings or DSP value change: check at once
+  // A change of a setting, a DSP value or the Wi-Fi network: a rebuild, and its change events (settingsChanged)
+  if (ms - telem_set->check_ms >= SET_CHECK_MS) {
     telem_set->check_ms = ms;
-    if (memcmp(&telem_set->cfg, &g_deviceConfig, sizeof(DeviceConfig)) || memcmp(telem_set->eff, g_dsp_eff, sizeof(telem_set->eff)))
-      settingsCheck();
+    msc_fat_lines();
   }
-  if (ms - telem_set->full_ms >= SET_FULL_MS) {  // values not in DeviceConfig (the Wi-Fi network): each minute
-    telem_set->full_ms = ms;
-    settingsCheck();
-  }
+  const String& lines = *msc_fat_lines();
   if (telem_set->dump_ms == 0 || (telem_set->dump_pos < 0 && ms - telem_set->dump_ms >= SET_DUMP_MS)) {
     telem_set->dump_ms = ms ? ms : 1;
     telem_set->dump_pos = 0;
     telem_set->dump_part = 0;
     const int room = rec::EVENT_MAX - 11;
-    telem_set->dump_parts = ((int)telem_set->lines->length() + room - 1) / room;
+    telem_set->dump_parts = ((int)lines.length() + room - 1) / room;
     telem_set->dump_no++;
   }
   if (telem_set->dump_pos >= 0 && ms - telem_set->part_ms >= SET_PART_MS) {  // one part each 50 ms: about 3 s for the list
     telem_set->part_ms = ms;
     const int room = rec::EVENT_MAX - 11;
-    String text = telem_set->lines->substring(telem_set->dump_pos, telem_set->dump_pos + room);
+    String text = lines.substring(telem_set->dump_pos, telem_set->dump_pos + room);
     text.replace('\n', ' ');
     telemetryEvent(rec::EV_SETTINGS, ((int32_t)telem_set->dump_no << 16) | telem_set->dump_part, telem_set->dump_parts,
                    text.c_str());
     telem_set->dump_pos += room;
     telem_set->dump_part++;
-    if (telem_set->dump_pos >= (int)telem_set->lines->length()) telem_set->dump_pos = -1;
+    if (telem_set->dump_pos >= (int)lines.length()) telem_set->dump_pos = -1;
   }
 }
 

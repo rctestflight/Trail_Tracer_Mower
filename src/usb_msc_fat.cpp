@@ -18,6 +18,7 @@
 
 #include "decimator.h"  // rec::rateNearest
 #include "usb_msc_fat.h"
+extern DeviceConfig g_deviceConfig;  // src/platform/settings.inc: the "list" line cache (msc_fat_lines)
 
 #include "USB.h"
 #include "USBMSC.h"
@@ -1495,8 +1496,17 @@ bool msc_fat_save_all(const DeviceConfig* cfg)
 // ─────────────────────────────────────────────────────────────────────────────
 // Single keys, for config commands over ESP-NOW (docs/espnow_protocol.md, CMD 0x10)
 // ─────────────────────────────────────────────────────────────────────────────
+static bool lines_find(const String& t, const char* key, int* vs, int* ve);
 bool msc_fat_get_key(const DeviceConfig* cfg, const char* key, String* value_json)
 {
+    if (cfg == &g_deviceConfig) {  // the cached "list" lines (msc_fat_lines)
+        const String& t = *msc_fat_lines();
+        int vs, ve;
+        if (!lines_find(t, key, &vs, &ve)) return false;
+        if (!strcmp(key, "cmd_key")) *value_json = String(cfg->cmd_key);  // the stored value, as before (not cached)
+        else *value_json = t.substring(vs, ve);
+        return true;
+    }
     JsonDocument doc;
     config_to_doc(*cfg, doc, true);
     JsonObject o = doc.as<JsonObject>();
@@ -1559,7 +1569,125 @@ int msc_fat_set_key(DeviceConfig* cfg, const char* key, const char* value_json, 
     return 0;
 }
 
-bool msc_fat_key_at(const DeviceConfig* cfg, int index, String* line)
+// The "list" lines, built once and read until a setting, a DSP value in effect or the Wi-Fi network changes
+// (2026-10-29, control step timing: one build of the whole settings JSON takes 17-30 ms of loop() time, and the
+// settings list built it once per key, the settings in the log at each change and once a minute). The text:
+// "key=value\n" for each key in "list" order, each value as serializeJson writes it; cmd_key only as 0 or "set" (the
+// fleet key is never in the cache; key_at and get_key give its stored value as before). Only for g_deviceConfig:
+// another DeviceConfig (the saved settings of "list saved") builds its own JSON as before.
+struct LinesCache {
+    DeviceConfig cfg;
+    double eff[DSP_EFF_N];
+    char ssid[33];
+    bool pass;
+    String* text;
+};
+static LinesCache* s_lc = nullptr;  // heap: static RAM is full
+static void (*s_lines_changed)(const String& old_text, const String& new_text) = nullptr;
+
+void msc_fat_lines_on_change(void (*fn)(const String& old_text, const String& new_text)) { s_lines_changed = fn; }
+
+static void lines_build(const DeviceConfig& c, String& out, bool mask_key = true)  // mask_key false: "list saved" only
+{
+    JsonDocument doc;
+    config_to_doc(c, doc, true);
+    String value;
+    for (JsonPair kv : doc.as<JsonObject>()) {
+        value = "";
+        if (mask_key && !strcmp(kv.key().c_str(), "cmd_key")) value = c.cmd_key ? "\"set\"" : "0";
+        else serializeJson(kv.value(), value);  // ArduinoJson 7 replaces a String's content
+        out += kv.key().c_str();
+        out += '=';
+        out += value;
+        out += '\n';
+    }
+}
+
+const String* msc_fat_lines()
+{
+    const DeviceConfig& c = g_deviceConfig;
+    const char* ssid = msc_fat_wifi_ssid();
+    const bool pass = msc_fat_wifi_has_password();
+    if (!s_lc) {
+        s_lc = new LinesCache();
+        s_lc->text = nullptr;
+    }
+    if (s_lc->text && !memcmp(&s_lc->cfg, &c, sizeof(c)) && !memcmp(s_lc->eff, g_dsp_eff, sizeof(s_lc->eff)) &&
+        !strcmp(s_lc->ssid, ssid) && s_lc->pass == pass)
+        return s_lc->text;
+#ifdef DIAG_STEPTIME
+    {  // bench "lcstat": why the cache was rebuilt
+        extern uint32_t lc_rebuilds, lc_why_cfg, lc_why_eff, lc_why_wifi, lc_build_max_us, lc_cb_max_us;
+        extern int lc_cfg_off, lc_eff_idx;
+        lc_rebuilds++;
+        if (s_lc->text) {
+            const uint8_t* a = (const uint8_t*)&s_lc->cfg; const uint8_t* b = (const uint8_t*)&c;
+            for (int i = 0; i < (int)sizeof(c); i++) if (a[i] != b[i]) { lc_why_cfg++; lc_cfg_off = i; break; }
+            for (int i = 0; i < DSP_EFF_N; i++) if (memcmp(&s_lc->eff[i], &g_dsp_eff[i], sizeof(double))) { lc_why_eff++; lc_eff_idx = i; break; }
+            if (strcmp(s_lc->ssid, ssid) || s_lc->pass != pass) lc_why_wifi++;
+        }
+    }
+    const uint32_t lc_t0 = micros();
+#endif
+    String* fresh = new String();
+    fresh->reserve(s_lc->text ? s_lc->text->length() + 64 : 4096);
+    lines_build(c, *fresh);
+#ifdef DIAG_STEPTIME
+    { extern uint32_t lc_build_max_us; const uint32_t d = micros() - lc_t0; if (d > lc_build_max_us) lc_build_max_us = d; }
+#endif
+    memcpy(&s_lc->cfg, &c, sizeof(c));
+    memcpy(s_lc->eff, g_dsp_eff, sizeof(s_lc->eff));
+    snprintf(s_lc->ssid, sizeof(s_lc->ssid), "%s", ssid);
+    s_lc->pass = pass;
+    String* old = s_lc->text;
+    s_lc->text = fresh;
+#ifdef DIAG_STEPTIME
+    const uint32_t lc_t1 = micros();
+#endif
+    if (old && s_lines_changed && *old != *fresh) s_lines_changed(*old, *fresh);  // the settings in the log: change events
+#ifdef DIAG_STEPTIME
+    { extern uint32_t lc_cb_max_us; const uint32_t d = micros() - lc_t1; if (d > lc_cb_max_us) lc_cb_max_us = d; }
+#endif
+    delete old;
+    return fresh;
+}
+
+// Line index of t: start, '=' and end (no newline); false past the end.
+static bool lines_at(const String& t, int index, int* ks, int* eq, int* le)
+{
+    int pos = 0;
+    for (int i = 0; i < index; i++) {
+        const int nl = t.indexOf('\n', pos);
+        if (nl < 0) return false;
+        pos = nl + 1;
+    }
+    if (pos >= (int)t.length()) return false;
+    const int nl = t.indexOf('\n', pos);
+    *ks = pos;
+    *le = nl < 0 ? (int)t.length() : nl;
+    *eq = t.indexOf('=', pos);
+    return *eq >= 0 && *eq < *le;
+}
+
+// The value of key in t: start and end; false if t has no such key.
+static bool lines_find(const String& t, const char* key, int* vs, int* ve)
+{
+    const int kn = (int)strlen(key);
+    int pos = 0;
+    while (pos < (int)t.length()) {
+        const int nl = t.indexOf('\n', pos);
+        const int le = nl < 0 ? (int)t.length() : nl;
+        if (le - pos > kn && t[pos + kn] == '=' && !strncmp(t.c_str() + pos, key, kn)) {
+            *vs = pos + kn + 1;
+            *ve = le;
+            return true;
+        }
+        pos = le + 1;
+    }
+    return false;
+}
+
+static bool key_at_doc(const DeviceConfig* cfg, int index, String* line)
 {
     JsonDocument doc;
     config_to_doc(*cfg, doc, true);
@@ -1576,23 +1704,81 @@ bool msc_fat_key_at(const DeviceConfig* cfg, int index, String* line)
     return false;
 }
 
-// 0.6.33 settings in the log: every "list" line in one pass (one JSON build), key and value as "list" prints them.
+bool msc_fat_key_at(const DeviceConfig* cfg, int index, String* line)
+{
+    if (cfg != &g_deviceConfig) return key_at_doc(cfg, index, line);
+    const String& t = *msc_fat_lines();
+    int ks, eq, le;
+    if (!lines_at(t, index, &ks, &eq, &le)) return false;
+    *line = t.substring(ks, le);
+    if (line->startsWith("cmd_key=")) *line = String("cmd_key=") + String(cfg->cmd_key);  // the stored value, as before
+    return true;
+}
+
+// 0.6.33 settings in the log: every "list" line in one pass, key and value as "list" prints them.
 // cmd_key gives only 0 or "set": the fleet key never goes in the log.
 int msc_fat_each_line(const DeviceConfig* cfg, void (*fn)(void* ctx, int index, const char* key, const char* value),
                       void* ctx)
 {
-    JsonDocument doc;
-    config_to_doc(*cfg, doc, true);
-    int i = 0;
-    String value;
-    for (JsonPair kv : doc.as<JsonObject>()) {
-        value = "";
-        if (!strcmp(kv.key().c_str(), "cmd_key")) value = cfg->cmd_key ? "\"set\"" : "0";
-        else serializeJson(kv.value(), value);
-        fn(ctx, i++, kv.key().c_str(), value.c_str());
-    }
+    String tmp;
+    if (cfg != &g_deviceConfig) lines_build(*cfg, tmp);
+    const String& t = cfg != &g_deviceConfig ? tmp : *msc_fat_lines();
+    int i = 0, ks, eq, le;
+    for (; lines_at(t, i, &ks, &eq, &le); i++) fn(ctx, i, t.substring(ks, eq).c_str(), t.substring(eq + 1, le).c_str());
     return i;
 }
+
+#ifdef DIAG_STEPTIME
+uint32_t lc_saved_builds = 0, lc_rebuilds = 0, lc_why_cfg = 0, lc_why_eff = 0, lc_why_wifi = 0, lc_build_max_us = 0, lc_cb_max_us = 0;
+int lc_cfg_off = -1, lc_eff_idx = -1;
+#ifndef DIAG_NO_LISTCHECK
+// Bench "listcheck" (test builds): the cached lines against a fresh JSON build, line by line, and get for some keys;
+// no value is printed.
+void msc_fat_list_check(int* n, int* diff, uint32_t* build_us, uint32_t* cached_us)
+{
+    *n = *diff = 0;
+    String a, b;
+    uint32_t t0 = micros();
+    key_at_doc(&g_deviceConfig, 0, &b);  // one whole JSON build (the cost before the cache, per key of the list)
+    *build_us = micros() - t0;
+    t0 = micros();
+    msc_fat_key_at(&g_deviceConfig, 60, &a);  // one cached line
+    *cached_us = micros() - t0;
+    for (int i = 0;; i++) {
+        const bool ha = msc_fat_key_at(&g_deviceConfig, i, &a), hb = key_at_doc(&g_deviceConfig, i, &b);
+        if (!ha && !hb) break;
+        (*n)++;
+        if (ha != hb || a != b) (*diff)++;
+    }
+    {  // "list saved": the cached pass against the old per-key builds
+        DeviceConfig* sv = new DeviceConfig();
+        msc_fat_saved_config(sv);
+        String p, ka, ks;
+        for (int i = 0;; i++) {
+            const bool hp = msc_fat_key_pair_at(&g_deviceConfig, sv, i, &p);
+            const bool ho = key_at_doc(&g_deviceConfig, i, &ka) && key_at_doc(sv, i, &ks);
+            if (!hp && !ho) break;
+            (*n)++;
+            const int eq = ks.indexOf('=');
+            if (hp != ho || p != ka + " saved=" + ks.substring(eq + 1)) (*diff)++;
+        }
+        delete sv;
+    }
+    const char* const keys[] = {"cmd_key", "radio_mode", "dsp_pga_eff", "wifi_ssid", "wifi_password", "no_such_key"};
+    JsonDocument doc;
+    config_to_doc(g_deviceConfig, doc, true);
+    for (const char* k : keys) {
+        bool known = false;
+        for (JsonPair kv : doc.as<JsonObject>()) if (!strcmp(kv.key().c_str(), k)) known = true;
+        String d, g;
+        if (known) serializeJson(doc[k], d);
+        const bool hg = msc_fat_get_key(&g_deviceConfig, k, &g);
+        (*n)++;
+        if (hg != known || (known && g != d)) (*diff)++;
+    }
+}
+#endif
+#endif
 
 // 0.6.15: the settings the board takes at its next start: the defaults, then the values stored in NVS.
 void msc_fat_saved_config(DeviceConfig* out)
@@ -1602,12 +1788,26 @@ void msc_fat_saved_config(DeviceConfig* out)
 }
 
 // 0.6.15: "list saved": one line per key, "<key>=<active> saved=<saved>", both values as "list" writes them.
+// The saved value of each key built alone (2026-10-29): a setting's value from the saved settings by put_value, as the whole
+// JSON build gives it; the DSP values in effect and the Wi-Fi keys after the settings are the same in both, so they come
+// from the "list" line. No whole build per key (15-18 ms each), and no copy of all saved lines kept for the pass (3 KB).
 bool msc_fat_key_pair_at(const DeviceConfig* active, const DeviceConfig* saved, int index, String* line)
 {
-    String a, s;
-    if (!msc_fat_key_at(active, index, &a) || !msc_fat_key_at(saved, index, &s)) return false;
-    const int eq = s.indexOf('=');
-    *line = a + " saved=" + (eq >= 0 ? s.substring(eq + 1) : s);
+    String a;
+    if (!msc_fat_key_at(active, index, &a)) return false;
+    const int eq = a.indexOf('=');
+    int k = 0;
+    for (const SettingDef& e : SETTINGS) {
+        if (e.flags & F_LEGACY) continue;
+        if (k++ != index) continue;
+        JsonDocument d;
+        put_value(d.to<JsonVariant>(), e, *saved);
+        String v;
+        serializeJson(d, v);
+        *line = a + " saved=" + v;
+        return true;
+    }
+    *line = a + " saved=" + a.substring(eq + 1);
     return true;
 }
 

@@ -34,6 +34,7 @@
 #include "stm_settings.h"  // STM32 commands: answer check, retry, read-back of the settings (lib/stm_settings)
 #include "stm_v2.h"        // STM32 link version 2: 98 B frames, 8 B command frames with seq and CRC (lib/stm_v2)
 #include <stdarg.h>
+#include "freertos/task_snapshot.h"  // diag_cpu: bench "tasks" lists every task (pxTaskGetNext)
 #include "cpu_prof.h"      // CPU share per FreeRTOS task and per loop part, by sampling (lib/cpu_prof; bench "cpu")
 #include "nvs.h"            // bench "nvs": nvs_get_stats
 #include "soc/rtc_wdt.h"     // 0.5.94: RTC watchdog (a stop with interrupts off resets the system)
@@ -228,7 +229,7 @@ void telemetryFifo_sendMessage();
 extern uint32_t telem_loop_max_us;
 extern int32_t dt_decoded;
 extern uint32_t dt_decoded_ms;
-void telemetryBins();
+void telemetryBins(int inputs = 1);  // inputs: one per 10 ms of update period (1 at 10 ms)
 void dtTelemetry();
 void dtPollService();
 extern bool bench_moving;

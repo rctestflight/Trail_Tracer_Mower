@@ -72,7 +72,7 @@ enum FaultCode : uint8_t { FAULT_NONE, FAULT_STUCK, FAULT_LOST, FAULT_NO_POLARIT
 // NO_MEMORY: the heap has no room for the wire solve at the start of a Bounce mode run
 enum DecisionCode : uint8_t { DEC_NONE, DEC_BOUNCE, DEC_CHECK_FLIP, DEC_JOIN, DEC_FOLLOW, DEC_REVERSE, DEC_BEACON,
                               DEC_DOCK, DEC_DEPART, DEC_RETURN, DEC_FAULT, DEC_TX_OFF, DEC_TX_ON, DEC_START,
-                              DEC_TURN_BACK, DEC_PROBE, DEC_FOLLOW_END, DEC_SQUARE_ON };
+                              DEC_TURN_BACK, DEC_PROBE, DEC_FOLLOW_END, DEC_SQUARE_ON, DEC_SONAR };
 
 struct Config {
   float sensorHeight = 0.15f;      // m
@@ -112,6 +112,9 @@ struct Config {
 
 struct Inputs {
   float dt = 0.01f;                // s since the last step
+  float periodR = 1.0f;            // period factor: update period / 10 ms (lib/frame_pid/frame_period.h); the counts
+                                   // in packets keep their time (1: the values tuned at 10 ms, unchanged)
+  float periodS = 0.01f;           // update period in effect, s (build flag WF_LAG_TIME only)
   bool inRange = false;            // sensor 1: not lost, not overload, not disabled
   float x = 0, y = 0, R = 0;       // m, as the Rx sends them
   int8_t inside = 0;               // polarity: +1 inside the loop, -1 outside, 0 not known
@@ -127,6 +130,11 @@ struct Inputs {
   bool needCharge = false;         // return voltage reached (a charge is due)
   float beaconRange = 99;          // m, the nearest beacon (filtered)
   bool entryBeacon = false, exitBeacon = false;
+  // Sonar (0.7.5, Arduino Nano; src/main.cpp): bit i set = sonar i+1 read under the sonar trigger distance in each of
+  // the last "readings in a row" records, and the Nano stream is not stale. Sonar 1 and 2 face forward, 3 and 4 back.
+  // 0: no sonar near, no stream, or no sonar wired (then no behaviour changes)
+  uint8_t sonarNear = 0;
+  uint16_t sonarMm[4] = {0, 0, 0, 0};  // the last record, the Nano's unit (mm), for the decision log
 };
 
 struct Output {
@@ -152,6 +160,8 @@ struct Decision {
   bool solveOk = false;            // the wire position solve at this decision (Bounce and Reverse bounce: the bounce and the probe on entry)
   float solvePsiDeg = 0, solveD = 0;   // its wire direction in the rover frame (+ counterclockwise) and distance, m
   uint8_t solveSensor = 1;         // the sensor the solve took (2: sensor 2 led in reverse)
+  uint8_t sonar = 0;               // DEC_SONAR: the sonar that triggered (1 to 4); else 0
+  uint16_t sonarMm = 0;            // DEC_SONAR: its distance, the Nano's unit (mm)
 };
 
 const char* stateName(State s);
@@ -176,6 +186,7 @@ class Autopilot {
   void halt(FaultCode why) { toFault(why); }
   bool isLocked() const { return false; }  // no follow lock in this design (telemetry flag)
   bool holding() const { return hold_; }   // a turn on the spot, or its end: no event (the pivot rule)
+  int8_t driveDir() const { return dir_; } // the roam drive direction: +1 forward, -1 reverse (Reverse bounce: the sonar side)
 
  private:
   Output stepStates(const Inputs& in);
@@ -200,6 +211,9 @@ class Autopilot {
   void bounceNow(const Inputs& in);
   void joinNow(const Inputs& in);
   int8_t polSide(const Inputs& in) const;
+  bool sonarCheck(const Inputs& in);   // the roam drive: an object near the sonars of the drive direction (SUB_BSTOP)
+  bool sonarTurn_ = false;          // the SUB_BSTOP stop is the sonar's (else the beacon's)
+  int8_t sonarDir_ = 1;             // Bounce: the side of the sonar's 180 deg pivot
 
   uint32_t rng_ = 12345;
   float lostT_ = 0, stopT_ = 0, startT_ = 0;
@@ -221,6 +235,11 @@ class Autopilot {
   int turnBacks_ = 0;
   State dockFrom_ = FOLLOW;
   int wrongCount_ = 0;
+  // Counts in packets at the update period (periodApply): tuned at 10 ms, the same time at any period
+  float periodR_ = 1.0f;
+  float wrongN_ = 20;               // WRONG_FRAMES
+  int bMedN_ = 5;                   // B_MED: packets in the radius median
+  void periodApply(const Inputs& in);
   bool entrySeen_ = false, exitArmed_ = true;
   // approach fit and probe
   ApproachFit fit_;
@@ -295,7 +314,7 @@ class Autopilot {
   int8_t bP_ = 1, bM_ = 1, bS_ = 1; // wire side: inside where bP_ x > 0; side memory; sign of y with the wire below
   bool bWasLost_ = true;
   float bXLast_ = 0;
-  static const int B_MED = 5;
+  static const int B_MED = 5;       // packets in the radius median at 10 ms (also the history size; bMedN_ in use)
   float bHist_[B_MED] = {0};
   int bN_ = 0, bI_ = 0;
   float bPeakX_ = -1e9f;     // highest side distance reading (bP_ x) since the last turn (the roam join)

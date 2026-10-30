@@ -96,6 +96,9 @@ enum EventCode : uint16_t {
   EV_BUTTON = 23,     // 0.6.34: a button press: a action (ButtonAction, include/rx_platform.h: 0 none, 1 auto drive mode on,
                       // 2 cruise toggle, 3 centre calibration, 4 steering direction, 5 erase hold start, 6 erase cancelled,
                       // 7 erase done), b press length ms, text the action and its result
+  EV_SONAR = 24,      // 0.7.5: the sonar (src/main.cpp). a 1 to 4: a sonar trigger, the sonar number; b its distance (the Nano
+                      // unit, mm); text the action. a 0: the Nano stream; b 1 records arrive (the first of the start, or
+                      // again after a stop), 0 no record for SONAR_STALE_MS (the rover ignores the sonar)
 };
 
 // One sample, in engineering units; packSample() quantises it.
