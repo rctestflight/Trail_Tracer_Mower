@@ -581,7 +581,15 @@ void odrive_outputUpdate(bool frame_now) {
     odrive_stopRc();
   } else if (!odrive_rc_active && rc_ready) {
     odrive_startRc();
+#ifdef IMU_I2C_NB
+    // 0.7.6: the arming holds the loop about 66 ms and no IMU read starts in that time, so the newest sample is older
+    // than the 50 ms gyro limit and the check below stopped the motors at each arm (0.7.5). Wait for a new sample, 5 ms
+    // at most (one read is about 0.5 ms at 400 kHz).
+    const uint32_t arm_wait_ms = millis();
+    do serviceMpu(); while (millis() - gyro_sample_ms > 50 && millis() - arm_wait_ms < 5);
+#else
     serviceMpu(); // Arming takes time; refresh feedback before the first rate calculation.
+#endif
     if (odrive_rc_active && !steeringRateGyroValid()) odrive_stopRc();
   }
   float even_rps = 0.0f, odd_rps = 0.0f;

@@ -848,6 +848,20 @@ void benchSerial(){
     } else if (!strcmp(line, "verbose on") || !strcmp(line, "verbose off")) {
       usb_verbose = line[9] == 'n';  // this boot only
       usbOut.printf("verbose=%d%c", (int)usb_verbose, 10);
+#ifdef DIAG_ARMGAP
+    } else if (!strcmp(line, "armgap")) {
+      // diag build: the IMU sample age after a 66 ms hold (the arming), with the 0.7.5 refresh and with the 0.7.6 wait
+      for (int i = 0; i < 10; i++) {
+        delay(66); serviceMpu();
+        const uint32_t age_old = millis() - gyro_sample_ms;
+        delay(66);
+        const uint32_t t0 = millis();
+        do serviceMpu(); while (millis() - gyro_sample_ms > 50 && millis() - t0 < 5);
+        usbOut.printf("ARMGAP old_age_ms=%lu old_valid=%d new_age_ms=%lu new_wait_ms=%lu new_valid=%d\n", (unsigned long)age_old,
+                      (int)(age_old <= 50), (unsigned long)(millis() - gyro_sample_ms), (unsigned long)(millis() - t0),
+                      (int)steeringRateGyroValid());
+      }
+#endif
     } else if (!strcmp(line, "drv")) {
       // bench: the drive chain for the PC Start/Stop trace: mode, rover state, the ODrive commands (CAN)
       // The commanded values come before the motor locks (gyro, arm switch, CAN): a bench board with no

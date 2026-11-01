@@ -3,6 +3,8 @@
 #pragma once
 
 // Change history
+//   0.7.6: 0.7.5 + the motor arm fix: after the arm commands the loop waits for a new IMU sample (5 ms at most);
+//     0.7.5 found the sample too old after the 66 ms arm and stopped the motors at each arm.
 //   0.7.5: 0.7.4 + the CPU savings (fast maths, flash cache in QIO mode, faster wire solve, control loop above the
 //     solve, non-blocking I2C, IMU savings, every count in packets in time) + the save refusal in run mode, merged
 //     with 89b5e40 (the Nano sonar stream on UART0 RX GPIO33, LED patterns, MON LED blip removed, USB coil print off,
@@ -405,12 +407,12 @@
 #if defined(OTA_TEST_VERSION)
 #define ROVER_FW_VERSION OTA_TEST_VERSION  // OTA test images (envs ota_a, ota_b, ota_test_crash)
 #elif defined(BENCH_FAKE_IMU)
-#define ROVER_FW_VERSION "0.7.5+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.7.6+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #elif defined(SETTINGS_NEWKEY)
-#define ROVER_FW_VERSION "0.7.5-newkey"  // bench build: one more table line (test_new_setting)
+#define ROVER_FW_VERSION "0.7.6-newkey"  // bench build: one more table line (test_new_setting)
 #elif defined(TELEMETRY_NEWVALUE)
-#define ROVER_FW_VERSION "0.7.5-newvalue"  // bench build: the example lines of include/user_telemetry.h
+#define ROVER_FW_VERSION "0.7.6-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.7.5"
+#define ROVER_FW_VERSION "0.7.6"
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
