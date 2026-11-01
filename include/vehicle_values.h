@@ -19,6 +19,7 @@ extern bool enable_sensor_2;
 bool sensor2Control();  // 0.6.36: sensor 2 acts on behaviour ("Sensor 2" and "Use sensor 2 for control" both on)
 extern StuckVehicle stuckDetector;
 extern bool odrive_rc_active;
+extern uint32_t drive_cmd_ms;  // 0.7.7: millis() of the last drive command that moves the vehicle; 0: none
 extern float odrive_drive_command;
 extern float odrive_steer_command;
 extern bool odrive_output_enabled;

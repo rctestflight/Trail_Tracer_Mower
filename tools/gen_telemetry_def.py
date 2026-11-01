@@ -206,8 +206,16 @@ def fixed_fields(e, errs):
         errs.append(f'{w}: offset, scale, decimals or none: numbers (scale not 0, decimals 0 to 9, none or -)')
         return []
     names = [x for x in e['names'].split('|')] if e['names'] else []
+    # @field=value: the field exists only when that field (decoded before it) has that value; any kind (0.7.7)
+    when = [x for x in names if x.startswith('@')]
+    names = [x for x in names if not x.startswith('@')]
+    if len(when) > 1:
+        errs.append(f'{w}: one @field=value at most')
     f0 = {'type': jtype, 'scale': jnum(scale), 'unit': e['unit'], 'decimals': dec, 'label': e['label'],
           'group': e['group'], 'kind': kind.lower(), 'none': none}
+    if when:
+        k, _, v = when[0][1:].partition('=')
+        f0['when'] = [k, json.loads(v)]
     if tm.group(2) == '>>':
         f0['shift'] = int(tm.group(3))
         f0['mask'] = (1 << (8 * size - int(tm.group(3)))) - 1
@@ -223,8 +231,6 @@ def fixed_fields(e, errs):
             k, _, v = x.partition('=')
             if k == '*':
                 f0['unknown'] = v
-            elif k.startswith('@'):
-                f0['when'] = [k[1:], json.loads(v)]
             else:
                 f0['names'][str(int(k, 0))] = v
     elif names and not dims:

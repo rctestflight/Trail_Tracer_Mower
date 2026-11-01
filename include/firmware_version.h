@@ -3,6 +3,18 @@
 #pragma once
 
 // Change history
+//   0.7.7: the motors are on only while the rover is meant to move. RC modes: on while the arm switch is on and the
+//     radio link is valid, as an RC car. Autonomous mode: on while the autopilot moves the rover, off 1 s after it
+//     stops. Every stop (signal overload, Rx supply or temperature, old drive command, radio lost, gyro gap, stuck,
+//     charging, rover fault) turns them off, and they come on again when it ends. A real fault (motor controller error
+//     or silence, CAN lost, gyro dead or reset, Rx STM32 lost) holds them off until the arm switch toggles. The
+//     buzzer as 0.7.5 (motor controller faults). The arm sends
+//     one command per loop pass with the same gaps (no 66 ms hold; the 0.7.6 wait is gone). No save or restart while
+//     the drive command moves the vehicle, on every vehicle type. The Rx STM32 recovery also runs with no frame since
+//     the start. Typed events (body 0x38, include/telemetry_table.h layout EV), each once when it happens: each
+//     turn-off with its reason, CAN and motor controller states, errors, versions, presence, the crash record,
+//     start-up steps, IMU offsets and reset, Rx STM32 handshake and version, build id; the first drive mode; no Nano.
+//     No settings dump each 10 min. Wi-Fi log sends go on when the frames stop. imu_halt and imu_required removed.
 //   0.7.6: 0.7.5 + the motor arm fix: after the arm commands the loop waits for a new IMU sample (5 ms at most);
 //     0.7.5 found the sample too old after the 66 ms arm and stopped the motors at each arm.
 //   0.7.5: 0.7.4 + the CPU savings (fast maths, flash cache in QIO mode, faster wire solve, control loop above the
@@ -407,12 +419,12 @@
 #if defined(OTA_TEST_VERSION)
 #define ROVER_FW_VERSION OTA_TEST_VERSION  // OTA test images (envs ota_a, ota_b, ota_test_crash)
 #elif defined(BENCH_FAKE_IMU)
-#define ROVER_FW_VERSION "0.7.6+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.7.7+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #elif defined(SETTINGS_NEWKEY)
-#define ROVER_FW_VERSION "0.7.6-newkey"  // bench build: one more table line (test_new_setting)
+#define ROVER_FW_VERSION "0.7.7-newkey"  // bench build: one more table line (test_new_setting)
 #elif defined(TELEMETRY_NEWVALUE)
-#define ROVER_FW_VERSION "0.7.6-newvalue"  // bench build: the example lines of include/user_telemetry.h
+#define ROVER_FW_VERSION "0.7.7-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.7.6"
+#define ROVER_FW_VERSION "0.7.7"
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A

@@ -109,7 +109,9 @@ SF(rover_no_tx_roam_s, float, T_F32, 20, 0.1, 86400, "", "rvNoTxRm", 0, "s", "Ro
 SF(rover_no_tx_s, float, T_F32, 2, 0.1, 86400, "", "rvNoTxS", 0, "s", "Rover: every roam mode", "Stop after no Tx signal for", "Every roam mode, in join, follow, depart and dock: no Tx signal (the wire signal under 10 dB on both sensors) this long: stop and wait until it returns")
 S(espnow_tx_power_dbm,   espnow_tx_power_dbm,   T_F64,    19.5,  2,     19.5,   "",        "txDbm",    0,          "", "", "", "")
 S(cmd_key,               cmd_key,               T_LONG,   0,     NOLIM, NOLIM,  "",        "cmdKey",   0,          "", "", "", "")
-S(imu_required,          imu_required,          T_BOOL,   1,     NOLIM, NOLIM,  "",        "imuReq",   0,          "", "", "", "")
+// 0.7.7: imu_required had no effect (the gyro check in the motor output keeps the motors off with no gyro). F_LEGACY: an
+// older config.json with the key loads with no bad-key event; no list, get or set.
+S(imu_required,          imu_required,          T_BOOL,   1,     NOLIM, NOLIM,  "",        "imuReq",   F_LEGACY,   "", "", "", "")
 S(dsp_frame_period_us,   dsp_frame_period_us,   T_I32,    10000, DSP_FRAME_PERIOD_MIN_US, 655350, "", "dspPer", 0,    "", "", "", "")
 // 0.6.36: dsp_sensors and dsp_lanes are no user settings: "Sensor 2" (enable_sensor_2) sets both (rx_link.inc dspApply). F_LEGACY:
 // an older config.json with these keys loads with no error, and the values have no effect.

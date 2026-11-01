@@ -29,6 +29,9 @@ class ImuNb {
   float getGyroXoffset() const { return gyroXoffset; }
   float getGyroYoffset() const { return gyroYoffset; }
   float getGyroZoffset() const { return gyroZoffset; }
+  float getAccXoffset() const { return accXoffset; }
+  float getAccYoffset() const { return accYoffset; }
+  float getAccZoffset() const { return accZoffset; }
   void setGyroOffsets(float x, float y, float z) { gyroXoffset = x; gyroYoffset = y; gyroZoffset = z; }
   void setAccOffsets(float x, float y, float z) { accXoffset = x; accYoffset = y; accZoffset = z; }
   // The scale of MPU6050_light setGyroConfig() / setAccConfig() for config_num 0..3; the register write is separate.

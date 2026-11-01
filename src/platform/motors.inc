@@ -8,6 +8,7 @@
 
 // ODrive CAN protocol command IDs (see ODrive CAN protocol docs)
 enum OdriveCanCmd : uint8_t {
+  ODRIVE_CMD_GET_VERSION            = 0x000, // 0.7.7: protocol, hardware and firmware version (ODrive manual)
   ODRIVE_CMD_HEARTBEAT              = 0x001,
   ODRIVE_CMD_ESTOP                  = 0x002,
   ODRIVE_CMD_GET_MOTOR_ERROR        = 0x003,
@@ -25,10 +26,12 @@ enum OdriveCanCmd : uint8_t {
 };
 
 bool can_driver_installed = false;
+static uint32_t can_send_lost = 0;  // 0.7.7: sends that the full queue refused in this episode (EV_CAN_SEND_LOST at its end)
 bool can_init_ok = false;  // Peripheral running, not proof of an ODrive connection.
 
 uint32_t odrive_axis_errors[ODRIVE_NODE_COUNT] = {};
 bool odrive_heartbeat_received[ODRIVE_NODE_COUNT] = {};
+static bool odrive_silent[ODRIVE_NODE_COUNT] = {};  // 0.7.7: heard, then no heartbeat for ODRIVE_SILENT_MS
 uint32_t odrive_heartbeat_millis[ODRIVE_NODE_COUNT] = {};
 uint8_t odrive_axis_states[ODRIVE_NODE_COUNT] = {};
 uint8_t odrive_status_byte5[ODRIVE_NODE_COUNT] = {};
@@ -79,6 +82,7 @@ bool odriveCan_init() {
   /* usbOut.printf("Boot: TWAI install returned %s\n", esp_err_to_name(err)); */;
   if (err != ESP_OK) {
     /* usbOut.printf("TWAI install FAILED: %s\n", esp_err_to_name(err)); */;
+    ev2::Ev(rec::EV_STARTUP).u8(3).u32((uint32_t)err).u32(millis()).send();  // 0.7.7: CAN start failed
     return false;
   }
   can_driver_installed = true;
@@ -86,10 +90,12 @@ bool odriveCan_init() {
   err = twai_start();
   if (err != ESP_OK) {
     /* usbOut.printf("TWAI start FAILED: %s\n", esp_err_to_name(err)); */;
+    ev2::Ev(rec::EV_STARTUP).u8(3).u32((uint32_t)err).u32(millis()).send();  // 0.7.7: CAN start failed
     twai_driver_uninstall();
     can_driver_installed = false;
     return false;
   }
+  ev2::Ev(rec::EV_STARTUP).u8(3).u32(0).u32(millis()).send();  // 0.7.7: CAN started
   /* usbOut.printf("TWAI init OK: TX=%d RX=%d bitrate=%u normal mode\n",
                 (int)TWAI_TX_PIN, (int)TWAI_RX_PIN, (unsigned)CAN_BUS_BITRATE); */;
   return true;
@@ -123,6 +129,9 @@ bool sendODriveCAN(uint8_t nodeID, uint8_t commandID,
   if (!remote && length) memcpy(frame.data, data, length);
   // Zero timeout: a full queue fails immediately, preserving loop responsiveness.
   esp_err_t err = twai_transmit(&frame, 0);
+  // 0.7.7: one event for each run of refused sends, with its count, at the first send that goes again
+  if (err != ESP_OK) can_send_lost++;
+  else if (can_send_lost) { ev2::Ev(rec::EV_CAN_SEND_LOST).u32(can_send_lost).send(); can_send_lost = 0; }
   if (err != ESP_OK) {
     static uint32_t last_report = 0;
     if (millis() - last_report >= 1000) {
@@ -194,6 +203,22 @@ void odrive_clearErrors(uint8_t node_id) {
   sendODriveCAN(node_id, frame.identifier & 0x1F, frame.data, frame.data_length_code);
 }
 
+// 0.7.7: the CAN bus in the log: each bus state change (EV_CAN_STATE) and alert bits not seen before in this start
+// (EV_CAN_ALERT; a bus with no motor controller gives bus errors at each send, so each bit is logged once).
+static void canLogService(uint32_t alerts, const twai_status_info_t& st){
+  static int last_state = 255;
+  static uint32_t seen_alerts = 0;
+  if ((int)st.state != last_state) {
+    ev2::Ev(rec::EV_CAN_STATE).u8((uint8_t)last_state).u8((uint8_t)st.state).u16((uint16_t)st.tx_error_counter)
+      .u16((uint16_t)st.rx_error_counter).u32(st.bus_error_count).send();
+    last_state = (int)st.state;
+  }
+  if (alerts & ~seen_alerts) {
+    ev2::Ev(rec::EV_CAN_ALERT).u32(alerts & ~seen_alerts).send();
+    seen_alerts |= alerts;
+  }
+}
+
 // Recovery runs asynchronously: initiate once, poll state, restart after recovery.
 void odrive_recoverIfNeeded() {
   if (!can_driver_installed) return;
@@ -206,6 +231,7 @@ void odrive_recoverIfNeeded() {
   }
   twai_status_info_t status;
   if (twai_get_status_info(&status) != ESP_OK) return;
+  canLogService(alerts, status);
   can_init_ok = status.state == TWAI_STATE_RUNNING;
   if (status.state == TWAI_STATE_BUS_OFF) {
     esp_err_t err = twai_initiate_recovery();  // Clears pending TX; never waits for recovery.
@@ -260,9 +286,10 @@ void odrive_pollAndPrintCan() {
   if (!can_init_ok) return;
   twai_message_t frame = {};
   const uint32_t started_us = micros();
+  bool drained = false;
   // Drain bursts with bounded work; inspect every received frame for events.
-  for (uint8_t received = 0; received < 64 &&
-       micros() - started_us < 2000 && receiveODriveCAN(frame); received++) {
+  for (uint8_t received = 0; received < 64 && micros() - started_us < 2000; received++) {
+    if (!receiveODriveCAN(frame)) { drained = true; break; }
     if (frame.extd || frame.rtr || frame.data_length_code > 8) continue;
     uint8_t node_id = frame.identifier >> 5;
     uint8_t cmd_id = frame.identifier & 0x1F;
@@ -282,6 +309,17 @@ void odrive_pollAndPrintCan() {
         usbOut.println();
       }
       odrive_seen_errors[node_id] |= odrive_axis_errors[node_id];
+      // 0.7.7: each axis state change (EV_ODRIVE_STATE); the first heartbeat, and the first after a silence
+      // (EV_ODRIVE_PRESENCE); the firmware version, asked once when first heard (Get_Version, cmd 0x00)
+      if (!odrive_heartbeat_received[node_id] || odrive_axis_states[node_id] != frame.data[4])
+        ev2::Ev(rec::EV_ODRIVE_STATE).u8(node_id).u8(odrive_heartbeat_received[node_id] ? odrive_axis_states[node_id] : 0)
+          .u8(frame.data[4]).send();
+      if (!odrive_heartbeat_received[node_id] || odrive_silent[node_id]) {
+        ev2::Ev(rec::EV_ODRIVE_PRESENCE).u8(node_id).u8(1)
+          .u16((uint16_t)min<uint32_t>(odrive_heartbeat_received[node_id] ? millis() - odrive_heartbeat_millis[node_id] : 0, 65535)).send();
+        odrive_silent[node_id] = false;
+      }
+      if (!odrive_heartbeat_received[node_id]) sendODriveCAN(node_id, ODRIVE_CMD_GET_VERSION, nullptr, 0);
       odrive_axis_states[node_id] = frame.data[4];
       // Preserve raw bytes: newer firmware uses procedure result/trajectory done;
       // older firmware can use motor/encoder/controller flags here.
@@ -308,6 +346,8 @@ void odrive_pollAndPrintCan() {
       odrive_error_received[node_id] = true;
       odrive_error_millis[node_id] = millis();
     }
+    if (cmd_id == ODRIVE_CMD_GET_VERSION && frame.data_length_code == 8)  // 0.7.7: ODrive manual, Get_Version
+      ev2::Ev(rec::EV_ODRIVE_VERSION).u8(node_id).bytes(&frame.data[1], 7).send();  // byte 0: protocol version
     if (cmd_id == ODRIVE_CMD_GET_ENCODER_ESTIMATES && frame.data_length_code == 8) {
       memcpy(&odrive_vel_rps[node_id], &frame.data[4], sizeof(float));  // pos [rev] at 0, vel [rev/s] at 4
       memcpy(&odrive_pos_rev[node_id], &frame.data[0], sizeof(float));
@@ -328,6 +368,22 @@ void odrive_pollAndPrintCan() {
       }
     }
   }
+  // 0.7.7: a motor controller heard in this start that goes silent: one event (EV_ODRIVE_PRESENCE, present 0). Only with
+  // the receive queue empty: after a loop hold the queued heartbeats are not yet read.
+  if (!drained) return;
+  for (uint8_t n = 0; n < ODRIVE_NODE_COUNT; ++n) {
+    const uint32_t age = millis() - odrive_heartbeat_millis[n];
+    if (odrive_heartbeat_received[n] && !odrive_silent[n] && age > ODRIVE_SILENT_MS) {
+      odrive_silent[n] = true;
+      ev2::Ev(rec::EV_ODRIVE_PRESENCE).u8(n).u8(0).u16((uint16_t)min<uint32_t>(age, 65535)).send();
+    }
+  }
+}
+
+// 0.7.7: the first silent motor controller (a fault), or 255
+uint8_t odriveSilentNode() {
+  for (uint8_t n = 0; n < ODRIVE_NODE_COUNT; ++n) if (odrive_silent[n]) return n;
+  return 255;
 }
 
 void odrive_printErrorNames(uint32_t errors) {

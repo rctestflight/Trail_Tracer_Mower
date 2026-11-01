@@ -97,7 +97,11 @@ static void sonarRecordDone() {
 
 // Each loop pass, after readSonar(): the stale rule, its events, and the near mask.
 static void sonarService() {
-  if (!sonar_have) return;
+  if (!sonar_have) {  // 0.7.7: no Nano: one event 5 s after the start (records that come later log "records arrive")
+    static bool told = false;
+    if (!told && millis() > 5000) { told = true; sonarEvent(0, 0, "Nano stream: no record in the first 5 s"); }
+    return;
+  }
   const bool stale = (uint32_t)(millis() - sonar_record_ms) > SONAR_STALE_MS;
   if (stale != sonar_stale) {
     sonar_stale = stale;
@@ -464,19 +468,12 @@ bool odrive_rcInputsValid() {
          pwm_read_rmt_valid(1, ODRIVE_RC_SIGNAL_TIMEOUT_MS);
 }
 
-// RC block bits: 1=axis error, 4=wire overload,
-// 8=STM32 supply fault, 16=overtemperature.
-uint32_t odrive_rc_fault_bits = 0;
+// A motor controller reports an axis error: no arm. 0.7.7: the signal overload, the Rx STM32 supply fault and its
+// temperature are stops of the frame step (drive_pause_reason); they block the arm there.
 bool odrive_rcFault() {
-  uint32_t faults = 0;
-  for (uint8_t node = 0; node < ODRIVE_NODE_COUNT; ++node) {
-    if (odrive_axis_errors[node]) faults |= 1;
-  }
-  if (WFRX_STATUS_GET_BIT(stmPacket.items.status_bits, WFRX_STATUS_S1_SIGNAL_OVERLOAD)) faults |= 4;
-  if (WFRX_STATUS_GET_BIT(stmPacket.items.status_bits, WFRX_STATUS_VDD_FAULT)) faults |= 8;
-  if (stmPacket.items.temperature > 100) faults |= 16;
-  odrive_rc_fault_bits = faults;
-  return faults != 0;
+  for (uint8_t node = 0; node < ODRIVE_NODE_COUNT; ++node)
+    if (odrive_axis_errors[node]) return true;
+  return false;
 }
 
 // Map the final servo-equivalent output to -1..1 using its configured center
@@ -488,45 +485,91 @@ float odrive_normalizeOutput(double pulse_us, int center, int minimum, int maxim
   return constrain((float)(offset / span), -1.0f, 1.0f);
 }
 
-void odrive_stopRc() {
+// 0.7.7 (the drive and fault rules). The motors are on only while the rover is meant to move. RC modes (0 and 1): on
+// while the arm switch is on and the radio link is valid, stick centred or not, as an RC car. Autonomous mode (2): on
+// only while the autopilot moves the rover (a turn on the spot moves it), off AUTO_STOP_MS after it stops. Every stop
+// turns them off at once, and they come on again when the stop ends: signal overload, the Rx STM32 supply fault or
+// temperature, an old drive command, the radio link lost, a gyro gap, stuck, charging, a rover fault. A real fault
+// turns them off and holds them off until the arm switch goes low and high again: a motor controller error, CAN not
+// running, the gyro dead or reset, the Rx STM32 lost, or a motor controller gone silent. Each turn-off is one log
+// event with its reason (rec::EV_DISARM).
+// ODRIVE_SILENT_MS: include/rx_platform.h. STM_LOST_MS: the age at which the Rx STM32 recovery starts
+// (STM_RECOVER_GAP_MS).
+#define STM_LOST_MS 1000
+// GYRO_DEAD_MS: no gyro sample for this long is a dead gyro (a fault). A shorter gap (a loop hold: a settings save at
+// rest holds the loop about 45 ms) pauses the drive at zero speed, as the gyro rate loop needs a sample of 50 ms or less.
+#define GYRO_DEAD_MS 250
+#define AUTO_STOP_MS 1000  // autonomous mode: no moving command this long turns the motors off (the save/restart rule's 1 s)
+uint8_t drive_pause_reason = 0;  // DisarmReason of the frame step's stop (odrive_output_enabled false); 0: none
+uint8_t odrive_off_reason = 0;   // DisarmReason of the last turn-off; 0: none since the last arm
+uint8_t odrive_fault_latch = 0;  // DisarmReason of the held fault; 0: none
+int8_t odrive_arm_step = -1;     // the arm in progress: node * 4 + part; -1: none
+uint32_t odrive_arm_us = 0;      // micros() when the next arm command may go
+int8_t odrive_clear_node = -1;   // the arm-switch clear in progress: the next node; -1: none
+uint32_t odrive_clear_us = 0;
+uint32_t drive_cmd_ms = 0;       // millis() of the last drive command that moves the vehicle (vehicleStationary())
+
+void odrive_stopRc(uint8_t reason, uint8_t node = 255) {
+  if (odrive_rc_active || odrive_arm_step >= 0) {
+    disarmEvent(reason, node, odrive_fault_latch != 0);
+    odrive_off_reason = reason;
+  }
   odrive_rc_active = false;
+  odrive_arm_step = -1;
   steeringRateReset();
-  for (uint8_t node = 0; node < ODRIVE_NODE_COUNT; ++node) {
-    odrive_setInputVel(node, 0.0f);
-    odrive_setAxisState(node, ODRIVE_AXIS_STATE_IDLE);
+  for (uint8_t n = 0; n < ODRIVE_NODE_COUNT; ++n) {
+    odrive_setInputVel(n, 0.0f);
+    odrive_setAxisState(n, ODRIVE_AXIS_STATE_IDLE);
   }
-  /* usbOut.println("ODrive RC: STOP REQUESTED (RC signal or safety fault)"); */;
 }
 
+// The arm: for each node clear errors, controller mode, limits (the example's per-node current limits), then zero
+// speed and closed loop, with the gaps of 0.7.6 (2, 2, 2, 5 ms). One command per loop pass when its gap has passed:
+// the loop never waits (0.7.5 held it 66 ms, and its gyro check then found the sample too old).
 void odrive_startRc() {
-  if (digitalRead(MOTOR_ARM_SWITCH_PIN) == LOW ||
-      !can_init_ok || !odrive_rcInputsValid() || odrive_rcFault()) return;
-  for (uint8_t node = 0; node < ODRIVE_NODE_COUNT; ++node) {
-    if (digitalRead(MOTOR_ARM_SWITCH_PIN) == LOW) {
-      odrive_stopRc();
-      return;
-    }
-    odrive_clearErrors(node);
-    delay(2);
-    odrive_setControllerMode(node, ODRIVE_CONTROL_MODE_VELOCITY, ODRIVE_INPUT_MODE_PASSTHROUGH);
-    delay(2);
-    // Preserve the example's per-node current limits.
-    odrive_setLimits(node, ODRIVE_VEL_LIMIT_RPS, (node == 2 || node == 3) ? 6.0f : 3.0f);
-    delay(2);
-    odrive_setInputVel(node, 0.0f);
-    if (digitalRead(MOTOR_ARM_SWITCH_PIN) == LOW) {
-      odrive_stopRc();
-      return;
-    }
-    odrive_setAxisState(node, ODRIVE_AXIS_STATE_CLOSED_LOOP);
-    delay(5);
+  odrive_off_reason = 0;
+  odrive_arm_step = 0;
+  odrive_arm_us = micros();
+}
+static void odrive_armService() {
+  if (odrive_arm_step < 0 || (int32_t)(micros() - odrive_arm_us) < 0) return;
+  static const uint8_t GAP_MS[4] = {2, 2, 2, 5};
+  const uint8_t node = (uint8_t)(odrive_arm_step / 4), part = (uint8_t)(odrive_arm_step % 4);
+  switch (part) {
+    case 0: odrive_clearErrors(node); break;
+    case 1: odrive_setControllerMode(node, ODRIVE_CONTROL_MODE_VELOCITY, ODRIVE_INPUT_MODE_PASSTHROUGH); break;
+    case 2: odrive_setLimits(node, ODRIVE_VEL_LIMIT_RPS, (node == 2 || node == 3) ? 6.0f : 3.0f); break;
+    default: odrive_setInputVel(node, 0.0f); odrive_setAxisState(node, ODRIVE_AXIS_STATE_CLOSED_LOOP); break;
   }
-  odrive_rc_update_millis = millis();
-  odrive_rc_active = true;
-  /* usbOut.println("ODrive RC: ARM REQUESTED (nodes 0-5); PWM1 steer / PWM2 throttle"); */;
+  odrive_arm_us = micros() + GAP_MS[part] * 1000u;
+  if (++odrive_arm_step >= ODRIVE_NODE_COUNT * 4) {
+    odrive_arm_step = -1;
+    odrive_rc_active = true;
+  }
+}
+// The arm switch low to high: clear the errors of each node, 2 ms apart, one per loop pass (was 6 x delay(2)).
+static void odrive_clearService() {
+  if (odrive_clear_node < 0 || (int32_t)(micros() - odrive_clear_us) < 0) return;
+  odrive_clearErrors((uint8_t)odrive_clear_node);
+  odrive_clear_us = micros() + 2000u;
+  if (++odrive_clear_node >= ODRIVE_NODE_COUNT) odrive_clear_node = -1;
 }
 
-// Called where throttle/steering servos used to be commanded.
+// A real fault while the motors are on (0.7.7): its DisarmReason, and the node in *node; 0: none.
+static uint8_t odrive_faultNow(uint32_t now, uint8_t* node) {
+  *node = 255;
+  if (!can_init_ok) return DISARM_CAN;
+  for (uint8_t n = 0; n < ODRIVE_NODE_COUNT; ++n)
+    if (odrive_axis_errors[n]) { *node = n; return DISARM_ODRIVE_ERROR; }
+  if ((*node = odriveSilentNode()) != 255) return DISARM_ODRIVE_SILENT;
+  if (imuResetSeen()) return DISARM_GYRO_RESET;
+  if (!gyro_ready || !isfinite(mpu.getGyroZ()) || millis() - gyro_sample_ms > GYRO_DEAD_MS) return DISARM_GYRO;
+  if (now - stmLastPacketMs() > STM_LOST_MS) return DISARM_STM_LOST;
+  return 0;
+}
+
+// Called where throttle/steering servos used to be commanded. enabled false: a stop (drive_pause_reason); the motors
+// turn off in odrive_outputUpdate().
 void odrive_setDriveOutput(double throttle_us, double steering_us, bool enabled) {
   odrive_output_millis = millis();
   odrive_output_enabled = enabled;
@@ -541,28 +584,39 @@ void odrive_setDriveOutput(double throttle_us, double steering_us, bool enabled)
     steeringRateSetTargetDps(0.0);
     steeringRateReset();
   }
-  if (!enabled && odrive_rc_active) odrive_stopRc();
 }
 
+bool driveUsesCan();
 // frame_now: called with a new STM32 frame (the CAN commands go out with every frame). loop() also calls it
-// every pass: with no frame for ODRIVE_RC_UPDATE_MS it sends the last commands again (ODrive watchdog floor).
+// every pass: the arm and clear steps, the fault check, and with no frame for ODRIVE_RC_UPDATE_MS it sends the last
+// commands again (ODrive watchdog floor).
 void odrive_outputUpdate(bool frame_now) {
-  imuTake(1);  // the newest IMU sample (test build IMU_I2C_NB; empty otherwise)
+  imuTake(1);  // the newest IMU sample
   const uint32_t now = millis();
-  const bool motor_idle_requested = digitalRead(MOTOR_ARM_SWITCH_PIN) == LOW;
-  const bool arm_switch_high = !motor_idle_requested;
+  const bool arm_switch_high = digitalRead(MOTOR_ARM_SWITCH_PIN) == HIGH;
   if (arm_switch_high && !odrive_arm_switch_was_high && can_init_ok) {
-    // Clear faults before rc_ready checks the reported axis errors. Otherwise
-    // a latched fault prevents odrive_startRc() from ever reaching Clear_Errors.
-    // Keep the reported faults until CAN confirms the clear, including for the
-    // buzzer; an unsuccessful clear must not silence a real fault.
-    for (uint8_t node = 0; node < ODRIVE_NODE_COUNT; ++node) {
-      odrive_clearErrors(node);
-      delay(2);
-    }
+    // The arm switch low to high: the held fault ends, and the motor controller errors clear (before the arm checks
+    // the reported axis errors). The reported faults stay until CAN confirms the clear, also for the buzzer.
+    odrive_fault_latch = 0;
+    odrive_clear_node = 0;
+    odrive_clear_us = micros();
   }
   odrive_arm_switch_was_high = arm_switch_high;
-  if (motor_idle_requested && odrive_rc_active) odrive_stopRc();
+  odrive_clearService();
+  odrive_armService();
+  // The fault watch: while the motors are on, and after a turn-off by a gap that a real fault starts with (a gyro gap,
+  // an old drive command): the gap stops the motors at once, the fault then holds them off.
+  const bool gap_off = odrive_off_reason == DISARM_GYRO_GAP || odrive_off_reason == DISARM_CMD_OLD;
+  if (odrive_rc_active || odrive_arm_step >= 0 || (gap_off && !odrive_fault_latch && arm_switch_high)) {
+    uint8_t node = 255, fault = 0;
+    if (!arm_switch_high) odrive_stopRc(DISARM_ARM_SWITCH);
+    else if (!driveUsesCan()) odrive_stopRc(DISARM_SERVO);
+    else if ((fault = odrive_faultNow(now, &node)) != 0) {
+      odrive_fault_latch = fault;
+      if (odrive_rc_active || odrive_arm_step >= 0) odrive_stopRc(fault, node);
+      else disarmEvent(fault, node, true);  // already off after the gap: the hold, in the log
+    }
+  }
   if (!frame_now && now - odrive_rc_update_millis < ODRIVE_RC_UPDATE_MS) return;
   // dt of the gyro rate PID step: the true time since its last step. A packet step with no resend step since the last
   // packet step, or any packet step at period factor 1: the update period (as before; at 10 ms a late packet can let
@@ -574,24 +628,19 @@ void odrive_outputUpdate(bool frame_now) {
                                 : (periodRatio() == 1.0 ? constrain((now - odrive_rc_update_millis) / 1000.0, 0.001, 0.1) : dt_since);
   if (frame_now) rate_resend_stepped = false;
   odrive_rc_update_millis = now;
-  const bool rc_ready = !motor_idle_requested && can_init_ok && odrive_output_enabled &&
-    now - odrive_output_millis <= ODRIVE_OUTPUT_TIMEOUT_MS &&
-    odrive_rcInputsValid() && !odrive_rcFault() && steeringRateGyroValid();
-  if (odrive_rc_active && !rc_ready) {
-    odrive_stopRc();
-  } else if (!odrive_rc_active && rc_ready) {
+  // The stop that keeps the motors off now (DisarmReason), 0: the rover is meant to move.
+  uint8_t stop = 0;
+  if (now - odrive_output_millis > ODRIVE_OUTPUT_TIMEOUT_MS) stop = DISARM_CMD_OLD;
+  else if (!odrive_output_enabled) stop = drive_pause_reason ? drive_pause_reason : DISARM_CMD_OLD;
+  else if (!odrive_rcInputsValid()) stop = DISARM_RC_LOST;
+  else if (!steeringRateGyroValid()) stop = DISARM_GYRO_GAP;
+  else if (drive_mode_status == 2 && (!drive_cmd_ms || now - drive_cmd_ms > AUTO_STOP_MS)) stop = DISARM_AUTO_STOP;
+  if (stop && (odrive_rc_active || odrive_arm_step >= 0)) odrive_stopRc(stop);
+  // The arm: the rover is meant to move and every fault check is clear.
+  uint8_t fault_node = 255;
+  if (!odrive_rc_active && odrive_arm_step < 0 && arm_switch_high && !odrive_fault_latch && odrive_clear_node < 0 &&
+      driveUsesCan() && !stop && !odrive_rcFault() && odrive_faultNow(now, &fault_node) == 0)
     odrive_startRc();
-#ifdef IMU_I2C_NB
-    // 0.7.6: the arming holds the loop about 66 ms and no IMU read starts in that time, so the newest sample is older
-    // than the 50 ms gyro limit and the check below stopped the motors at each arm (0.7.5). Wait for a new sample, 5 ms
-    // at most (one read is about 0.5 ms at 400 kHz).
-    const uint32_t arm_wait_ms = millis();
-    do serviceMpu(); while (millis() - gyro_sample_ms > 50 && millis() - arm_wait_ms < 5);
-#else
-    serviceMpu(); // Arming takes time; refresh feedback before the first rate calculation.
-#endif
-    if (odrive_rc_active && !steeringRateGyroValid()) odrive_stopRc();
-  }
   float even_rps = 0.0f, odd_rps = 0.0f;
   if (odrive_rc_active) {
     steering_rate_input_dps = mpu.getGyroZ();
@@ -609,12 +658,12 @@ void odrive_outputUpdate(bool frame_now) {
       -ODRIVE_VEL_LIMIT_RPS, ODRIVE_VEL_LIMIT_RPS);
   }
   if (!can_init_ok) return;
-  // Repeat zero and idle while disarmed, so single-shot arbitration losses
-  // cannot leave a previously commanded motor running after signal loss.
+  // Repeat zero and idle while off, so single-shot arbitration losses cannot leave a previously commanded motor
+  // running after signal loss. No idle during the arm: it would turn off the nodes already on.
   rtprof::canStart();  // real-time path timing (lib/rt_prof)
   for (uint8_t node = 0; node < ODRIVE_NODE_COUNT; ++node) {
     odrive_setInputVel(node, (node & 1) ? odd_rps : even_rps);
-    if (!odrive_rc_active) odrive_setAxisState(node, ODRIVE_AXIS_STATE_IDLE);
+    if (!odrive_rc_active && odrive_arm_step < 0) odrive_setAxisState(node, ODRIVE_AXIS_STATE_IDLE);
   }
   rtprof::canEnd();
 }
@@ -635,6 +684,10 @@ void servoIdle(){
     writePwmMicros(ch, ch == steer_output ? PWM_OUT_1_DEFAULT : ch == throttle_output ? PWM_OUT_2_DEFAULT : 1500);
 }
 void driveOutput(double throttle_us, double steering_us, bool enabled){
+  // 0.7.7: the time of the last command that moves the vehicle (vehicleStationary(): no save or restart while it
+  // drives, on every vehicle type). 20 us: the servo deadband scale (1000 to 2000 us).
+  if (enabled && (fabs(throttle_us - PWM_OUT_2_DEFAULT) > 20 || fabs(steering_us - PWM_OUT_1_DEFAULT) > 20))
+    drive_cmd_ms = millis() ? millis() : 1;
   if (driveUsesCan()) {
     odrive_setDriveOutput(throttle_us, steering_us, enabled);
     servoIdle();
@@ -651,7 +704,7 @@ void driveOutput(double throttle_us, double steering_us, bool enabled){
 void odrive_updateBuzzer() {
   static bool fault_was_present = false;
   static uint32_t pulse_started_ms = 0;
-  bool fault_present = false;
+  bool fault_present = false;  // motor controller faults only (as 0.7.5); a held fault without one stays silent
   for (uint8_t node = 0; node < ODRIVE_NODE_COUNT; ++node) {
     if (odrive_axis_errors[node] || odrive_active_errors[node] || odrive_disarm_reasons[node]) {
       fault_present = true;
@@ -725,7 +778,6 @@ void setup() {
   // loop. The main-branch gyro yaw-rate steering needs it; with no MPU its lock keeps the motors off. The log
   // reads the same object (mpu_ok follows gyro_ready). Main branch f10cd31.
 
-  if (!imu_halt) {
   // Install TWAI before allocating RMT and STM32 GPIO interrupts.
   canBegin();
 
@@ -754,7 +806,6 @@ void setup() {
   espPacketFifo_addCmdInt32(2 | 0x80000000, enable_sensor_2 ? 0x00 : 0x80);  // Enable/disable sensor 2
   // No CID 3 save here (0.5.82): the channel is not in the Rx STM32 calibration block, and a save at each boot
   // was a repeating Rx STM32 flash write. Saves: the centre calibration (button) and the restore after an update.
-  }  // !imu_halt
 
   // The radio of the settings: ESP-NOW or Wi-Fi
   radioStart();
@@ -1018,6 +1069,8 @@ void loop() {
       || WFRX_STATUS_GET_BIT(stmPacket.items.status_bits, WFRX_STATUS_VDD_FAULT)  // STM32 VDD fault bit
       || (stmPacket.items.temperature > 100)  // STM32 internal temp in °C
       ){
+        drive_pause_reason = WFRX_STATUS_GET_BIT(stmPacket.items.status_bits, WFRX_STATUS_S1_SIGNAL_OVERLOAD) ? DISARM_OVERLOAD
+                           : WFRX_STATUS_GET_BIT(stmPacket.items.status_bits, WFRX_STATUS_VDD_FAULT) ? DISARM_RX_SUPPLY : DISARM_RX_HOT;
         driveOutput(PWM_OUT_2_DEFAULT, PWM_OUT_1_DEFAULT, false);
 
      }else if(((drive_mode_status == 1 || drive_mode_status == 2)
@@ -1025,6 +1078,7 @@ void loop() {
           || (charge_status > 0)  // vehicle charge in progress
           || (rover_active && roverAp.state == rover::FAULT)  // rover fault: stuck, lost too long, no polarity
           ){
+        drive_pause_reason = charge_status > 0 ? DISARM_CHARGING : (rover_active && roverAp.state == rover::FAULT) ? DISARM_ROVER_FAULT : DISARM_STUCK;
         driveOutput(PWM_OUT_2_DEFAULT, PWM_OUT_1_DEFAULT, false);
         sine_wave_force_disabled = true; sine_wave_blend = 0.0; target_x_pos = 0.0;
         vehicleStatus = 2; //set status to 'charging' for telemetry purposes
@@ -1033,6 +1087,7 @@ void loop() {
          }
 
      }else{
+       drive_pause_reason = 0;
        driveOutput(throttle, steering_output, true);
        sine_wave_force_disabled = false;
        vehicleStatus = 1; //set status to driving for telemetry purposes
@@ -1199,7 +1254,7 @@ void loop() {
 } // End of main loop -------------------------------------------------------------------------
 
 #ifdef LOOP_NO_RETURN
-// Test build (2026-10-29, control step timing): loop() never returns to the Arduino core. On a single-core chip the
+// Shipped since 0.7.5 (made 2026-10-29, control step timing): loop() never returns to the Arduino core. On a single-core chip the
 // core sleeps 5 ms every 2 s between two loop() calls (yieldIfNecessary), so that the idle task runs; a frame then
 // waits up to 5 ms for its control step (bench: the worst frame-to-step delays on a 2 s grid). The pass already
 // waits for the next frame edge (loopEnd), and the idle task runs there. What the core does after each loop() call:

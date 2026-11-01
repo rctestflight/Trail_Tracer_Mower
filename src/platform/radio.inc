@@ -286,6 +286,7 @@ void espnowStart(){
   WiFi.mode(WIFI_STA); // Set device as a Wi-Fi Station (no AP, default channel)
   if (esp_now_init() != ESP_OK) {
     usbOut.println("ESP-NOW Init Failed (ESP-NOW stays off until a restart)");
+    ev2::Ev(rec::EV_STARTUP).u8(4).u32(1).u32(millis()).send();  // 0.7.7: radio start failed
     espnow_failed = true;  // no retry, no restart: the vehicle keeps driving without the radio
     return;
   }
@@ -294,6 +295,7 @@ void espnowStart(){
   espnow_started = true;
   applyTxPower();
   boot_espnow_ms = millis() - t0;
+  ev2::Ev(rec::EV_STARTUP).u8(4).u32(0).u32(millis()).send();  // 0.7.7: radio started
   usbOut.printf("ESP-NOW Init Success, MAC %s, %lu ms\n", WiFi.macAddress().c_str(), (unsigned long)boot_espnow_ms);
 }
 
@@ -705,10 +707,13 @@ void radioService(){
     web::service(millis());  // starts the page server once the station is connected
 #endif
 #ifdef WIFI_SEND_AFTER_STEP
-    // Test build (2026-10-29, control step timing): the UDP sends only in the 5 ms after a control step. A send waits
-    // for the Wi-Fi driver and network stack (bench: up to 3 ms); before a frame it delayed the control step to 4.9 ms.
-    // The radio part runs every 4 ms, so each 10 ms frame period has a pass in the 5 ms after its step.
-    const bool wifi_send_ok = (uint32_t)(micros() - control_last_us) < 5000;
+    // Shipped since 0.7.5 (made 2026-10-29, control step timing): the UDP sends only in the 5 ms after a control step.
+    // A send waits for the Wi-Fi driver and network stack (bench: up to 3 ms); before a frame it delayed the control
+    // step to 4.9 ms. The radio part runs every 4 ms, so each 10 ms frame period has a pass in the 5 ms after its step.
+    // 0.7.7: also with no control step for 50 ms (more than 2 update periods): when the Rx STM32 frames stop, the log
+    // and the text telemetry keep their sends (before, they stopped with the frames, and so did the events of the stop).
+    const uint32_t step_age_us = (uint32_t)(micros() - control_last_us);
+    const bool wifi_send_ok = step_age_us < 5000 || step_age_us > 50000;
 #else
     const bool wifi_send_ok = true;
 #endif
@@ -725,10 +730,10 @@ void radioService(){
     // known, as far as its RAM ring reaches (TELEMLOG_SLOW_SLOTS); the FAST stream skips to its newest frames.
     mark(SEC_R_LOG);
 #ifdef WIFI_SEND_DRAIN
-    // Test build: one live FAST frame per poll and fewer send passes let the FAST backlog pass its limit (3) and skip
-    // frames (bench: 22 in 277 s). Poll again while the window lasts, at most 3 polls a pass; a poll with no frame due
-    // sends nothing (INFO and backfill keep their own timers).
-    for (int i = 0; i < 3 && wifilink::ready() && (uint32_t)(micros() - control_last_us) < 5000; i++)
+    // Shipped since 0.7.5: one live FAST frame per poll and fewer send passes let the FAST backlog pass its limit (3)
+    // and skip frames (bench: 22 in 277 s). Poll again while the window lasts, at most 3 polls a pass; a poll with no
+    // frame due sends nothing (INFO and backfill keep their own timers). 0.7.7: one poll a pass with no frames.
+    for (int i = 0; i < 3 && wifilink::ready() && wifi_send_ok && (i == 0 || (uint32_t)(micros() - control_last_us) < 5000); i++)
       telemlog_poll(millis(), wifiTelemetrySend);
 #else
     if (wifi_send_ok && wifilink::ready()) telemlog_poll(millis(), wifiTelemetrySend);  // live log frames, INFO, backfill

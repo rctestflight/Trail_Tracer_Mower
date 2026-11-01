@@ -42,6 +42,7 @@ struct Line {
 #define TP_DEC(...)
 #define TP_BINS(...)
 #define TP_EVENT(...)
+#define TP_EV(...)  // 0.7.7: typed events (body 0x38): not on the page, as the events of body 0x30
 #define TP_NAME(...)
 #define TP_SWEEP_RAW(...)
 #define TP_SWEEP(...)

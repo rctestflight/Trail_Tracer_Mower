@@ -72,8 +72,17 @@ void platformStart(){
              prev_state.section < SEC_N ? SEC_NAMES[prev_state.section] : "?", prev_state.drive_mode, prev_state.ap_state,
              (unsigned long)prev_state.heap_min, (unsigned long)crash_count);
     usbOut.printf("PREV reset=%d uptime_ms=%lu %s\n", (int)esp_reset_reason(), (unsigned long)prev_state.uptime_ms, t);
-    if (panicRecordTake(panic_line, sizeof(panic_line))) usbOut.printf("%s\n", panic_line);  // also on USB "boot"
+    const bool panic = panicRecordTake(panic_line, sizeof(panic_line));
+    if (panic) usbOut.printf("%s\n", panic_line);  // also on USB "boot"
     if (!safe_mode) telemetryEvent(rec::EV_PREV_BOOT, (int32_t)esp_reset_reason(), (int32_t)prev_state.uptime_ms, t);
+    if (panic) {  // 0.7.7: the crash record in the log (rec::EV_CRASH), in parts of the event body size
+      const int room = rec::EVENT_MAX - 5, len = (int)strlen(panic_line), parts = (len + room - 1) / room;
+      char part[rec::EVENT_MAX];
+      for (int i = 0; i < parts; i++) {
+        snprintf(part, sizeof(part), "%.*s", room, panic_line + i * room);
+        ev2::Ev(rec::EV_CRASH).u8((uint8_t)i).u8((uint8_t)parts).text(part).send();
+      }
+    }
   }
   usb_ota::begin(usb_ota::Hooks{&usbOut, otaMayStart, restartApp, otaNetReady});
   webupd::setup();  // the update page joins the web server (it starts in Wi-Fi mode once the station is connected)
@@ -127,7 +136,18 @@ void setupDone(){
   // fed for 8 s. Fed at the top of each loop() pass.
   rtcWdtStart();
   boot_setup_ms = millis();
-  usbOut.printf("SETUP ms=%lu\n", (unsigned long)boot_setup_ms);  // startup time: nothing above waits for a peer
+  usbOut.printf("SETUP ms=%lu\n", (unsigned long)boot_setup_ms);
+  ev2::Ev(rec::EV_STARTUP).u8(1).u32(0).u32(boot_setup_ms).send();  // 0.7.7: setup done
+#ifndef WF_BUILD_ID
+#define WF_BUILD_ID 0u
+#endif
+#ifdef DIAG_QIO_BOOT
+  extern int qioBootResult();
+  const int qio = qioBootResult();
+#else
+  const int qio = 0;
+#endif
+  ev2::Ev(rec::EV_BUILD).u32(WF_BUILD_ID).u8((uint8_t)(int8_t)qio).send();  // 0.7.7: build id and flash mode  // startup time: nothing above waits for a peer
 }
 
 // ===== loop() =====
@@ -256,7 +276,6 @@ void benchService(){
       // The CPU sampling and status updates below run in any case.
       static uint32_t hb_last_packets = 0;
       if (safe_mode) usbOut.printf("SAFE MODE after %lu crash resets: no telemetry, no ESP-NOW\n", (unsigned long)crash_count);
-      if (imu_halt) usbOut.println("IMU HALT: no drive (MPU6050 failed at start-up, imu_required=true)");
       // 0.5.97: packets = good Rx STM32 frames this second (was control passes; control runs at most 100 Hz now),
       // control = control passes; cpu, loop, drive = CPU load % of the last second (lib/cpu_prof load()).
       cpuprof::load((1u << SEC_DRIVE) | (1u << SEC_PACKET) | (1u << SEC_ROVER) | (1u << SEC_MPU), &cpu_busy_pct, &cpu_loop_pct, &cpu_drive_pct);

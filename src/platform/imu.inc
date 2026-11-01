@@ -22,11 +22,12 @@ void gyroHeadingUpdate(uint32_t now_us) {  // now_us: the sample time (micros())
   if (mpu_ok) imu_roll16 = (int16_t)lroundf(atan2f(mpu.getAccY(), mpu.getAccZ()) * (32768.0f / (float)M_PI));  // Rx UART frame angle
   last_us = now_us;
 }
-bool imu_halt = false;  // retired at the merge of f10cd31: the main-branch gyro lock keeps the motors off with no MPU; always false
 #define SDA_PIN 39
 #define SCL_PIN 40
 
 bool gyro_ready = false;
+static bool imu_reset_seen = false;  // 0.7.7: reads of all zeros (a reset chip), IMU_I2C_NB path
+bool imuResetSeen() { return imu_reset_seen; }
 void mpuReport(bool ok, unsigned status);  // main-branch MPU messages through the USB text queue and the log
 uint32_t gyro_sample_ms = 0;
 static uint8_t imu_reg_gyro = 0, imu_reg_acc = 0, imu_reg_id = 0;  // GYRO_CONFIG, ACCEL_CONFIG, WHO_AM_I after start
@@ -144,7 +145,7 @@ void serviceMpu() {
   }
 }
 #else  // IMU_I2C_NB
-// Test build (2026-10-30): the IMU through lib/i2c_nb; the loop never waits on the bus. Same values and read rule as
+// Shipped since 0.7.5 (made 2026-10-30): the IMU through lib/i2c_nb; the loop never waits on the bus. Same values and read rule as
 // the Wire path above: one 14-byte read when 1 ms has passed since the last read start, the same start writes and
 // read-backs, 500 samples for the offsets. The loop starts a read and returns; the read ends in the interrupt; the
 // loop takes the newest result before each use (imuTake). A failed read keeps the last good sample (the Wire path
@@ -245,6 +246,23 @@ static bool nbTakeSample() {  // Ready: the newest sample to the firmware (as th
 #else
   if (!nbConvert(&r)) return false;
 #endif
+  // 0.7.7: a reset MPU6050 starts asleep and reads all zeros (a real sample has about 1 g on the accelerometer). Three
+  // such reads in a row: the gyro is dead for this start (a fault, rec::EV_IMU_RESET); the sample is not used.
+  static uint16_t zero_reads = 0;
+  bool zero = true;
+  for (int i = 0; i < 14 && zero; i++) zero = r.data[i] == 0;
+  if (zero) {
+    if (zero_reads < 65535) zero_reads++;
+    if (zero_reads == 3 && !imu_reset_seen) {
+      imu_reset_seen = true;
+      gyro_ready = false;
+      mpu_ok = false;
+      ev2::Ev(rec::EV_IMU_RESET).u16(zero_reads).send();
+    }
+    return false;
+  }
+  zero_reads = 0;
+  if (imu_reset_seen) return false;
   gyro_sample_ms = (uint32_t)(r.t_us / 1000);  // millis() of the read end (millis() = esp_timer / 1000)
   rtprof::gyroSampleAt(r.t_us);
 #ifdef IMU_SAVE
@@ -515,6 +533,10 @@ void mpuReport(bool ok, unsigned status){
     snprintf(t, sizeof(t), "offsets set; gyro reg 0x%02x acc reg 0x%02x id 0x%02x", imu_reg_gyro, imu_reg_acc, imu_reg_id);
     usbOut.println(t);
     telemetryEvent(rec::EV_IMU, 2, imu_gyro_range, t);
+    // 0.7.7: the calibration result (rec::EV_IMU_CAL), so a calibration on a moving rover shows in the log
+    ev2::Ev(rec::EV_IMU_CAL).u8(imu_reg_id).u16(imu_gyro_range).u8((uint8_t)(2u << ((imu_reg_acc >> 3) & 3)))
+      .f32(mpu.getGyroXoffset()).f32(mpu.getGyroYoffset()).f32(mpu.getGyroZoffset())
+      .f32(mpu.getAccXoffset()).f32(mpu.getAccYoffset()).f32(mpu.getAccZoffset()).send();
   } else {
     usbOut.printf("MPU6050 init failed: %u; sensor disabled, motors stay locked%c", status, 10);
     telemetryEvent(rec::EV_IMU, 0, 0, "absent: no gyro, motors stay locked");

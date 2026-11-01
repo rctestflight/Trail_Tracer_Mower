@@ -135,6 +135,10 @@ void qioReport() {
                 (unsigned long)s_boot.sr1After, (unsigned long)s_boot.sr2After);
 }
 
+// 0.7.7: the boot result for the log (event "build"): 1 QIO, -1 attempt failed, -2 no switch, -3 earlier attempt (DIO),
+// -4 bit clear, -5 no NVS
+int qioBootResult() { return s_booted ? s_boot.done : 0; }
+
 // bench "qio reset": clear the NVS record (bench test of the cap only)
 void qioResetRecord() {
   Preferences p;

@@ -6,6 +6,7 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 namespace rec {
 
@@ -99,6 +100,15 @@ enum EventCode : uint16_t {
   EV_SONAR = 24,      // 0.7.5: the sonar (src/main.cpp). a 1 to 4: a sonar trigger, the sonar number; b its distance (the Nano
                       // unit, mm); text the action. a 0: the Nano stream; b 1 records arrive (the first of the start, or
                       // again after a stop), 0 no record for SONAR_STALE_MS (the rover ignores the sonar)
+};
+
+// 0.7.7: typed events, body 0x38: u16 code, then the fields of that code (include/telemetry_table.h, layout EV).
+// Each event goes out once, when it happens; the readers show a gap from the record numbers.
+const uint8_t BODY_EV = 0x38;
+enum Ev2Code : uint16_t {
+  EV_DISARM = 25, EV_CAN_STATE = 26, EV_CAN_ALERT = 27, EV_CAN_SEND_LOST = 28, EV_ODRIVE_STATE = 29, EV_ODRIVE_ERR = 30,
+  EV_ODRIVE_VERSION = 31, EV_ODRIVE_PRESENCE = 32, EV_CRASH = 33, EV_STARTUP = 34, EV_IMU_CAL = 35, EV_IMU_RESET = 36,
+  EV_STM32_VERSION = 37, EV_STM32_HANDSHAKE = 38, EV_BUILD = 39,
 };
 
 // One sample, in engineering units; packSample() quantises it.
@@ -210,3 +220,20 @@ class Block {
 uint32_t crc32(const uint8_t* p, size_t n, uint32_t crc = 0);  // CRC-32 (zlib), for the config hash
 
 }  // namespace rec
+
+// 0.7.7: a typed event (body 0x38): the fields in the order and types of its lines in include/telemetry_table.h.
+// ev2::Ev(rec::EV_...).u8(..).u32(..).send(); a field past the body limit is dropped.
+namespace ev2 {
+struct Ev {
+  uint8_t b[rec::EVENT_MAX];
+  int n;
+  explicit Ev(uint16_t code) : n(3) { b[0] = rec::BODY_EV; b[1] = (uint8_t)code; b[2] = (uint8_t)(code >> 8); }
+  Ev& bytes(const void* p, int len) { if (n + len <= (int)sizeof(b)) { memcpy(b + n, p, len); n += len; } return *this; }
+  Ev& u8(uint8_t v) { return bytes(&v, 1); }
+  Ev& u16(uint16_t v) { return bytes(&v, 2); }  // little-endian, as the ESP32
+  Ev& u32(uint32_t v) { return bytes(&v, 4); }
+  Ev& f32(float v) { return bytes(&v, 4); }
+  Ev& text(const char* t) { return bytes(t, (int)strnlen(t, sizeof(b) - n)); }
+  void send();
+};
+}  // namespace ev2  // send(): src/platform/telemetry.inc (the slow log stream)

@@ -133,14 +133,6 @@
       "description": "Battery cells in series (2 for a 2S battery); the power graph scales from it",
       "label": "Battery cells"
     },
-    "imu_required": {
-      "type": "bool",
-      "default": true,
-      "live": false,
-      "group": "Vehicle",
-      "description": "No effect since firmware 0.5.40: with no working IMU, the gyro lock keeps the motors off (the main branch f10cd31). Kept for old config files",
-      "label": "Motion sensor required"
-    },
     "usb_drive": {
       "type": "bool",
       "default": true,

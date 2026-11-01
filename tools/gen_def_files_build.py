@@ -27,6 +27,10 @@ if subprocess.run(cmd).returncode:
 # (the one source of defaults) after each build; git shows the change for the next commit.
 if not flags and subprocess.run([sys.executable, os.path.join(proj, "tools", "gen_settings_def.py"), "--quiet"]).returncode:
     env.Exit(1)  # noqa: F821
+# 0.7.7: the build id (event "build"): the CRC-32 of the build flags of this environment, plus any flags from the
+# PLATFORMIO_BUILD_FLAGS environment variable. Two images with the same flags have the same id.
+_flag_text = " ".join(str(env.GetProjectOption("build_flags")).split()) + " " + os.environ.get("PLATFORMIO_BUILD_FLAGS", "")  # noqa: F821
+env.Append(CPPDEFINES=[("WF_BUILD_ID", "0x%08Xu" % (zlib.crc32(_flag_text.strip().encode()) & 0xFFFFFFFF))])  # noqa: F821
 tlm_path = os.path.join(build, "telemetry_def.json")
 
 

@@ -157,22 +157,20 @@ rec::Block telem_block;
 rec::Decimator* telem_decim = nullptr;  // from the heap in telemetryBegin()
 
 
-// An erase stops the CPU for about 45 ms (the STM32 packets of that time are lost). Allowed only
-// when nothing drives: docked, the wheels known to stand still, or no ODrive on the bus (bench).
+// An erase stops the CPU for about 45 ms (the STM32 packets of that time are lost). Allowed only when nothing
+// drives: docked, or no drive command that moves the vehicle for 1 s (0.7.7: from the drive command on every
+// vehicle type, not from the motor controller heartbeats), and the wheels known to stand still where their speeds
+// arrive.
 bool telemetryEraseAllowed();
 bool bench_moving = false;  // bench USB "moving on": the vehicle counts as moving (RAM only, off at each start)
 bool vehicleStationary(){ return !bench_moving && telemetryEraseAllowed(); }
 bool telemetryEraseAllowed(){
   if (charge_status > 0) return true;
   const uint32_t now = millis();
-  bool any_odrive = false;
-  for (int n = 0; n < ODRIVE_NODE_COUNT; n++)
-    if (odrive_heartbeat_received[n] && now - odrive_heartbeat_millis[n] < 1000) any_odrive = true;
-  if (!any_odrive) return true;
+  if (drive_cmd_ms && now - drive_cmd_ms < 1000) return false;
   const bool fresh = odrive_vel_received[0] && odrive_vel_received[1]
       && now - odrive_vel_millis[0] < ODRIVE_VEL_STALE_MS && now - odrive_vel_millis[1] < ODRIVE_VEL_STALE_MS;
-  return fresh && fabsf(odrive_vel_rps[0]) < 0.02f && fabsf(odrive_vel_rps[1]) < 0.02f
-      && fabsf(odrive_drive_command) < 0.01f && fabsf(odrive_steer_command) < 0.01f;
+  return !fresh || (fabsf(odrive_vel_rps[0]) < 0.02f && fabsf(odrive_vel_rps[1]) < 0.02f);
 }
 uint32_t telem_packets = 0;           // packets since the last status record
 uint32_t telem_status_ms = 0;
@@ -199,6 +197,15 @@ void telemetryEvent(uint16_t code, int32_t a, int32_t b, const char* text){
   uint8_t body[rec::EVENT_MAX];
   const int n = rec::packEvent(body, code, a, b, text);
   telemlog_add(TELEMLOG_SLOW, millis(), body, (size_t)n);
+}
+
+void ev2::Ev::send(){
+  if (safe_mode) return;
+  telemlog_add(TELEMLOG_SLOW, millis(), b, (size_t)n);
+}
+
+void disarmEvent(uint8_t reason, uint8_t node, bool latched){
+  ev2::Ev(rec::EV_DISARM).u8(reason).u8(node).u8(latched ? 1 : 0).send();
 }
 
 void telemetryBegin(){
@@ -419,7 +426,7 @@ void sonarEvent(int32_t a, int32_t b, const char* text){
 
 void telemetryEvents(){
   if (drive_mode_status != telem_last_mode) {
-    if (telem_last_mode >= 0) telemetryEvent(rec::EV_MODE, telem_last_mode, drive_mode_status, nullptr);
+    telemetryEvent(rec::EV_MODE, telem_last_mode, drive_mode_status, nullptr);  // 0.7.7: also the first mode (a -1)
     telem_last_mode = drive_mode_status;
   }
   const int ap = rover_active ? (int)roverAp.state : -1;
@@ -452,6 +459,12 @@ void telemetryEvents(){
     const uint32_t fresh = odrive_axis_errors[n] & ~telem_last_axis_errors[n];
     if (fresh) telemetryEvent(rec::EV_ODRIVE_ERROR, n, (int32_t)odrive_axis_errors[n], nullptr);
     telem_last_axis_errors[n] = odrive_axis_errors[n];
+    // 0.7.7: new Get_Error bits (active errors, disarm reason); the bits hold until Clear_Errors, so no repeats
+    static uint32_t last_active[ODRIVE_NODE_COUNT], last_reason[ODRIVE_NODE_COUNT];
+    if ((odrive_active_errors[n] & ~last_active[n]) || (odrive_disarm_reasons[n] & ~last_reason[n]))
+      ev2::Ev(rec::EV_ODRIVE_ERR).u8((uint8_t)n).u32(odrive_active_errors[n]).u32(odrive_disarm_reasons[n]).send();
+    last_active[n] = odrive_active_errors[n];
+    last_reason[n] = odrive_disarm_reasons[n];
   }
 }
 
@@ -533,7 +546,9 @@ struct TelemSettings {
   uint16_t dump_no = 0;
 };
 static TelemSettings* telem_set = nullptr;
-static const uint32_t SET_DUMP_MS = 600000, SET_CHECK_MS = 200, SET_PART_MS = 50;
+// 0.7.7: no repeat each 10 min (operator): the dump goes once at the start, then one event for each change; a collector
+// that starts later reads the settings itself ("list").
+static const uint32_t SET_CHECK_MS = 200, SET_PART_MS = 50;
 
 // Line i of "key=value\n" text: start and length (no newline); false past the end.
 static bool settingsLine(const String& s, int& pos, int& len){
@@ -592,7 +607,7 @@ static void telemetrySettingsStep(){
     msc_fat_lines();
   }
   const String& lines = *msc_fat_lines();
-  if (telem_set->dump_ms == 0 || (telem_set->dump_pos < 0 && ms - telem_set->dump_ms >= SET_DUMP_MS)) {
+  if (telem_set->dump_ms == 0) {
     telem_set->dump_ms = ms ? ms : 1;
     telem_set->dump_pos = 0;
     telem_set->dump_part = 0;

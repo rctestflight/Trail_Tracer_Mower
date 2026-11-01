@@ -182,6 +182,25 @@ void buttonEvent(ButtonAction action, uint32_t held_ms, const char* text);
 void sonarEvent(int32_t a, int32_t b, const char* text);
 
 /**
+ * @brief 0.7.7: one log event each time the motor controllers turn off (event 25, body 0x38): the reason, the
+ * node (255: none) and whether the fault holds them off until the arm switch toggles.
+ */
+// 1 to 8: real faults and switch states; 9 and up: the stops (the rover is not meant to move; the motors come on again
+// by themselves when it is).
+enum DisarmReason { DISARM_ARM_SWITCH = 1, DISARM_SERVO = 2, DISARM_CAN = 3, DISARM_ODRIVE_ERROR = 4,
+                    DISARM_ODRIVE_SILENT = 5, DISARM_GYRO = 6, DISARM_GYRO_RESET = 7, DISARM_STM_LOST = 8,
+                    DISARM_AUTO_STOP = 9, DISARM_RC_LOST = 10, DISARM_CMD_OLD = 11, DISARM_GYRO_GAP = 12,
+                    DISARM_OVERLOAD = 13, DISARM_RX_SUPPLY = 14, DISARM_RX_HOT = 15, DISARM_STUCK = 16,
+                    DISARM_CHARGING = 17, DISARM_ROVER_FAULT = 18 };
+void disarmEvent(uint8_t reason, uint8_t node, bool latched);
+/** @brief 0.7.7: the first motor controller heard in this start that is now silent (ODRIVE_SILENT_MS), or 255. */
+uint8_t odriveSilentNode();
+/** @brief millis() of the last valid Rx STM32 frame (0: none since the start). */
+uint32_t stmLastPacketMs();
+/** @brief 0.7.7: true after the IMU gave reads of all zeros (a reset chip sleeps): the gyro is dead for this start. */
+bool imuResetSeen();
+
+/**
  * @brief USB serial commands, USB link events and the heartbeat line each second.
  */
 void benchService();
@@ -297,6 +316,9 @@ void writePwmMicros(uint8_t ch, uint32_t micros);
 #define ODRIVE_VEL_LIMIT_RPS          3.0f   // velocity limit [rev/s]
 #define ODRIVE_CURRENT_LIMIT_A        6.0f   // current limit [A]
 #define ODRIVE_VEL_STALE_MS 60  // a wheel speed older than this is not used
+// 0.7.7: a motor controller heard in this start and no heartbeat for this long is silent: a fault while the motors are
+// on. It sends a heartbeat each 100 ms (ODrive default heartbeat_msg_rate_ms): 5 missed heartbeats.
+#define ODRIVE_SILENT_MS 500
 
 /** @brief true while the CAN bus runs (not proof that a motor controller answers). */
 extern bool can_init_ok;
@@ -383,8 +405,6 @@ extern bool gyro_ready;
 extern int16_t imu_roll16;   // the accelerometer roll, 65 536 = one turn; 0 with no IMU
 /** @brief millis() of the last gyro sample. */
 extern uint32_t gyro_sample_ms;
-/** @brief Always false (retired: the gyro check in the motor output keeps the motors off with no gyro). */
-extern bool imu_halt;
 
 /**
  * @brief Starts and calibrates the gyro, then takes one sample per call. Keep the board still until the USB line

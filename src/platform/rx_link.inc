@@ -172,6 +172,7 @@ void stm32_boot_handshake() {
     if (bytes > 0) {
       usbOut.printf("STM32 handshake skipped (reset reason: %d, STM32 app running: %d B, %lu edges)\n",
                     (int)reset_reason, bytes, (unsigned long)data_ready);
+      ev2::Ev(rec::EV_STM32_HANDSHAKE).u8(4).u16((uint16_t)bytes).send();  // 0.7.7
       return;
     }
     usbOut.printf("STM32 silent after reset (%lu nDATA_READY edges, no byte in 250 ms): sending HELLO/BOOT\n",
@@ -184,9 +185,11 @@ void stm32_boot_handshake() {
   if (r == 1) {
     usbOut.println("IAP HELLO failed");
     telemetryEvent(rec::EV_STM32, 0, 0, "IAP HELLO failed: STM32 gives no answer");
+    ev2::Ev(rec::EV_STM32_HANDSHAKE).u8(1).u16(0).send();  // 0.7.7
     return;  // STM32 may already be running; continue without handshake
   }
   telemetryEvent(rec::EV_STM32, 1, plen, t);  // the HELLO answer as it came (IAP and app versions, image state)
+  ev2::Ev(rec::EV_STM32_HANDSHAKE).u8(r == 2 ? 2 : r == 3 ? 3 : 0).u16(plen).send();  // 0.7.7: the result
   if (r == 2) usbOut.println("IAP BOOT failed");
   else if (r == 3) usbOut.println("IAP nDATA_READY timeout");
   else usbOut.println("STM32 boot OK");
@@ -285,8 +288,10 @@ int stm32_iap_boot(int hello_tries, char* hello_text, size_t text_len, uint8_t* 
 // the drive off for a failed IMU (no packet interrupt). Blocks loop() for 50 ms to 650 ms; the
 // drive outputs stopped already, 250 ms after the last packet (ODRIVE_OUTPUT_TIMEOUT_MS).
 #define STM_RECOVER_GAP_MS 1000
+uint32_t stmLastPacketMs(){ return stm_last_packet_ms; }
 void stmRecoveryService(){
-  if (stm_raw || stm_rom_used || imu_halt || update_mode || !stm_packet_seen || raw_mode || raw_stm_state) return;  // never during a raw stream
+  // 0.7.7: also with no frame since the start: an Rx STM32 that is not ready at power-on gets the same tries
+  if (stm_raw || stm_rom_used || update_mode || raw_mode || raw_stm_state) return;  // never during a raw stream
   const uint32_t now = millis();
   if (now - stm_last_packet_ms < STM_RECOVER_GAP_MS) { stm_recover_tries = 0; return; }
   // 0.5.110: 3 tries 5 s apart, then one every 30 s for as long as the Rx STM32 stays silent (it gave up after 3). An
@@ -404,6 +409,8 @@ void stmV2Answer(){
   stmRawStreamOnAnswer(stmAns);
   dspOnAnswer(stmAns);
   if (stmAns.present && stmAns.cid == 30 && (stmAns.status == RSP_OK || stmAns.status == RSP_OK_CLAMPED)) {
+    if (!rx_stm32_ver_ok || rx_stm32_ver != stmAns.value)  // 0.7.7: the version in the log, once each link start
+      ev2::Ev(rec::EV_STM32_VERSION).u32(stmAns.value).send();
     rx_stm32_ver = stmAns.value;  // app major, minor, patch, link protocol (bytes 0-3)
     rx_stm32_ver_ok = true;
   }
@@ -1203,6 +1210,7 @@ bool rxFrameReady(){
     first_packet = false;
     boot_first_packet_ms = millis();
     usbOut.printf("FIRST_PACKET ms=%lu\n", (unsigned long)boot_first_packet_ms);
+    ev2::Ev(rec::EV_STARTUP).u8(2).u32(0).u32(boot_first_packet_ms).send();  // 0.7.7: the first Rx STM32 frame
   }
   pass_kind = 2;  // diag_cpu: this pass runs the control step
   return true;
