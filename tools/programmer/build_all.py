@@ -8,6 +8,11 @@ update pairs (programmer.json "stm32", else every .commit_header with its .bin.e
 tools/make_manifest.py adds each build to <out> (index.json and <repo>/<ref>/<commit>/).
 Writes the definition store <out>/defs (defs_store): each telemetry and settings definition file by version.
 
+Release refs: each Rx firmware version from RELEASE_FROM on (the plain ROVER_FW_VERSION "x.y.z" line of
+include/firmware_version.h) is offered as ref "v<version>" at the first commit of that version that the offered
+branches reach, so the page keeps every version with its own link (?fw=<repo>/v<version>), also after the branch
+moves on. A real tag of the same name wins. Every build fetches its commit by hash (a release ref has no branch).
+
 Drops the builds of refs that are no longer offered (branch or tag deleted) and of commits that no branch
 or tag reaches any more; keeps only the build of the newest commit of each ref (KEEP = 1). A failed build is
 reported and skipped. No GitHub API: one blobless clone of each repo gives refs, opt-in files and
@@ -29,6 +34,10 @@ REPOS = ["rctestflight/Trail_Tracer_Mower", "rctestflight/Trail-Tracer"]
 KEEP = 1                                   # the newest commit of each ref only
 BRANCHES = ("main", "dev", "dev-tyler")      # the branches on the page; every tag too
 OPT_IN = "programmer.json"
+RELEASE_FROM = (0, 7, 0)                    # every Rx firmware version from this one keeps its build (operator 2026-10-31)
+VERSION_FILE = "include/firmware_version.h"
+RELEASE_LINE = re.compile(r'^#define ROVER_FW_VERSION "(\d+)\.(\d+)\.(\d+)"', re.M)
+RELEASE_REFS = set()                        # (repo, ref) of the release refs: no branch title in refs.json
 HERE = Path(__file__).resolve().parent
 LABEL = re.compile(r"^[A-Za-z0-9 .,:()+/_-]{1,60}$")        # a plain label: shown on the page as text
 DESC = re.compile(r"^[A-Za-z0-9 .,:;()+/'_-]{1,160}$")      # a plain description of the branch or tag
@@ -97,34 +106,70 @@ def clones(work):
     return out
 
 
+def opt_in(repo, d, ref, sha):
+    """(offered, programmer.json config or None) of one commit."""
+    if git("-C", str(d), "cat-file", "-e", f"{sha}:{OPT_IN}", check=False).returncode != 0:
+        return True, None
+    try:
+        cfg = read_opt_in(git("-C", str(d), "show", f"{sha}:{OPT_IN}").stdout)
+    except ValueError as ex:
+        print(f"{repo} {ref}: {OPT_IN} not valid ({ex}): not offered", flush=True)
+        return False, None
+    if cfg.get("stm32") == "latest":       # the newest encrypted pair in stm32/, by the version in the name
+        files = git("-C", str(d), "ls-tree", "-r", "--name-only", sha, "stm32/", check=False).stdout.split()
+        pair = newest_pair(files)
+        if not pair:
+            print(f"{repo} {ref}: {OPT_IN} asks the latest STM32 pair, stm32/ has none: not offered", flush=True)
+            return False, None
+        cfg = {**cfg, "stm32": [{"header": pair[0], "image": pair[1], "label": "STM32 app"}]}
+    return True, cfg
+
+
+def releases(d, heads):
+    """{"v<x.y.z>": commit}: the first commit (commit time) of each Rx firmware version from RELEASE_FROM on, among
+    the commits that the branch heads reach and that change VERSION_FILE. A commit counts only with one plain
+    ROVER_FW_VERSION "x.y.z" line (bench builds carry a suffix)."""
+    if not heads:
+        return {}
+    first = {}
+    log = git("-C", str(d), "log", "--full-history", "--format=%H %ct", *heads, "--", VERSION_FILE).stdout
+    for line in log.splitlines():
+        sha, t = line.split()
+        vs = set(RELEASE_LINE.findall(git("-C", str(d), "show", f"{sha}:{VERSION_FILE}", check=False).stdout))
+        if len(vs) != 1:
+            continue
+        v = tuple(int(x) for x in vs.pop())
+        if v >= RELEASE_FROM and (v not in first or int(t) < first[v][1]):
+            first[v] = (sha, int(t))
+    return {"v%d.%d.%d" % v: sha for v, (sha, _) in sorted(first.items())}
+
+
 def targets(cl):
-    """(repo, ref, commit, programmer.json config or None, is tag): the branches in BRANCHES and every tag."""
+    """(repo, ref, commit, programmer.json config or None, is tag): the branches in BRANCHES, every tag, and the
+    release ref of each Rx firmware version from RELEASE_FROM on (releases())."""
     out = []
     for repo, d in cl.items():
         lines = git("-C", str(d), "for-each-ref", "--format=%(refname)\t%(objectname)\t%(*objectname)",
                     "refs/heads", "refs/tags").stdout.splitlines()
+        names, heads = set(), []
         for line in lines:
             name, obj, peeled = line.split("\t")
             sha, tag = peeled or obj, name.startswith("refs/tags/")
             ref = name.split("/", 2)[2]
-            has = git("-C", str(d), "cat-file", "-e", f"{sha}:{OPT_IN}", check=False).returncode == 0
+            names.add(ref)
             if not (tag or ref in BRANCHES):
                 continue
-            cfg = None
-            if has:
-                try:
-                    cfg = read_opt_in(git("-C", str(d), "show", f"{sha}:{OPT_IN}").stdout)
-                except ValueError as ex:
-                    print(f"{repo} {ref}: {OPT_IN} not valid ({ex}): not offered", flush=True)
-                    continue
-                if cfg.get("stm32") == "latest":       # the newest encrypted pair in stm32/, by the version in the name
-                    files = git("-C", str(d), "ls-tree", "-r", "--name-only", sha, "stm32/", check=False).stdout.split()
-                    pair = newest_pair(files)
-                    if not pair:
-                        print(f"{repo} {ref}: {OPT_IN} asks the latest STM32 pair, stm32/ has none: not offered", flush=True)
-                        continue
-                    cfg = {**cfg, "stm32": [{"header": pair[0], "image": pair[1], "label": "STM32 app"}]}
-            out.append((repo, ref, sha, cfg, tag))
+            heads += [] if tag else [sha]
+            ok, cfg = opt_in(repo, d, ref, sha)
+            if ok:
+                out.append((repo, ref, sha, cfg, tag))
+        for ref, sha in releases(d, heads).items():
+            if ref in names:                       # a real tag of this name is offered already
+                continue
+            ok, cfg = opt_in(repo, d, ref, sha)
+            if ok:
+                RELEASE_REFS.add((repo, ref))
+                out.append((repo, ref, sha, cfg, True))
     return out
 
 
@@ -137,10 +182,10 @@ def inside(root, rel):
 
 def build(repo, ref, sha, cfg, out, work):
     src = work / f"{repo.split('/')[-1]}-{slug(ref)}-{sha[:12]}"           # a new folder for each build
-    git("clone", "--quiet", "--depth", "1", "--branch", ref, f"https://github.com/{repo}.git", str(src))
-    head = git("-C", str(src), "rev-parse", "HEAD").stdout.strip()
-    if head != sha:
-        raise RuntimeError(f"head moved: {head[:12]}, not {sha[:12]}")
+    src.mkdir(parents=True)
+    git("init", "--quiet", str(src))
+    git("-C", str(src), "fetch", "--quiet", "--depth", "1", f"https://github.com/{repo}.git", sha)
+    git("-C", str(src), "checkout", "--quiet", "FETCH_HEAD")
     esp = (cfg or {}).get("esp32")
     if cfg is None or esp:
         env = esp["env"] if esp else default_env((src / "platformio.ini").read_text(encoding="utf-8"))
@@ -274,7 +319,8 @@ def main():
         prune(out, {(r, ref) for r, ref, *_ in tg}, reach)
         defs_store(cl, tg, out / "defs")
     # refs.json: the offered branches and tags with their menu title and description (programmer.json).
-    refs = [{"repo": repo, "ref": ref, "tag": tag, **{k: cfg[k] for k in ("title", "description") if cfg and k in cfg}}
+    refs = [{"repo": repo, "ref": ref, "tag": tag, **{k: cfg[k] for k in ("title", "description")
+                                                      if cfg and k in cfg and (repo, ref) not in RELEASE_REFS}}
             for repo, ref, sha, cfg, tag in tg]
     (out / "refs.json").write_text(json.dumps({"refs": refs}, indent=2) + "\n")
     # releases.json: the tagged commits; the page marks those builds as releases.
