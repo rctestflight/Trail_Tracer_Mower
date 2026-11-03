@@ -769,7 +769,7 @@ Output Autopilot::stepStates(const Inputs& in) {
     decide(DEC_DOCK, 0, 0);
   }
 
-  if (sonarCheck(in)) return o;   // the sonar: stop and turn in every drive to and from the wire (0.7.8)
+  if (sonarCheck(in)) return o;   // the sonar: stop and turn in every autonomous drive
 
   const float approachV = cfg.approachFraction * cfg.roamSpeed;
   const float H = cfg.sensorHeight;
@@ -817,7 +817,7 @@ Output Autopilot::stepStates(const Inputs& in) {
           if (!stopped(in)) return o;
           if (sonarTurn_) {   // the sonar (sonarCheck): the beacon turn's stop, then its turn with no spread
             sonarTurn_ = false;
-            if (twoWay()) { reverseTurn(0.0f, false); return o; }   // Reverse bounce: the other drive direction
+            if (twoWay()) { reverseTurn(sonarNose_, false); sonarNose_ = 0; return o; }   // Reverse bounce: the other drive direction
             startPivot(PI_F, sonarDir_);                             // Bounce: 180 deg on the spot
             sub = SUB_BPIVOT;
             return o;
@@ -1750,23 +1750,26 @@ bool Autopilot::entryProbe(const Inputs& in) {
 #endif
 
 // ===== Sonar (0.7.5, the Arduino Nano: sonar 1 and 2 face forward, 3 and 4 back) =====
-// 0.7.8: every drive to and from the wire (operator 2026-11-02, "sonar should always be active"): roam and return with
-// the start drive, probes, arcs, square-on turns and the drive back into the loop, and the join; every roam mode. Not
-// while the rover stands or turns on the spot (speed at or under the stop speed), not in its own stop and turn, not
-// in FOLLOW or DEPART (as 0.7.5), DOCK (the dock is near by design) or FAULT. RC modes do not run the autopilot.
-// Bounce: sonar 1 or 2 near while the rover drives forward: stop and turn 180 deg on the spot. Reverse bounce and Join
-// then leave: the sonars that face the travel (1 and 2 forward, 3 and 4 in reverse) near: stop and drive the other way.
-// Both reuse the stop and turn of the beacon turn (SUB_BSTOP, then SUB_BPIVOT or reverseTurn), with no spread. A
-// trigger in JOIN goes on in RETURN (the rover looks for the wire again).
-// On the wire (FOLLOW, DEPART) every stop tried left the rover outside the loop in the emulator (large lawn, object on
-// the wire: 1 escape in each of 4 versions; a turn 180 deg, the follow end's turn, the follow's turnaround): the follow
-// and its end assume the goal direction, and a follow can run against it. 0.7.8 leaves the follow as 0.7.5.
+// Every autonomous drive (operator 2026-11-02, "sonar should always be active"): roam and return with the start
+// drive, probes, arcs, square-on turns and the drive back into the loop, the join, the follow and the depart; every
+// roam mode. Not while the rover stands or turns on the spot (speed at or under the stop speed), not in its own stop
+// and turn, not in DOCK (the dock is near by design) or FAULT. RC modes do not run the autopilot.
+// Off the wire: Bounce: sonar 1 or 2 near while the rover drives forward: stop and turn 180 deg on the spot. Reverse
+// bounce and Join then leave: the sonars that face the travel (1 and 2 forward, 3 and 4 in reverse) near: stop and
+// drive the other way. Both reuse the stop and turn of the beacon turn (SUB_BSTOP, then SUB_BPIVOT or reverseTurn),
+// with no spread. A trigger in JOIN goes on in RETURN (the rover looks for the wire again).
+// On the wire (FOLLOW, DEPART): the follow ends. Bounce: the follow end's stop and leave turn into the loop (DEPART,
+// SUB_TURN_STOP), then ROAM. Reverse bounce and Join then leave: ROAM, stop and drive the other way on a sweep of the
+// leave angle into the loop (their own leave turn is a driven arc toward the object). The rover stops on the wire, so its sensor reads "outside" about half the time;
+// as after a basics depart, the roam counts the stop's turn as its turn toward the inside (outsideTurned_). Without
+// it the first outside reading turned the rover round and out of the loop (emulator, large lawn, object on the wire:
+// 1 escape in each of 4 versions).
 // The decision is logged at the trigger with the nearest near sonar of the travel and its distance. No sonar near:
 // no effect (no random number drawn).
 bool Autopilot::sonarCheck(const Inputs& in) {
-  if (!in.sonarNear || fabsf(in.v) <= STOP_SPEED) return false;
-  if (state != ROAM && state != RETURN && state != JOIN) return false;
-  if (state != JOIN && (sub == SUB_BSTOP || sub == SUB_BPIVOT)) return false;   // its own stop and turn
+  if (!in.sonarNear || fabsf(in.v) <= STOP_SPEED || state == DOCK || state == FAULT) return false;
+  if ((state == ROAM || state == RETURN) && (sub == SUB_BSTOP || sub == SUB_BPIVOT)) return false;   // its own stop and turn
+  if (state == DEPART && !bb_ && (sub == SUB_TURN_STOP || sub == SUB_TURN)) return false;   // the follow end's stop and turn
   if (!twoWay() && in.v < 0) return false;   // Bounce: the forward sonars only (as 0.7.5)
   const uint8_t ahead = in.v < 0 ? 0x0C : 0x03;
   const uint8_t m = in.sonarNear & ahead;
@@ -1774,6 +1777,18 @@ bool Autopilot::sonarCheck(const Inputs& in) {
   int k = -1;
   for (int i = 0; i < 4; i++)
     if (((m >> i) & 1) && (k < 0 || in.sonarMm[i] < in.sonarMm[k])) k = i;
+  const bool onWire = state == FOLLOW || state == DEPART;
+  if (onWire) { outsideTurned_ = true; outsideD_ = 1e9f; }   // the stop's turn is the turn toward the inside
+  if (onWire && !twoWay()) {   // Bounce on the wire: the follow end's stop and leave turn into the loop
+    decide(DEC_SONAR, 0, 0);
+    dec.sonar = (uint8_t)(k + 1);
+    dec.sonarMm = in.sonarMm[k];
+    bb_ = false;
+    state = DEPART;
+    sub = SUB_TURN_STOP;
+    stopT_ = 0;
+    return true;
+  }
   sonarTurn_ = true;
   float turn = 0;
   if (!twoWay()) {
@@ -1781,11 +1796,16 @@ bool Autopilot::sonarCheck(const Inputs& in) {
     turn = sonarDir_ * 180.0f;
   } else {
     dir_ = (int8_t)(in.v < 0 ? -1 : 1);   // the travel now: the turn drives the other way
+    // On the wire: the reverse sweeps the travel into the loop by the leave angle (goal clockwise: the inside is on the
+    // right of the follow, so the backward travel turns to its left, nose counterclockwise); straight back along the
+    // wire it ran outside and shuttled between the object and the outside turn-back (emulator: 76 stops in 10 min)
+    sonarNose_ = (onWire && in.v > 0) ? (cfg.goalCW ? 1.0f : -1.0f) * bLeaveDeg() * D2R : 0.0f;
   }
   decide(DEC_SONAR, turn, 0);
   dec.sonar = (uint8_t)(k + 1);
   dec.sonarMm = in.sonarMm[k];
   if (state == JOIN) state = RETURN;
+  else if (onWire) { state = ROAM; roamT_ = followT_ = 0; }   // sweeping modes on the wire: drive the other way
   bb_ = false;
   armed_ = joinArmed_ = false;
   sub = SUB_BSTOP;

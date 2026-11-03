@@ -3,6 +3,10 @@
 #pragma once
 
 // Change history
+//   0.7.9: 0.7.8 + the sonar stop in the follow and the depart too (operator 2026-11-02, "sonar should always be
+//     active"). Bounce on the wire: the follow end's stop and turn into the loop; Reverse bounce and Join then leave:
+//     stop, then a reverse sweep into the loop. The stop marks its turn as the turn toward the inside: the sensor
+//     stops on the wire and reads outside, and the roam's outside turn-back had turned the rover out of the loop.
 //   0.7.8: 0.7.6 + the sonar stop in every drive to and from the wire (operator 2026-11-02): roam and return with the
 //     start drive, probes, arcs and the drive back into the loop, and the join; every roam mode. 0.7.5 and 0.7.6
 //     checked the sonar in the straight roam drive only: the field rover drove to 38 mm of an object in return.
@@ -412,12 +416,12 @@
 #if defined(OTA_TEST_VERSION)
 #define ROVER_FW_VERSION OTA_TEST_VERSION  // OTA test images (envs ota_a, ota_b, ota_test_crash)
 #elif defined(BENCH_FAKE_IMU)
-#define ROVER_FW_VERSION "0.7.8+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.7.9+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #elif defined(SETTINGS_NEWKEY)
-#define ROVER_FW_VERSION "0.7.8-newkey"  // bench build: one more table line (test_new_setting)
+#define ROVER_FW_VERSION "0.7.9-newkey"  // bench build: one more table line (test_new_setting)
 #elif defined(TELEMETRY_NEWVALUE)
-#define ROVER_FW_VERSION "0.7.8-newvalue"  // bench build: the example lines of include/user_telemetry.h
+#define ROVER_FW_VERSION "0.7.9-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.7.8"
+#define ROVER_FW_VERSION "0.7.9"
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
