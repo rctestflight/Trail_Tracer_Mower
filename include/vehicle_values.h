@@ -35,6 +35,7 @@ extern bool case2_aux_changed;
 extern int case2_throttle_current;
 extern int BTxThreshold;
 extern float BTx1Signal;
+extern bool btx_sample_pending[3];   // 0.7.11: a BTx detection the next log sample has not marked yet (src/main.cpp btxPass)
 extern float BTx2Signal;
 extern double steering_output;
 extern double steering_rate_target_dps;

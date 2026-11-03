@@ -246,6 +246,36 @@ int BTxThreshold = 200; // Threshold for BTx follow proximity. Initial Placehold
 float BTx1Signal = BTxThreshold;
 float BTx2Signal = BTxThreshold;
 float BTx1LastDistance = BTxThreshold;
+// 0.7.11, BTx detection: one detection per pass,
+// at the lowest distance of the pass, only when that minimum is under the user's threshold (BTxThreshold). A pass
+// starts at a filtered distance under the threshold and ends after BTX_PASS_GAP_MS with none. The minimum is known
+// when the distance rises BTX_RISE_MM over it, or leaves the threshold: at a pass the reading steps up to 12 mm between
+// packets (a field rover log, one pass: 348, 360, 380 mm), so a smaller rise would fire on the way down. The
+// same rule as ttlog btx and the replay page (lowest reading of each pass). Index 1, 2 = BTx channel 1, 2.
+static const float BTX_RISE_MM = 20.0f;
+static const uint32_t BTX_PASS_GAP_MS = 2000;
+bool btx_ap_pending[3] = {false, false, false};      // a detection the autopilot has not taken yet (entry, exit)
+bool btx_sample_pending[3] = {false, false, false};  // a detection the next log sample has not marked yet
+static void btxPass(int c, float sig, uint32_t now_ms) {
+  static bool in_pass[3] = {false, false, false}, fired[3] = {false, false, false};
+  static float min_mm[3] = {0, 0, 0};
+  static uint32_t under_ms[3] = {0, 0, 0};
+  if (sig < BTxThreshold) {
+    if (!in_pass[c]) { in_pass[c] = true; fired[c] = false; min_mm[c] = sig; }
+    else if (sig < min_mm[c]) min_mm[c] = sig;
+    under_ms[c] = now_ms;
+  } else if (in_pass[c] && now_ms - under_ms[c] > BTX_PASS_GAP_MS) {
+    in_pass[c] = false;
+  }
+  if (in_pass[c] && !fired[c] && (sig >= BTxThreshold || sig > min_mm[c] + BTX_RISE_MM)) {
+    fired[c] = true;
+    btx_ap_pending[c] = btx_sample_pending[c] = true;
+    char t[48];
+    snprintf(t, sizeof t, "BTx %d pass, closest %d mm%s", c, (int)lroundf(min_mm[c]),
+             rover_entry_btx == c ? " (entry)" : rover_exit_btx == c ? " (exit)" : "");
+    btxEvent(c, (int32_t)lroundf(min_mm[c]), t);
+  }
+}
 float BTx2LastDistance = BTxThreshold;
 float BTxFilterAlpha = 0.4; //0.456 = 5Hz low pass filter. Smaller value = more filtering
 uint32_t sine_swerve_disabled_until_ms = 0;
@@ -815,12 +845,16 @@ void loop() {
     // Filter and condition BTx signals
     BTx1Signal = constrain(stmPacket.items.s1_btx_radius[0], 10, (BTxThreshold + 2));
     BTx2Signal = constrain(stmPacket.items.s1_btx_radius[1], 10, (BTxThreshold + 2));
+    static bool btx_seeded = false;   // 0.7.11: the filter starts from the first reading, not the start-up placeholder
+    if (!btx_seeded) { BTx1LastDistance = BTx1Signal; BTx2LastDistance = BTx2Signal; btx_seeded = true; }
     // alpha per packet at 10 ms; the same time constant at any update period (frame_period.h)
     const float btx_a = fperiod::weight(BTxFilterAlpha, periodRatio());
     BTx1Signal = btx_a * BTx1Signal + (1 - btx_a) * BTx1LastDistance;
     BTx2Signal = btx_a * BTx2Signal + (1 - btx_a) * BTx2LastDistance;
     BTx1LastDistance = BTx1Signal;
     BTx2LastDistance = BTx2Signal;
+    btxPass(1, BTx1Signal, loop_now_ms);
+    btxPass(2, BTx2Signal, loop_now_ms);
 
     if(BTx2Signal < BTxThreshold && BTxFollowChannel == 0){
       sine_swerve_disabled_until_ms = loop_now_ms + 10000U;
@@ -1908,9 +1942,10 @@ void roverStep(){
     rover_btx_mm[c] = a * r + (1 - a) * rover_btx_mm[c];
   }
   in.beaconRange = fminf(rover_btx_mm[0], rover_btx_mm[1]) * 0.001f;
-  const float btx_signal[3] = {(float)BTxThreshold + 1.0f, BTx1Signal, BTx2Signal};
-  in.entryBeacon = rover_entry_btx != 0 && btx_signal[rover_entry_btx] < BTxThreshold;
-  in.exitBeacon = rover_exit_btx != 0 && btx_signal[rover_exit_btx] < BTxThreshold;
+  // 0.7.11: a BTx detection (btxPass, one per pass) reaches the autopilot once, in this step
+  in.entryBeacon = rover_entry_btx != 0 && btx_ap_pending[rover_entry_btx];
+  in.exitBeacon = rover_exit_btx != 0 && btx_ap_pending[rover_exit_btx];
+  btx_ap_pending[1] = btx_ap_pending[2] = false;
   // Sonar (sonarService): the near mask and the last record; 0 with no Nano
   in.sonarNear = rover_sonar_near;
   for (int i = 0; i < 4; i++) in.sonarMm[i] = (uint16_t)(sonar_ranges[i] < 65535u ? sonar_ranges[i] : 65535u);

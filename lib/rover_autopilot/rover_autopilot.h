@@ -214,6 +214,9 @@ class Autopilot {
   bool sonarCheck(const Inputs& in);   // every autonomous drive: an object near the sonars of the travel (SUB_BSTOP)
   bool sonarTurn_ = false;          // the SUB_BSTOP stop is the sonar's (else the beacon's)
   int8_t sonarDir_ = 1;             // Bounce: the side of the sonar's 180 deg pivot
+  bool sonarHalt_ = false;          // the sonar halts a turn on the spot (a sonar near since the turn began)
+  bool sonarNoTurn_ = false;        // Bounce, an object behind a reverse: stop, then on forward (no turn)
+  uint8_t turnNear0_ = 0xFF;        // a turn on the spot: the sonars near since its start (0xFF: no turn under way)
   float sonarNose_ = 0;             // sweeping modes, a sonar stop on the wire: the reverse sweep into the loop, rad
 
   uint32_t rng_ = 12345;

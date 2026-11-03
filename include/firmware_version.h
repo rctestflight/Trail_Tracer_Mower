@@ -3,6 +3,11 @@
 #pragma once
 
 // Change history
+//   0.7.11: 0.7.9 + two rules (2026-11-03). Sonar: the two sensors of the intended drive direction act
+//     (the commanded drive: forward sonar 1 and 2, reverse 3 and 4); in a stop or a turn on the spot all four, and a
+//     sensor that comes near during a turn stops it once. A stop no longer repeats while the wheels still coast (a field
+//     rover log: 2 to 5 decisions per stop). BTx: one detection per pass, at the lowest distance, only under the
+//     user's threshold (BTxThreshold); event 40 btx per detection; the entry/exit sample flags mark it.
 //   0.7.9: 0.7.8 + the sonar stop in the follow and the depart too (operator 2026-11-02, "sonar should always be
 //     active"). Bounce on the wire: the follow end's stop and turn into the loop; Reverse bounce and Join then leave:
 //     stop, then a reverse sweep into the loop. The stop marks its turn as the turn toward the inside: the sensor
@@ -416,12 +421,12 @@
 #if defined(OTA_TEST_VERSION)
 #define ROVER_FW_VERSION OTA_TEST_VERSION  // OTA test images (envs ota_a, ota_b, ota_test_crash)
 #elif defined(BENCH_FAKE_IMU)
-#define ROVER_FW_VERSION "0.7.9+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.7.11+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #elif defined(SETTINGS_NEWKEY)
-#define ROVER_FW_VERSION "0.7.9-newkey"  // bench build: one more table line (test_new_setting)
+#define ROVER_FW_VERSION "0.7.11-newkey"  // bench build: one more table line (test_new_setting)
 #elif defined(TELEMETRY_NEWVALUE)
-#define ROVER_FW_VERSION "0.7.9-newvalue"  // bench build: the example lines of include/user_telemetry.h
+#define ROVER_FW_VERSION "0.7.11-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.7.9"
+#define ROVER_FW_VERSION "0.7.11"
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A

@@ -817,6 +817,7 @@ Output Autopilot::stepStates(const Inputs& in) {
           if (!stopped(in)) return o;
           if (sonarTurn_) {   // the sonar (sonarCheck): the beacon turn's stop, then its turn with no spread
             sonarTurn_ = false;
+            if (sonarNoTurn_) { sonarNoTurn_ = false; sub = SUB_NONE; return Output(); }   // Bounce, object behind: on forward
             if (twoWay()) { reverseTurn(sonarNose_, false); sonarNose_ = 0; return o; }   // Reverse bounce: the other drive direction
             startPivot(PI_F, sonarDir_);                             // Bounce: 180 deg on the spot
             sub = SUB_BPIVOT;
@@ -1767,11 +1768,34 @@ bool Autopilot::entryProbe(const Inputs& in) {
 // The decision is logged at the trigger with the nearest near sonar of the travel and its distance. No sonar near:
 // no effect (no random number drawn).
 bool Autopilot::sonarCheck(const Inputs& in) {
-  if (!in.sonarNear || fabsf(in.v) <= STOP_SPEED || state == DOCK || state == FAULT) return false;
+  // 0.7.11: the sonar is collision prevention and always acts while the rover moves: the two sensors that point in the
+  // intended direction, never none of them. The intended direction is the
+  // drive the autopilot commanded last step (the vehicle's own follower drives forward): forward, sonar 1 and 2 act;
+  // reverse, sonar 3 and 4; no drive (a stop or a turn on the spot) while the rover still moves, all four.
+  const bool moving = fabsf(in.v) > STOP_SPEED || fabsf(in.yawRate) > STOP_YAW;
+  const float cmd = last_.external ? 1.0f : last_.v;
+  const int8_t want = cmd > 0 ? 1 : (cmd < 0 ? -1 : 0);
+  const bool turning = want == 0 && (last_.w != 0.0f || sonarHalt_);   // a turn on the spot, or one the sonar halted
+  if (!turning) turnNear0_ = 0xFF;   // the next turn on the spot takes its own start mask
+  else if (turnNear0_ == 0xFF) turnNear0_ = in.sonarNear;
+  else turnNear0_ &= in.sonarNear;   // a sensor that clears and comes near again is a new object
+  const bool ownTurn = (state == ROAM || state == RETURN) && sub == SUB_BPIVOT;
+  // the sonar's own turn away from an object (or a beacon's): at its end the back sonars face what the front ones saw
+  // The halt is a stop, not a wait: once the rover stands still the sensor joins the turn's start mask and the turn
+  // goes on (a turn on the spot does not drive toward it). A fixed object stays near: a wait never ended.
+  if (sonarHalt_ && !moving) turnNear0_ |= in.sonarNear;
+  sonarHalt_ = turning && !ownTurn && state != DOCK && state != FAULT && (in.sonarNear & ~turnNear0_ & 0x0F) != 0;
+  if (sonarHalt_) return true;
+  if (!in.sonarNear || !moving || state == DOCK || state == FAULT) return false;
+  if (want == 0) {
+    // A stop: the motors already stop, which is the sonar's own action. A turn on the spot: the rover does not move
+    // toward what a sonar saw at the start of the turn (its sensors turn away), so a sensor near since then does not
+    // act; a sensor that comes near during the turn stops it once (a person or a pet walks up; above)
+    return false;
+  }
   if ((state == ROAM || state == RETURN) && (sub == SUB_BSTOP || sub == SUB_BPIVOT)) return false;   // its own stop and turn
   if (state == DEPART && !bb_ && (sub == SUB_TURN_STOP || sub == SUB_TURN)) return false;   // the follow end's stop and turn
-  if (!twoWay() && in.v < 0) return false;   // Bounce: the forward sonars only (as 0.7.5)
-  const uint8_t ahead = in.v < 0 ? 0x0C : 0x03;
+  const uint8_t ahead = want > 0 ? 0x03 : 0x0C;
   const uint8_t m = in.sonarNear & ahead;
   if (!m) return false;
   int k = -1;
@@ -1790,16 +1814,18 @@ bool Autopilot::sonarCheck(const Inputs& in) {
     return true;
   }
   sonarTurn_ = true;
+  sonarNoTurn_ = !twoWay() && want < 0;   // Bounce reverse (a three-point leg, a back-up): stop, then forward
   float turn = 0;
-  if (!twoWay()) {
+  if (sonarNoTurn_) {
+  } else if (!twoWay()) {
     sonarDir_ = rnd() < 0.5f ? 1 : -1;
     turn = sonarDir_ * 180.0f;
   } else {
-    dir_ = (int8_t)(in.v < 0 ? -1 : 1);   // the travel now: the turn drives the other way
+    dir_ = want;   // the intended travel: the turn drives the other way
     // On the wire: the reverse sweeps the travel into the loop by the leave angle (goal clockwise: the inside is on the
     // right of the follow, so the backward travel turns to its left, nose counterclockwise); straight back along the
     // wire it ran outside and shuttled between the object and the outside turn-back (emulator: 76 stops in 10 min)
-    sonarNose_ = (onWire && in.v > 0) ? (cfg.goalCW ? 1.0f : -1.0f) * bLeaveDeg() * D2R : 0.0f;
+    sonarNose_ = (onWire && want > 0) ? (cfg.goalCW ? 1.0f : -1.0f) * bLeaveDeg() * D2R : 0.0f;
   }
   decide(DEC_SONAR, turn, 0);
   dec.sonar = (uint8_t)(k + 1);

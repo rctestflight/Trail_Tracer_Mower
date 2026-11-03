@@ -182,6 +182,12 @@ void buttonEvent(ButtonAction action, uint32_t held_ms, const char* text);
 void sonarEvent(int32_t a, int32_t b, const char* text);
 
 /**
+ * @brief 0.7.11: one log event per BTx pass (event 40, rec::EV_BTX): a = the channel 1 or 2, b = the lowest distance of
+ * the pass in mm, text = the channel's use.
+ */
+void btxEvent(int32_t a, int32_t b, const char* text);
+
+/**
  * @brief USB serial commands, USB link events and the heartbeat line each second.
  */
 void benchService();
