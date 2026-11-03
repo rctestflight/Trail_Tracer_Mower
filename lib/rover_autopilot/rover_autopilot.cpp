@@ -769,6 +769,8 @@ Output Autopilot::stepStates(const Inputs& in) {
     decide(DEC_DOCK, 0, 0);
   }
 
+  if (sonarCheck(in)) return o;   // the sonar: stop and turn in every drive to and from the wire (0.7.8)
+
   const float approachV = cfg.approachFraction * cfg.roamSpeed;
   const float H = cfg.sensorHeight;
   if (bb_) return basicsStep(in);
@@ -946,7 +948,6 @@ Output Autopilot::stepStates(const Inputs& in) {
         stopT_ = 0;
         return o;
       }
-      if (sonarCheck(in)) return o;   // the sonar: the same stop and turn (Bounce, Reverse bounce; roam drive only)
       if (!armed_) entryDone_ = entryArc_ = false;   // a new approach: its own probe on entry
       if (!armed_ || !joinArmed_) {
         if (!rd.valid) armed_ = joinArmed_ = true;
@@ -1749,16 +1750,25 @@ bool Autopilot::entryProbe(const Inputs& in) {
 #endif
 
 // ===== Sonar (0.7.5, the Arduino Nano: sonar 1 and 2 face forward, 3 and 4 back) =====
-// Called in the straight roam drive only: state ROAM, no sub-step (no stop, turn, probe, entry arc, square-on turn or
-// bounce under way), not in the pivot rule's hold, polarity not outside, after the beacon check. Not in RETURN, JOIN,
-// FOLLOW, DEPART, DOCK or FAULT, and not in Join then leave or follow-only (they do not use the sonar). Bounce: sonar 1
-// or 2 near: stop and turn 180 deg on the spot. Reverse bounce: the sonars that face the drive direction (1 and 2
-// forward, 3 and 4 in reverse) near: stop and drive the other way. Both reuse the stop and turn of the beacon turn
-// (SUB_BSTOP, then SUB_BPIVOT or reverseTurn), with no spread. The decision is logged at the trigger, with the
-// nearest near sonar of the drive direction and its distance. No sonar near: no effect (no random number drawn).
+// 0.7.8: every drive to and from the wire (operator 2026-11-02, "sonar should always be active"): roam and return with
+// the start drive, probes, arcs, square-on turns and the drive back into the loop, and the join; every roam mode. Not
+// while the rover stands or turns on the spot (speed at or under the stop speed), not in its own stop and turn, not
+// in FOLLOW or DEPART (as 0.7.5), DOCK (the dock is near by design) or FAULT. RC modes do not run the autopilot.
+// Bounce: sonar 1 or 2 near while the rover drives forward: stop and turn 180 deg on the spot. Reverse bounce and Join
+// then leave: the sonars that face the travel (1 and 2 forward, 3 and 4 in reverse) near: stop and drive the other way.
+// Both reuse the stop and turn of the beacon turn (SUB_BSTOP, then SUB_BPIVOT or reverseTurn), with no spread. A
+// trigger in JOIN goes on in RETURN (the rover looks for the wire again).
+// On the wire (FOLLOW, DEPART) every stop tried left the rover outside the loop in the emulator (large lawn, object on
+// the wire: 1 escape in each of 4 versions; a turn 180 deg, the follow end's turn, the follow's turnaround): the follow
+// and its end assume the goal direction, and a follow can run against it. 0.7.8 leaves the follow as 0.7.5.
+// The decision is logged at the trigger with the nearest near sonar of the travel and its distance. No sonar near:
+// no effect (no random number drawn).
 bool Autopilot::sonarCheck(const Inputs& in) {
-  if (!in.sonarNear || state != ROAM || cfg.followOnly || basics()) return false;
-  const uint8_t ahead = (reverseBounce() && dir_ < 0) ? 0x0C : 0x03;
+  if (!in.sonarNear || fabsf(in.v) <= STOP_SPEED) return false;
+  if (state != ROAM && state != RETURN && state != JOIN) return false;
+  if (state != JOIN && (sub == SUB_BSTOP || sub == SUB_BPIVOT)) return false;   // its own stop and turn
+  if (!twoWay() && in.v < 0) return false;   // Bounce: the forward sonars only (as 0.7.5)
+  const uint8_t ahead = in.v < 0 ? 0x0C : 0x03;
   const uint8_t m = in.sonarNear & ahead;
   if (!m) return false;
   int k = -1;
@@ -1769,10 +1779,15 @@ bool Autopilot::sonarCheck(const Inputs& in) {
   if (!twoWay()) {
     sonarDir_ = rnd() < 0.5f ? 1 : -1;
     turn = sonarDir_ * 180.0f;
+  } else {
+    dir_ = (int8_t)(in.v < 0 ? -1 : 1);   // the travel now: the turn drives the other way
   }
   decide(DEC_SONAR, turn, 0);
   dec.sonar = (uint8_t)(k + 1);
   dec.sonarMm = in.sonarMm[k];
+  if (state == JOIN) state = RETURN;
+  bb_ = false;
+  armed_ = joinArmed_ = false;
   sub = SUB_BSTOP;
   stopT_ = 0;
   return true;

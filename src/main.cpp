@@ -1949,7 +1949,7 @@ void roverStep(){
     }
     if (d.code == rover::DEC_SONAR) {   // one log event per sonar trigger: sonar, distance, action
       char t[72];
-      if (roverAp.cfg.bounceStyle == 2)
+      if (roverAp.cfg.bounceStyle == 2 || (roverAp.cfg.bounceStyle != 0 && roverAp.cfg.turnRadius > 0))
         snprintf(t, sizeof t, "sonar %u at %u mm: stop, drive %s", (unsigned)d.sonar, (unsigned)d.sonarMm,
                  roverAp.driveDir() > 0 ? "backward" : "forward");
       else

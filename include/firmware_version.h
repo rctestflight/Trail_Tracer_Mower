@@ -3,6 +3,11 @@
 #pragma once
 
 // Change history
+//   0.7.8: 0.7.6 + the sonar stop in every drive to and from the wire (operator 2026-11-02): roam and return with the
+//     start drive, probes, arcs and the drive back into the loop, and the join; every roam mode. 0.7.5 and 0.7.6
+//     checked the sonar in the straight roam drive only: the field rover drove to 38 mm of an object in return.
+//     A trigger in join goes on in return. Follow and depart as 0.7.6 (emulator: a stop on the wire left the rover
+//     outside the loop). Not from the 0.7.7 line.
 //   0.7.6: 0.7.5 + the motor arm fix: after the arm commands the loop waits for a new IMU sample (5 ms at most);
 //     0.7.5 found the sample too old after the 66 ms arm and stopped the motors at each arm.
 //   0.7.5: 0.7.4 + the CPU savings (fast maths, flash cache in QIO mode, faster wire solve, control loop above the
@@ -407,12 +412,12 @@
 #if defined(OTA_TEST_VERSION)
 #define ROVER_FW_VERSION OTA_TEST_VERSION  // OTA test images (envs ota_a, ota_b, ota_test_crash)
 #elif defined(BENCH_FAKE_IMU)
-#define ROVER_FW_VERSION "0.7.6+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.7.8+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #elif defined(SETTINGS_NEWKEY)
-#define ROVER_FW_VERSION "0.7.6-newkey"  // bench build: one more table line (test_new_setting)
+#define ROVER_FW_VERSION "0.7.8-newkey"  // bench build: one more table line (test_new_setting)
 #elif defined(TELEMETRY_NEWVALUE)
-#define ROVER_FW_VERSION "0.7.6-newvalue"  // bench build: the example lines of include/user_telemetry.h
+#define ROVER_FW_VERSION "0.7.8-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.7.6"
+#define ROVER_FW_VERSION "0.7.8"
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A

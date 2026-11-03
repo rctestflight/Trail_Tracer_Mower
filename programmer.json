@@ -1,1 +1,1 @@
-{"title": "Rx test build", "description": "Rx firmware with the matching Rx STM32 app", "esp32": {"env": "lolin_s2_mini", "label": "ESP32 Rx firmware"}, "stm32": "latest"}
+{"description": "Rx firmware 0.7.6 plus the sonar fix: the sonar stop acts in every drive to and from the wire", "esp32": {"env": "lolin_s2_mini", "label": "ESP32 Rx firmware"}, "stm32": "latest"}

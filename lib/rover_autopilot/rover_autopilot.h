@@ -211,7 +211,7 @@ class Autopilot {
   void bounceNow(const Inputs& in);
   void joinNow(const Inputs& in);
   int8_t polSide(const Inputs& in) const;
-  bool sonarCheck(const Inputs& in);   // the roam drive: an object near the sonars of the drive direction (SUB_BSTOP)
+  bool sonarCheck(const Inputs& in);   // every drive to and from the wire: an object near the sonars of the travel (SUB_BSTOP)
   bool sonarTurn_ = false;          // the SUB_BSTOP stop is the sonar's (else the beacon's)
   int8_t sonarDir_ = 1;             // Bounce: the side of the sonar's 180 deg pivot
 
