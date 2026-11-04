@@ -90,8 +90,6 @@ struct DeviceConfig {
     bool    rover_goal_cw;           // dock direction along the wire, seen from above
     double  rover_sensor_height_mm;  // sensor centre above the wire
     double  rover_seek_vbatt;        // V: go home below this battery voltage (0 = off)
-    uint8_t rover_entry_btx;         // BTx channel before the dock: creep (0 = none)
-    uint8_t rover_exit_btx;          // BTx channel after the dock: wrong-way guard (0 = none)
     int     rover_lost_timeout_s;    // stop for good after this long without the wire (0 = never)
     double  espnow_tx_power_dbm;     // radio transmit power, 2..19.5 dBm in 0.25 dB steps (19.5 = the radio's maximum)
     long    cmd_key;                 // fleet key carried by CMD 0x10, STOP 0x12 and RESTART 0x7F; must match; 0 (default) = blank, accepts key 0.

@@ -99,8 +99,7 @@ enum EventCode : uint16_t {
   EV_SONAR = 24,      // 0.7.5: the sonar (src/main.cpp). a 1 to 4: a sonar trigger, the sonar number; b its distance (the Nano
                       // unit, mm); text the action. a 0: the Nano stream; b 1 records arrive (the first of the start, or
                       // again after a stop), 0 no record for SONAR_STALE_MS (the rover ignores the sonar)
-  EV_BTX = 40,        // 0.7.11: a BTx pass (src/main.cpp btxPass): a the channel 1 or 2, b the lowest distance of the pass
-                      // (sensor 1, mm), text the channel's use (entry, exit or none). 40: free on the 0.7.6 and 0.7.7 lines
+  EV_BTX = 40,        // 0.7.11 to 0.7.14 logs: a BTx pass (a channel, b lowest mm). No longer sent; the number stays for old logs
 };
 
 // One sample, in engineering units; packSample() quantises it.

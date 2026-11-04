@@ -104,7 +104,7 @@ static const char* const STATIONARY_KEYS[] = {
   "CHARGE_VBATT_STOP", "CHARGE_MAX_CURRENT", "CHARGE_MAX_SECONDS", "BTxFollowChannel",
   "espnow_enabled", "telemetry_enabled",
   "rover_mode", "rover_goal_cw", "rover_sensor_height_mm", "rover_roam_speed_mps",
-  "rover_entry_btx", "rover_exit_btx", "imu_required",
+  "imu_required",
 };
 bool stationaryKey(const char* key){
   if (!strncmp(key, "dsp_", 4)) return true;  // a DSP change stops the STM32 run for a moment

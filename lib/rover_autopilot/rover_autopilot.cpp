@@ -119,8 +119,7 @@ void Autopilot::reset() {
   rd = Reading();
   txWait = false;
   lostT_ = stopT_ = startT_ = 0;
-  armed_ = beaconArmed_ = joinArmed_ = true;
-  sonarTurn_ = false;
+  armed_ = joinArmed_ = true;
   sqArmed_ = true; sqPeak_ = 0; entryDone_ = entryArc_ = false;
   settle_ = hold_ = wasHold_ = false;
   startCheck_ = true;
@@ -129,8 +128,6 @@ void Autopilot::reset() {
   run_ = departLeft_ = reverseArm_ = 0;
   roamT_ = followT_ = 0;
   wrongCount_ = 0;
-  entrySeen_ = false;
-  exitArmed_ = true;
   fit_.reset();
   last_ = Output();
   probeLeft_ = 0;
@@ -541,7 +538,7 @@ bool Autopilot::startDone(const Inputs& in, Output& o) {
   if (rd.valid && (fabsf(rd.X) <= CAPTURE_OFFSET || rd.d <= 0.5f * cfg.sensorHeight)) {
     state = FOLLOW; sub = SUB_NONE;
     startCheck_ = false;
-    wrongCount_ = 0; entrySeen_ = false; exitArmed_ = !in.exitBeacon; reverseArm_ = 0;
+    wrongCount_ = 0; reverseArm_ = 0;
     decide(DEC_START, 0, 0);
     o.external = true;
     return true;
@@ -601,7 +598,7 @@ void Autopilot::rearmStart() {
 // swings round the turn centre: its radius and side change with no drive toward or away from the wire. So no event of
 // any kind triggers while the rover turns on the spot, or while a pivot that has ended still turns. A turn on the spot
 // is a commanded pivot, or a measured one (onSpot). The end of each pivot sets settle_ until the turn has ended
-// (settled). Held: every decision and fault (bounce, re-arm, join, outside turn-back, beacon, wrong direction, follow
+// (settled). Held: every decision and fault (bounce, re-arm, join, outside turn-back, wrong direction, follow
 // end, return, depart turn, stuck, lost, lost search, Tx off, dock, the start polarity check). The side filter
 // (src/main.cpp insideFilter) still reads in a turn: the sensor's side is real, and a read there corrects a wrong
 // side before the turn ends (emulator 2026-10-24: with the reads dropped, a side wrong since the join stayed through
@@ -810,32 +807,13 @@ Output Autopilot::stepStates(const Inputs& in) {
         roamT_ += in.dt;
         if (roamT_ >= cfg.roamTimeS && !hold_) { state = RETURN; followT_ = 0; entryArc_ = false; decide(DEC_RETURN, 0, 0); }
       }
-      // Beacon re-arm: past the beacon re-arm distance
-      if (!beaconArmed_ && in.beaconRange > cfg.beaconRearm) beaconArmed_ = true;
       switch (sub) {
         case SUB_BSTOP:
           if (!stopped(in)) return o;
-          if (sonarTurn_) {   // the sonar (sonarCheck): the beacon turn's stop, then its turn with no spread
-            sonarTurn_ = false;
-            if (sonarNoTurn_) { sonarNoTurn_ = false; sub = SUB_NONE; return Output(); }   // Bounce, object behind: on forward
-            if (twoWay()) { reverseTurn(sonarNose_, false); sonarNose_ = 0; return o; }   // Reverse bounce: the other drive direction
-            startPivot(PI_F, sonarDir_);                             // Bounce: 180 deg on the spot
-            sub = SUB_BPIVOT;
-            return o;
-          }
-          if (twoWay()) {   // change the drive direction, the nose turned by the spread
-            const float sp = (2 * rnd() - 1) * cfg.beaconSpreadDeg * D2R;
-            decide(DEC_BEACON, sp / D2R, 0);
-            reverseTurn(sp, false);
-            return o;
-          }
-          {
-            float T = PI_F + (2 * rnd() - 1) * cfg.beaconSpreadDeg * D2R;
-            int8_t dir = rnd() < 0.5f ? 1 : -1;
-            if (T > PI_F) { T = 2 * PI_F - T; dir = (int8_t)-dir; }
-            startPivot(T, dir);
-            decide(DEC_BEACON, dir * T / D2R, 0);
-          }
+          // the sonar's stop (sonarCheck), then its turn
+          if (sonarNoTurn_) { sonarNoTurn_ = false; sub = SUB_NONE; return Output(); }   // Bounce, object behind: on forward
+          if (twoWay()) { reverseTurn(sonarNose_, false); sonarNose_ = 0; return o; }   // Reverse bounce: the other drive direction
+          startPivot(PI_F, sonarDir_);                             // Bounce: 180 deg on the spot
           sub = SUB_BPIVOT;
           return o;
         case SUB_BPIVOT:
@@ -942,12 +920,6 @@ Output Autopilot::stepStates(const Inputs& in) {
       if (in.inside > 0) {
         insideRun_ += fabsf(in.v) * in.dt;
         if (!twoWay() || insideRun_ >= cfg.rearmDrop) outsideTurned_ = false;
-      }
-      if (cfg.beaconBounce && beaconArmed_ && in.beaconRange <= cfg.beaconDistance) {
-        beaconArmed_ = false;
-        sub = SUB_BSTOP;
-        stopT_ = 0;
-        return o;
       }
       if (!armed_) entryDone_ = entryArc_ = false;   // a new approach: its own probe on entry
       if (!armed_ || !joinArmed_) {
@@ -1093,7 +1065,7 @@ Output Autopilot::stepStates(const Inputs& in) {
             state = FOLLOW;
             sub = SUB_NONE;
             settleStart();
-            wrongCount_ = 0; entrySeen_ = false; exitArmed_ = !in.exitBeacon; reverseArm_ = 0;
+            wrongCount_ = 0; reverseArm_ = 0;
             decide(DEC_FOLLOW, 0, 0);
             o = Output();
             o.external = true;
@@ -1144,8 +1116,6 @@ Output Autopilot::stepStates(const Inputs& in) {
           turnarounds++;
           reverseArm_ = REVERSE_ARM;
           wrongCount_ = 0;
-          entrySeen_ = false;
-          exitArmed_ = false;
           o = Output();
         }
         return o;
@@ -1153,14 +1123,11 @@ Output Autopilot::stepStates(const Inputs& in) {
       if (!rd.valid) return o;  // lost: stop (one turn out of the field null after rover_no_tx_s)
       if (hold_) { o.external = true; return o; }  // the pivot rule: no wrong-direction count, no follow end
       reverseArm_ = fmaxf(0.0f, reverseArm_ - fabsf(in.v) * in.dt);
-      if (in.entryBeacon) entrySeen_ = true;
-      if (!in.exitBeacon) exitArmed_ = true;
       if (cfg.wrongDirCheck && reverseArm_ <= 0) {
         const int8_t goal = cfg.goalCW ? 1 : -1;
         if (in.heading == -goal && fabsf(in.v) > STOP_SPEED) wrongCount_++;
         else wrongCount_ = 0;
-        const bool beaconWrong = in.exitBeacon && exitArmed_ && !entrySeen_;
-        if (wrongCount_ >= wrongN_ || beaconWrong) {
+        if (wrongCount_ >= wrongN_) {
           decide(DEC_REVERSE, 180, 0);
           sub = SUB_REVERSE_STOP;
           stopT_ = 0;
@@ -1757,8 +1724,7 @@ bool Autopilot::entryProbe(const Inputs& in) {
 // and turn, not in DOCK (the dock is near by design) or FAULT. RC modes do not run the autopilot.
 // Off the wire: Bounce: sonar 1 or 2 near while the rover drives forward: stop and turn 180 deg on the spot. Reverse
 // bounce and Join then leave: the sonars that face the travel (1 and 2 forward, 3 and 4 in reverse) near: stop and
-// drive the other way. Both reuse the stop and turn of the beacon turn (SUB_BSTOP, then SUB_BPIVOT or reverseTurn),
-// with no spread. A trigger in JOIN goes on in RETURN (the rover looks for the wire again).
+// drive the other way (SUB_BSTOP, then SUB_BPIVOT or reverseTurn). A trigger in JOIN goes on in RETURN (the rover looks for the wire again).
 // On the wire (FOLLOW, DEPART): the follow ends. Bounce: the follow end's stop and leave turn into the loop (DEPART,
 // SUB_TURN_STOP), then ROAM. Reverse bounce and Join then leave: ROAM, stop and drive the other way on a sweep of the
 // leave angle into the loop (their own leave turn is a driven arc toward the object). The rover stops on the wire, so its sensor reads "outside" about half the time;
@@ -1780,7 +1746,7 @@ bool Autopilot::sonarCheck(const Inputs& in) {
   else if (turnNear0_ == 0xFF) turnNear0_ = in.sonarNear;
   else turnNear0_ &= in.sonarNear;   // a sensor that clears and comes near again is a new object
   const bool ownTurn = (state == ROAM || state == RETURN) && sub == SUB_BPIVOT;
-  // the sonar's own turn away from an object (or a beacon's): at its end the back sonars face what the front ones saw
+  // the sonar's own turn away from an object: at its end the back sonars face what the front ones saw
   // The halt is a stop, not a wait: once the rover stands still the sensor joins the turn's start mask and the turn
   // goes on (a turn on the spot does not drive toward it). A fixed object stays near: a wait never ended.
   if (sonarHalt_ && !moving) turnNear0_ |= in.sonarNear;
@@ -1813,7 +1779,6 @@ bool Autopilot::sonarCheck(const Inputs& in) {
     stopT_ = 0;
     return true;
   }
-  sonarTurn_ = true;
   sonarNoTurn_ = !twoWay() && want < 0;   // Bounce reverse (a three-point leg, a back-up): stop, then forward
   float turn = 0;
   if (sonarNoTurn_) {

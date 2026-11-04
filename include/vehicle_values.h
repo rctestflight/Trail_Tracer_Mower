@@ -8,8 +8,6 @@
 
 extern rover::Autopilot roverAp;
 extern bool rover_enabled;
-extern uint8_t rover_entry_btx;
-extern uint8_t rover_exit_btx;
 extern bool rover_active;
 extern bool rover_need_charge;
 extern uint8_t vehicleID;
@@ -35,7 +33,6 @@ extern bool case2_aux_changed;
 extern int case2_throttle_current;
 extern int BTxThreshold;
 extern float BTx1Signal;
-extern bool btx_sample_pending[3];   // 0.7.11: a BTx detection the next log sample has not marked yet (src/main.cpp btxPass)
 extern float BTx2Signal;
 extern double steering_output;
 extern double steering_rate_target_dps;

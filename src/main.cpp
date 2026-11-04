@@ -123,8 +123,6 @@ static void sonarService() {
 rover::Autopilot roverAp;
 bool rover_enabled = false;
 double rover_seek_vbatt = 0.0;      // return battery voltage (0 = off)
-uint8_t rover_entry_btx = 0;
-uint8_t rover_exit_btx = 0;
 bool rover_active = false;          // mode 2 with the autopilot driving
 bool rover_need_charge = false;     // latched until the next charge ends
 float rover_driven_m = 0.0f;        // distance driven since the last charge
@@ -132,7 +130,6 @@ uint32_t rover_last_packet_us = 0;
 bool rover_was_docked = false;
 bool rover_charge_ran = false;       // charge step 3 seen in this docking
 float rover_vbatt_filt = 0.0f;
-float rover_btx_mm[2] = {9999.0f, 9999.0f};  // beacon radius per channel, filtered as BTx1Signal, not clamped
 rover::Output rover_out;
 void roverStep();  // one autopilot step per STM32 packet; sets throttle and steering_output
 float roverFollowSign();  // rover mode: the sign that the follower applies to x (Rx quadrant state)
@@ -246,36 +243,6 @@ int BTxThreshold = 200; // Threshold for BTx follow proximity. Initial Placehold
 float BTx1Signal = BTxThreshold;
 float BTx2Signal = BTxThreshold;
 float BTx1LastDistance = BTxThreshold;
-// 0.7.11, BTx detection: one detection per pass,
-// at the lowest distance of the pass, only when that minimum is under the user's threshold (BTxThreshold). A pass
-// starts at a filtered distance under the threshold and ends after BTX_PASS_GAP_MS with none. The minimum is known
-// when the distance rises BTX_RISE_MM over it, or leaves the threshold: at a pass the reading steps up to 12 mm between
-// packets (a field rover log, one pass: 348, 360, 380 mm), so a smaller rise would fire on the way down. The
-// same rule as ttlog btx and the replay page (lowest reading of each pass). Index 1, 2 = BTx channel 1, 2.
-static const float BTX_RISE_MM = 20.0f;
-static const uint32_t BTX_PASS_GAP_MS = 2000;
-bool btx_ap_pending[3] = {false, false, false};      // a detection the autopilot has not taken yet (entry, exit)
-bool btx_sample_pending[3] = {false, false, false};  // a detection the next log sample has not marked yet
-static void btxPass(int c, float sig, uint32_t now_ms) {
-  static bool in_pass[3] = {false, false, false}, fired[3] = {false, false, false};
-  static float min_mm[3] = {0, 0, 0};
-  static uint32_t under_ms[3] = {0, 0, 0};
-  if (sig < BTxThreshold) {
-    if (!in_pass[c]) { in_pass[c] = true; fired[c] = false; min_mm[c] = sig; }
-    else if (sig < min_mm[c]) min_mm[c] = sig;
-    under_ms[c] = now_ms;
-  } else if (in_pass[c] && now_ms - under_ms[c] > BTX_PASS_GAP_MS) {
-    in_pass[c] = false;
-  }
-  if (in_pass[c] && !fired[c] && (sig >= BTxThreshold || sig > min_mm[c] + BTX_RISE_MM)) {
-    fired[c] = true;
-    btx_ap_pending[c] = btx_sample_pending[c] = true;
-    char t[48];
-    snprintf(t, sizeof t, "BTx %d pass, closest %d mm%s", c, (int)lroundf(min_mm[c]),
-             rover_entry_btx == c ? " (entry)" : rover_exit_btx == c ? " (exit)" : "");
-    btxEvent(c, (int32_t)lroundf(min_mm[c]), t);
-  }
-}
 float BTx2LastDistance = BTxThreshold;
 float BTxFilterAlpha = 0.4; //0.456 = 5Hz low pass filter. Smaller value = more filtering
 uint32_t sine_swerve_disabled_until_ms = 0;
@@ -853,8 +820,6 @@ void loop() {
     BTx2Signal = btx_a * BTx2Signal + (1 - btx_a) * BTx2LastDistance;
     BTx1LastDistance = BTx1Signal;
     BTx2LastDistance = BTx2Signal;
-    btxPass(1, BTx1Signal, loop_now_ms);
-    btxPass(2, BTx2Signal, loop_now_ms);
 
     if(BTx2Signal < BTxThreshold && BTxFollowChannel == 0){
       sine_swerve_disabled_until_ms = loop_now_ms + 10000U;
@@ -1737,8 +1702,6 @@ void applyDeviceConfig(const DeviceConfig& cfg)
   // Rover autopilot
   rover_enabled               = cfg.rover_mode != 2 && !safe_mode;  // autonomous runs the rover unless "position follower"; safe mode (crash resets): no rover mode
   rover_seek_vbatt            = cfg.rover_seek_vbatt;
-  rover_entry_btx             = cfg.rover_entry_btx;
-  rover_exit_btx              = cfg.rover_exit_btx;
   rover::Config& rc           = roverAp.cfg;
   rc.goalCW                   = cfg.rover_goal_cw;
   rc.followOnly               = cfg.rover_mode == 1;
@@ -1751,10 +1714,6 @@ void applyDeviceConfig(const DeviceConfig& cfg)
   rc.bounceMinDeg             = cfg.rover_bounce_min_deg;
   rc.rearmDrop                = cfg.rover_rearm_drop_m;
   rc.rearmFall                = cfg.rover_rearm_fall_mm * 0.001f;
-  rc.beaconBounce             = cfg.rover_beacon_bounce;
-  rc.beaconDistance           = cfg.rover_beacon_m;
-  rc.beaconRearm              = cfg.rover_beacon_rearm_m;
-  rc.beaconSpreadDeg          = cfg.rover_beacon_spread_deg;
   rc.approachDistance         = cfg.rover_approach_m;
   rc.approachAngleDeg         = cfg.rover_join_angle_deg;
   rc.wrongDirCheck            = cfg.rover_wrong_dir_check;
@@ -1934,18 +1893,6 @@ void roverStep(){
   if(rover_seek_vbatt > 0 && rover_vbatt_filt > 1.0f && rover_vbatt_filt < rover_seek_vbatt) rover_need_charge = true;
   in.needCharge = rover_need_charge;
 
-  // Beacons: the radius of each channel filtered as BTx1Signal but not clamped (the re-arm distance is past the BTx
-  // threshold); entry and exit by mower channel number with the follower's signals (BTx1Signal, BTx2Signal).
-  for (int c = 0; c < 2; c++) {
-    const float r = constrain(stmPacket.items.s1_btx_radius[c], 10.0f, 2000.0f);
-    const float a = fperiod::weight(BTxFilterAlpha, periodRatio());  // alpha per packet at 10 ms
-    rover_btx_mm[c] = a * r + (1 - a) * rover_btx_mm[c];
-  }
-  in.beaconRange = fminf(rover_btx_mm[0], rover_btx_mm[1]) * 0.001f;
-  // 0.7.11: a BTx detection (btxPass, one per pass) reaches the autopilot once, in this step
-  in.entryBeacon = rover_entry_btx != 0 && btx_ap_pending[rover_entry_btx];
-  in.exitBeacon = rover_exit_btx != 0 && btx_ap_pending[rover_exit_btx];
-  btx_ap_pending[1] = btx_ap_pending[2] = false;
   // Sonar (sonarService): the near mask and the last record; 0 with no Nano
   in.sonarNear = rover_sonar_near;
   for (int i = 0; i < 4; i++) in.sonarMm[i] = (uint16_t)(sonar_ranges[i] < 65535u ? sonar_ranges[i] : 65535u);
@@ -1961,7 +1908,7 @@ void roverStep(){
   // A pivot ended: clear the rate loop integral, or it keeps the vehicle turning for seconds after the pivot.
   if (prev_w != 0.0f && rover_out.w == 0.0f && !rover_out.external) steeringRateReset();
 
-  // Decision log: each bounce, check, join, reversal, beacon turn, dock, depart, Tx change and fault.
+  // Decision log: each bounce, check, join, reversal, dock, depart, Tx change and fault.
   static uint32_t dec_seen = 0;
   if (roverAp.dec.seq != dec_seen) {
     dec_seen = roverAp.dec.seq;

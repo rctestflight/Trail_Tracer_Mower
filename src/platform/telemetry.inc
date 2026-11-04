@@ -237,11 +237,7 @@ void telemetrySample(){
           | (WFRX_STATUS_GET_BIT(sb, WFRX_STATUS_S1_SIGNAL_DISABLED) ? rec::F_DISABLED : 0)
           | (WFRX_STATUS_GET_BIT(sb, WFRX_STATUS_S1_SIGNAL_WEAK) ? rec::F_WEAK : 0)
           | (charge_status > 0 ? rec::F_CHARGING : 0);
-  // 0.7.11: the flags mark a BTx detection (btxPass: the lowest distance of a pass under the threshold), in the
-  // sample after it
-  if (rover_entry_btx && btx_sample_pending[rover_entry_btx]) s.flags |= rec::F_ENTRY_BTX;
-  if (rover_exit_btx && btx_sample_pending[rover_exit_btx]) s.flags |= rec::F_EXIT_BTX;
-  btx_sample_pending[1] = btx_sample_pending[2] = false;
+  // The entry and exit flag bits stay in the format and read 0: a BTx pass is found from the logged readings, on the PC
   const uint32_t now = millis();
   if (odrive_vel_received[0] && odrive_vel_received[1] && now - odrive_vel_millis[0] < ODRIVE_VEL_STALE_MS
       && now - odrive_vel_millis[1] < ODRIVE_VEL_STALE_MS) s.flags |= rec::F_WHEELS_FRESH;
@@ -417,10 +413,6 @@ void buttonEvent(ButtonAction action, uint32_t held_ms, const char* text){
 
 void sonarEvent(int32_t a, int32_t b, const char* text){
   telemetryEvent(rec::EV_SONAR, a, b, text);
-}
-
-void btxEvent(int32_t a, int32_t b, const char* text){
-  telemetryEvent(rec::EV_BTX, a, b, text);
 }
 
 void telemetryEvents(){

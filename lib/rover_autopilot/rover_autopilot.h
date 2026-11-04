@@ -5,12 +5,12 @@
 //            fitted heading (probe first when needed), stop, re-acquisition check, pivot (mirror bounce away from the
 //            wire). Bounce disarmed until the
 //            distance reaches the re-arm distance or falls by the re-arm drop below its highest value since the
-//            bounce. Beacon at the beacon bounce distance: stop, pivot 180 deg +- the beacon spread. Lost: drive on.
+//            bounce. Lost: drive on.
 //            Polarity says outside: turn round (again each time the distance grows by the re-arm drop); no bounce.
 //   RETURN   as ROAM; on entry into the approach distance -> JOIN.
 //   JOIN     drive straight to the wire (lost: drive on); on the wire: stop, turn along the wire in the goal direction by
 //            the signed fitted heading, FOLLOW. Sets the follower x sign from the known wire side.
-//   FOLLOW   the vehicle's own wire follower drives (Output::external). Wrong direction (polarity or beacons): stop, turn
+//   FOLLOW   the vehicle's own wire follower drives (Output::external). Wrong direction (polarity): stop, turn
 //            180 deg on the wire, follow on. Lost: stop; after rover_no_tx_s one 30 deg turn in place. Dock contacts -> DOCK.
 //   DOCK     hold still while charging; charge end -> DEPART (follow-only: FOLLOW). A dock reached from ROAM or
 //            RETURN goes back to that state.
@@ -70,6 +70,7 @@ enum ProbeFor : uint8_t { PROBE_START, PROBE_BOUNCE, PROBE_JOIN };
 enum FaultCode : uint8_t { FAULT_NONE, FAULT_STUCK, FAULT_LOST, FAULT_NO_POLARITY, FAULT_POL_START, FAULT_NO_MEMORY };  // POL_START: polarity says
 // outside before the first turn in rover mode (the rover starts inside): the Tx direction setting is the wrong way
 // NO_MEMORY: the heap has no room for the wire solve at the start of a Bounce mode run
+// DEC_BEACON: no longer decided (the numbers stay, old logs use them)
 enum DecisionCode : uint8_t { DEC_NONE, DEC_BOUNCE, DEC_CHECK_FLIP, DEC_JOIN, DEC_FOLLOW, DEC_REVERSE, DEC_BEACON,
                               DEC_DOCK, DEC_DEPART, DEC_RETURN, DEC_FAULT, DEC_TX_OFF, DEC_TX_ON, DEC_START,
                               DEC_TURN_BACK, DEC_PROBE, DEC_FOLLOW_END, DEC_SQUARE_ON, DEC_SONAR };
@@ -86,10 +87,6 @@ struct Config {
   float bounceMinDeg = 35;         // least leave angle to the wire, deg
   float rearmDrop = 0.3f;          // m: outside the loop, the next turn-back after this much more distance
   float rearmFall = 0.03f;         // m: the bounce re-arms when the radius falls this much below its peak since the turn
-  bool beaconBounce = true;
-  float beaconDistance = 0.15f;    // m
-  float beaconRearm = 0.25f;       // m
-  float beaconSpreadDeg = 30;      // +- deg on the 180 deg beacon turn
   float approachDistance = 1.1f;   // m
   float approachAngleDeg = 45;     // deg: the re-entry angle (45 deg nominal)
   bool wrongDirCheck = true;
@@ -128,8 +125,6 @@ struct Inputs {
   bool docked = false;             // charging in progress
   bool onContacts = false;         // the dock contacts are closed (charger voltage present)
   bool needCharge = false;         // return voltage reached (a charge is due)
-  float beaconRange = 99;          // m, the nearest beacon (filtered)
-  bool entryBeacon = false, exitBeacon = false;
   // Sonar (0.7.5, Arduino Nano; src/main.cpp): bit i set = sonar i+1 read under the sonar trigger distance in each of
   // the last "readings in a row" records, and the Nano stream is not stale. Sonar 1 and 2 face forward, 3 and 4 back.
   // 0: no sonar near, no stream, or no sonar wired (then no behaviour changes)
@@ -212,7 +207,6 @@ class Autopilot {
   void joinNow(const Inputs& in);
   int8_t polSide(const Inputs& in) const;
   bool sonarCheck(const Inputs& in);   // every autonomous drive: an object near the sonars of the travel (SUB_BSTOP)
-  bool sonarTurn_ = false;          // the SUB_BSTOP stop is the sonar's (else the beacon's)
   int8_t sonarDir_ = 1;             // Bounce: the side of the sonar's 180 deg pivot
   bool sonarHalt_ = false;          // the sonar halts a turn on the spot (a sonar near since the turn began)
   bool sonarNoTurn_ = false;        // Bounce, an object behind a reverse: stop, then on forward (no turn)
@@ -226,7 +220,7 @@ class Autopilot {
   bool startCheck_ = true;      // until the first bounce, join or follow: polarity outside = wrong Tx direction   // m of straight drive since the last bounce, beacon or depart turn
   int8_t pivDir_ = 1;
   // bounce and join plan
-  bool armed_ = true, beaconArmed_ = true, joinArmed_ = true, settle_ = false;  // settle_: after a pivot, wait for the turn to end (settleStart)
+  bool armed_ = true, joinArmed_ = true, settle_ = false;  // settle_: after a pivot, wait for the turn to end (settleStart)
   bool hold_ = false, wasHold_ = false;  // the pivot rule: this step and the last
   float settleT_ = 0;
   float rMax_ = 0, dMin_ = 0, dRef_ = 0;   // rMax_: the highest slow radius since the last turn
@@ -244,7 +238,6 @@ class Autopilot {
   float wrongN_ = 20;               // WRONG_FRAMES
   int bMedN_ = 5;                   // B_MED: packets in the radius median
   void periodApply(const Inputs& in);
-  bool entrySeen_ = false, exitArmed_ = true;
   // approach fit and probe
   ApproachFit fit_;
 #ifdef ROVER_WIRE_SOLVE
@@ -351,7 +344,7 @@ class Autopilot {
   float arcGain_ = 1;               // turn rate command over the wanted rate: the rate loop reaches less (learned per run)
   void rateGain(float want, float speed, float set, const Inputs& in);   // learn arcGain_ from a turn at speed set
   int8_t swTravel_ = 1;             // the drive direction after the sweep
-  bool swBounce_ = false;           // the sweep ends a bounce (not a beacon turn)
+  bool swBounce_ = false;           // the sweep ends a bounce (not a sonar turn)
   void reverseTurn(float nose, bool bounce);   // change the drive direction and sweep the nose by nose (rad, signed)
   int8_t fed_ = 1;                  // the sensor whose reading the last step used
 #ifdef ROVER_WIRE_SOLVE

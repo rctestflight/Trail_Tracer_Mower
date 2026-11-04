@@ -60,8 +60,6 @@ static void old_populate_defaults(DeviceConfig& c,
     c.rover_goal_cw            = true;
     c.rover_sensor_height_mm   = 150.0;
     c.rover_seek_vbatt         = 0.0;
-    c.rover_entry_btx          = 1;
-    c.rover_exit_btx           = 2;
     c.rover_lost_timeout_s     = 30;
     c.espnow_tx_power_dbm      = 19.5;
     c.cmd_key                  = 0;
@@ -164,8 +162,6 @@ static void old_validate_config(DeviceConfig& c)
     // Rover autopilot
     c.rover_sensor_height_mm  = constrain(c.rover_sensor_height_mm, 30.0, 500.0);
     if (c.rover_seek_vbatt != 0.0) c.rover_seek_vbatt = constrain(c.rover_seek_vbatt, 6.0, 26.0);
-    if (c.rover_entry_btx > 2)      c.rover_entry_btx = 0;
-    if (c.rover_exit_btx > 2)       c.rover_exit_btx = 0;
     if (c.rover_lost_timeout_s < 0) c.rover_lost_timeout_s = 0;
     c.espnow_tx_power_dbm     = round(constrain(c.espnow_tx_power_dbm, 2.0, 19.5) * 4.0) / 4.0;
 
@@ -237,8 +233,6 @@ static void old_prefs_save(P& p, const DeviceConfig& c)
     p.putBool("rvCW",      c.rover_goal_cw);
     p.putDouble("rvH",     c.rover_sensor_height_mm);
     p.putDouble("rvSeekV", c.rover_seek_vbatt);
-    p.putUChar("rvEntBtx", c.rover_entry_btx);
-    p.putUChar("rvExtBtx", c.rover_exit_btx);
     p.putInt("rvLostS",    c.rover_lost_timeout_s);
     p.putDouble("txDbm",   c.espnow_tx_power_dbm);
     p.putLong("cmdKey",    c.cmd_key);
@@ -315,8 +309,6 @@ static bool old_prefs_load(P& p, DeviceConfig& c)
     c.rover_goal_cw            = p.getBool("rvCW",      c.rover_goal_cw);
     c.rover_sensor_height_mm   = p.getDouble("rvH",     c.rover_sensor_height_mm);
     c.rover_seek_vbatt         = p.getDouble("rvSeekV", c.rover_seek_vbatt);
-    c.rover_entry_btx          = p.getUChar("rvEntBtx", c.rover_entry_btx);
-    c.rover_exit_btx           = p.getUChar("rvExtBtx", c.rover_exit_btx);
     c.rover_lost_timeout_s     = p.getInt("rvLostS",    c.rover_lost_timeout_s);
     c.espnow_tx_power_dbm      = p.getDouble("txDbm",   c.espnow_tx_power_dbm);
     c.cmd_key                  = p.getLong("cmdKey",    c.cmd_key);
@@ -380,8 +372,6 @@ static void old_config_to_doc(const DeviceConfig& c, JsonDocument& doc, bool wit
     doc["rover_goal_cw"]            = c.rover_goal_cw;
     doc["rover_sensor_height_mm"]   = c.rover_sensor_height_mm;
     doc["rover_seek_vbatt"]         = c.rover_seek_vbatt;
-    doc["rover_entry_btx"]          = c.rover_entry_btx;
-    doc["rover_exit_btx"]           = c.rover_exit_btx;
     doc["rover_lost_timeout_s"]     = c.rover_lost_timeout_s;
     doc["espnow_tx_power_dbm"]      = c.espnow_tx_power_dbm;
     doc["cmd_key"]                  = c.cmd_key;
@@ -500,8 +490,6 @@ static bool old_config_from_json_text(DeviceConfig& c, const String& json_no_com
     JSON_GET_BOOL("rover_goal_cw",           rover_goal_cw);
     JSON_GET_DBL("rover_sensor_height_mm",   rover_sensor_height_mm);
     JSON_GET_DBL("rover_seek_vbatt",         rover_seek_vbatt);
-    JSON_GET_UINT8("rover_entry_btx",        rover_entry_btx);
-    JSON_GET_UINT8("rover_exit_btx",         rover_exit_btx);
     JSON_GET_INT("rover_lost_timeout_s",     rover_lost_timeout_s);
     JSON_GET_DBL("espnow_tx_power_dbm",      espnow_tx_power_dbm);
     if (doc["cmd_key"].is<long>()) c.cmd_key = doc["cmd_key"].as<long>();

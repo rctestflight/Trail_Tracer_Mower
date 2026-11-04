@@ -301,10 +301,10 @@
       "default": 170,
       "live": true,
       "group": "Beacons",
-      "description": "Beacon detection threshold",
+      "description": "The BTx reading under which the slow-down and BTx follow act. A pass in the log has no tie to this setting.",
       "min": 11,
       "max": 2000,
-      "label": "Beacon threshold"
+      "label": "Beacon slow-down distance"
     },
     "BTxAccelRate": {
       "type": "float",
@@ -442,26 +442,6 @@
       "description": "Every roam mode: return to the wire below this battery voltage (filtered). 0 = off",
       "max": 60.0,
       "label": "Return battery voltage"
-    },
-    "rover_entry_btx": {
-      "type": "int",
-      "min": 0,
-      "default": 1,
-      "live": false,
-      "group": "Beacons",
-      "description": "Every roam mode: the beacon channel before the charger: slow approach (0 = none)",
-      "max": 2,
-      "label": "Beacon before the charger"
-    },
-    "rover_exit_btx": {
-      "type": "int",
-      "min": 0,
-      "default": 2,
-      "live": false,
-      "group": "Beacons",
-      "description": "Every roam mode: the beacon channel after the charger exit: the vehicle turns back if it meets this beacon first (0 = none)",
-      "max": 2,
-      "label": "Beacon after the charger"
     },
     "rover_lost_timeout_s": {
       "type": "int",
@@ -1431,47 +1411,6 @@
       "group": "Rover: every roam mode",
       "description": "Every roam mode: outside the loop (polarity), the rover turns round again each time its distance from the wire grows this much since the last turn-back",
       "label": "Turn-back repeat distance"
-    },
-    "rover_beacon_bounce": {
-      "type": "bool",
-      "default": true,
-      "live": false,
-      "group": "Beacons",
-      "description": "Every roam mode: in roam and return, turn round at a beacon",
-      "label": "Turn round at a beacon"
-    },
-    "rover_beacon_m": {
-      "type": "float",
-      "unit": "m",
-      "min": 0.01,
-      "max": 10.0,
-      "default": 0.15,
-      "live": false,
-      "group": "Beacons",
-      "description": "Every roam mode: the beacon distance at which the rover stops and turns round",
-      "label": "Beacon turn distance"
-    },
-    "rover_beacon_rearm_m": {
-      "type": "float",
-      "unit": "m",
-      "min": 0.01,
-      "max": 20.0,
-      "default": 0.25,
-      "live": false,
-      "group": "Beacons",
-      "description": "Every roam mode: after a beacon turn, the beacon counts again past this distance",
-      "label": "Beacon re-arm distance"
-    },
-    "rover_beacon_spread_deg": {
-      "type": "float",
-      "unit": "deg",
-      "min": 0.0,
-      "max": 180.0,
-      "default": 30.0,
-      "live": false,
-      "group": "Beacons",
-      "description": "Every roam mode: a random angle from minus to plus this value on the 180 deg beacon turn",
-      "label": "Beacon turn spread"
     },
     "rover_approach_m": {
       "type": "float",

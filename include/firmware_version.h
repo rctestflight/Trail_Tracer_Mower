@@ -3,6 +3,12 @@
 #pragma once
 
 // Change history
+//   0.7.15: 0.7.13 + no BTx detection on the rover (2026-11-04). A pass is found on the PC from the logged readings, which stay at
+//     the same rate. Event 40 is no longer sent; the entry and exit flag bits read 0. Settings removed: rover_entry_btx,
+//     rover_exit_btx; a config.json that holds them still loads. The slow-down and BTx follow are unchanged.
+//   0.7.13: 0.7.11 + no follow reverse and no turn from a beacon (2026-11-04). The polarity wrong-direction check stays. A BTx
+//     detection marks the log only: event 40, the entry/exit sample flags. Settings removed: rover_beacon_bounce,
+//     rover_beacon_m, rover_beacon_rearm_m, rover_beacon_spread_deg; a config.json that holds them still loads.
 //   0.7.11: 0.7.9 + two rules (2026-11-03). Sonar: the two sensors of the intended drive direction act
 //     (the commanded drive: forward sonar 1 and 2, reverse 3 and 4); in a stop or a turn on the spot all four, and a
 //     sensor that comes near during a turn stops it once. A stop no longer repeats while the wheels still coast (a field
@@ -421,12 +427,12 @@
 #if defined(OTA_TEST_VERSION)
 #define ROVER_FW_VERSION OTA_TEST_VERSION  // OTA test images (envs ota_a, ota_b, ota_test_crash)
 #elif defined(BENCH_FAKE_IMU)
-#define ROVER_FW_VERSION "0.7.11+fakeimu"  // bench build: static IMU values (status flag bit 6)
+#define ROVER_FW_VERSION "0.7.15+fakeimu"  // bench build: static IMU values (status flag bit 6)
 #elif defined(SETTINGS_NEWKEY)
-#define ROVER_FW_VERSION "0.7.11-newkey"  // bench build: one more table line (test_new_setting)
+#define ROVER_FW_VERSION "0.7.15-newkey"  // bench build: one more table line (test_new_setting)
 #elif defined(TELEMETRY_NEWVALUE)
-#define ROVER_FW_VERSION "0.7.11-newvalue"  // bench build: the example lines of include/user_telemetry.h
+#define ROVER_FW_VERSION "0.7.15-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.7.11"
+#define ROVER_FW_VERSION "0.7.15"
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A
