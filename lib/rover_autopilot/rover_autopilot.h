@@ -307,6 +307,7 @@ class Autopilot {
   uint32_t stepN_ = 0, sqStep_ = 0; // step count; the step of the last guard check (a gap: a turn or another state ran)
   bool bTurnDone(const Inputs& in);
   bool bb_ = false;                 // a basics bounce runs (state JOIN, FOLLOW or DEPART)
+  bool bbDock_ = false;             // 0.7.17: the dock came in a basics follow (return to it after the charge)
   bool bLong_ = false;              // the basics join of a timed or charge return: the long follow
   int8_t bP_ = 1, bM_ = 1, bS_ = 1; // wire side: inside where bP_ x > 0; side memory; sign of y with the wire below
   bool bWasLost_ = true;

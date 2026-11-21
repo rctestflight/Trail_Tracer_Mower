@@ -3,6 +3,9 @@
 #pragma once
 
 // Change history
+//   0.7.17: 0.7.15 + charger exit (2026-11-20). A dock in a Bounce or Reverse bounce follow returns to that follow after the
+//     charge: the rover leaves the charger forward, then departs as at a follow end (up to 0.7.15 it went to roam on the
+//     charger; Reverse bounce backed out over it). New setting CHARGE_STOP_WAIT_MS (default 1000, as V1).
 //   0.7.15: 0.7.13 + no BTx detection on the rover (2026-11-04). A pass is found on the PC from the logged readings, which stay at
 //     the same rate. Event 40 is no longer sent; the entry and exit flag bits read 0. Settings removed: rover_entry_btx,
 //     rover_exit_btx; a config.json that holds them still loads. The slow-down and BTx follow are unchanged.
@@ -433,6 +436,6 @@
 #elif defined(TELEMETRY_NEWVALUE)
 #define ROVER_FW_VERSION "0.7.15-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.7.15"
+#define ROVER_FW_VERSION "0.7.17"
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A

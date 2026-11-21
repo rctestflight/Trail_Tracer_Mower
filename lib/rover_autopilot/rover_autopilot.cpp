@@ -132,6 +132,7 @@ void Autopilot::reset() {
   last_ = Output();
   probeLeft_ = 0;
   bb_ = false;
+  bbDock_ = false;
   bP_ = bM_ = bS_ = 1;   // the rover starts inside (rover_join_no_pol "inside")
   bWasLost_ = true;
   bN_ = bI_ = 0;
@@ -552,6 +553,7 @@ bool Autopilot::startDone(const Inputs& in, Output& o) {
 void Autopilot::toFault(FaultCode why) {
   if (state == FAULT) return;
   bb_ = false;
+  bbDock_ = false;
   fault = why;
   state = FAULT;
   sub = SUB_NONE;
@@ -759,7 +761,12 @@ Output Autopilot::stepStates(const Inputs& in) {
   }
   if (txWait) { txWait = false; decide(DEC_TX_ON, 0, 0); }
   if (in.docked && state != DOCK && !hold_) {
-    if (bb_) { bb_ = false; state = ROAM; }
+    // 0.7.17: a dock in a basics follow (every return of Bounce and Reverse bounce) comes back to that follow after the
+    // charge: the rover leaves the charger forward in the goal direction, then departs as at a follow end. Up to 0.7.15
+    // the dock read as a roam dock and the rover went straight to roam on the charger (a bounce there: Reverse bounce
+    // backed out over the charger).
+    bbDock_ = bb_ && (state == FOLLOW || state == DEPART);   // a depart turn that reaches the charger too
+    if (bb_) { bb_ = false; state = bbDock_ ? FOLLOW : ROAM; }
     dockFrom_ = state;
     state = DOCK;
     sub = SUB_NONE;
@@ -1153,6 +1160,13 @@ Output Autopilot::stepStates(const Inputs& in) {
       if (in.docked) return o;
       charges++;
       roamT_ = followT_ = 0;  // timed roam and follow: both times start again after a charge
+      if (bbDock_) {   // 0.7.17: back to the basics follow, forward off the charger; the short follow, then its depart
+        bbDock_ = false;
+        bb_ = true; state = FOLLOW; sub = SUB_NONE;
+        bLong_ = cfg.followOnly;   // follow only: follows on; else the short follow time, then the depart turn
+        bT_ = 0;
+        return o;
+      }
       if (cfg.followOnly) { state = FOLLOW; sub = SUB_NONE; reverseArm_ = REVERSE_ARM; o.external = true; return o; }
       if (dockFrom_ == ROAM || dockFrom_ == RETURN) { state = dockFrom_; sub = SUB_NONE; return o; }  // not a wire dock
       state = DEPART;
@@ -1798,6 +1812,7 @@ bool Autopilot::sonarCheck(const Inputs& in) {
   if (state == JOIN) state = RETURN;
   else if (onWire) { state = ROAM; roamT_ = followT_ = 0; }   // sweeping modes on the wire: drive the other way
   bb_ = false;
+  bbDock_ = false;
   armed_ = joinArmed_ = false;
   sub = SUB_BSTOP;
   stopT_ = 0;

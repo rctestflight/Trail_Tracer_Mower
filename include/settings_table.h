@@ -64,6 +64,7 @@ S(SineSwerveFrequency,   SineSwerveFrequency,   T_U8,     15,    1,     255,    
 S(CHARGE_VBATT_STOP,     CHARGE_VBATT_STOP,     T_F64,    11.9,  6,     16,     "",        "chgVStp",  0,          "", "", "", "")
 S(CHARGE_MAX_CURRENT,    CHARGE_MAX_CURRENT,    T_F64,    6.0,   0.1,   6,      "",        "chgIMax",  0,          "", "", "", "")
 S(CHARGE_MAX_SECONDS,    CHARGE_MAX_SECONDS,    T_I32,    180,   10,    3600,   "",        "chgTSec",  0,          "", "", "", "")
+S(CHARGE_STOP_WAIT_MS,   CHARGE_STOP_WAIT_MS,   T_I32,    1000,  0,     5000,   "",        "chgWait",  0,          "ms", "Charging", "Charge start wait", "Time standing still on the charger before the charge request (V1: 1000 ms). The rover stops at once when the charger voltage appears")
 S(battery_cells,         battery_cells,         T_U8,     2,     1,     4,      "",        "batCells", 0,          "", "", "", "")
 S(espnow_enabled,        espnow_enabled,        T_BOOL,   0,     NOLIM, NOLIM,  "",        "espNow",   0,          "", "", "", "")
 S(telemetry_enabled,     telemetry_enabled,     T_BOOL,   1,     NOLIM, NOLIM,  "",        "telEn",    0,          "", "", "", "")

@@ -78,6 +78,7 @@ struct DeviceConfig {
     double CHARGE_VBATT_STOP;    // V
     double CHARGE_MAX_CURRENT;   // A
     int    CHARGE_MAX_SECONDS;  // the charge time limit, s (0.5.69; up to 0.5.68 half of it)
+    int    CHARGE_STOP_WAIT_MS;  // 0.7.17: wait on the charger before the charge request, ms (V1: 1000)
     uint8_t battery_cells;       // series cells (2 = 2S); the station scales its voltage graphs from it
 
     // Features

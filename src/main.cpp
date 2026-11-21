@@ -1510,7 +1510,7 @@ void chargeControl(){
         break;
 
       case 1:  // Input power present, waiting to request charge
-        if((millis() - charge_start_millis) > 1000 && !WFRX_STATUS_GET_BIT(stmPacket.items.status_bits, WFRX_STATUS_CP_COOLDOWN)){
+        if((millis() - charge_start_millis) >= (uint32_t)g_deviceConfig.CHARGE_STOP_WAIT_MS && !WFRX_STATUS_GET_BIT(stmPacket.items.status_bits, WFRX_STATUS_CP_COOLDOWN)){  // 0.7.17: setting (V1: 1000 ms)
           espPacketFifo_addCmdInt32(9 | 0x80000000, 1);
           lease_ms = millis();
           charge_start_millis = millis();

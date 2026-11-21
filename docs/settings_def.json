@@ -1658,6 +1658,17 @@
       "group": "Radio and log",
       "description": "On: the vehicle prints the HB line on USB once a second (time, Rx packets, control passes, drive mode, memory, CPU load). The bench tools read it, and it keeps an idle USB link busy (an idle ESP32-S2 USB link can stop). Off (default): a quiet USB console for the user; the line then prints only after the USB command 'verbose on' (this start only). The monitor role prints its own 1 s line in any case",
       "label": "USB heartbeat"
+    },
+    "CHARGE_STOP_WAIT_MS": {
+      "type": "int",
+      "unit": "ms",
+      "min": 0,
+      "max": 5000,
+      "default": 1000,
+      "live": false,
+      "group": "Charging",
+      "description": "Time standing still on the charger before the charge request (V1: 1000 ms). The rover stops at once when the charger voltage appears",
+      "label": "Charge start wait"
     }
   }
 }
