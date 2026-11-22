@@ -358,7 +358,7 @@ def decode_frame(fr):
         d = {"type": "LOG", "stream": stream, "boot_id": boot, "seq": seq, "ms": ms, **decode_body(fr[14:], ms, boot)}
         if d["body"] == "status":
             COIL_MAG[boot] = _coil_mag(d)
-        elif d["body"] == "samples" and COIL_MAG.get(boot):
+        elif d["body"] == "samples" and COIL_MAG.get(boot) and "samples" in d:   # a damaged record has "error", no samples
             for smp in d["samples"]:
                 smp["coil_mag"] = list(smp["coil"])
         return d
@@ -378,6 +378,9 @@ def decode_frame(fr):
     return {"type": "0x%02x" % t, "len": len(fr)}
 
 
+CUT_LINES = [0]   # monitor lines shorter than their length field, left out by frames_from_lines()
+
+
 def frames_from_lines(lines):
     """Yields (source, bytes) from "LOG <hex>" lines and monitor "R <us> <mac> <len> <hex>" lines."""
     for ln in lines:
@@ -386,7 +389,13 @@ def frames_from_lines(lines):
             if len(p) == 2 and p[0] == "LOG":
                 yield "usb", bytes.fromhex(p[1])
             elif len(p) == 5 and p[0] == "R":
-                yield p[2], bytes.fromhex(p[4])
+                # A line cut short on its way to the station log (2 of 126 576 lines, 2026-11-22) holds fewer bytes
+                # than its length field: the frame is damaged, so it is left out and counted
+                fr = bytes.fromhex(p[4])
+                if len(fr) != int(p[3]):
+                    CUT_LINES[0] += 1
+                    continue
+                yield p[2], fr
         except ValueError:
             continue
 
