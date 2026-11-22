@@ -3,6 +3,7 @@
 #pragma once
 
 // Change history
+//   0.7.18: 0.7.17 + charge request end (2026-11-22). When a charge ends or is given up, the ESP32 sends charge request 0. With the Rx UART frame (0.5.122) the request is a flag that holds its last value, so it stayed on after the first charge, the Rx restarted its 10 s cooldown at each check and no later charge started (field run 2026-11-22: 1 charge, then 63 min with no charge).
 //   0.7.17: 0.7.15 + charger exit (2026-11-20). A dock in a Bounce or Reverse bounce follow returns to that follow after the
 //     charge: the rover leaves the charger forward, then departs as at a follow end (up to 0.7.15 it went to roam on the
 //     charger; Reverse bounce backed out over it). New setting CHARGE_STOP_WAIT_MS (default 1000, as V1).
@@ -436,6 +437,6 @@
 #elif defined(TELEMETRY_NEWVALUE)
 #define ROVER_FW_VERSION "0.7.15-newvalue"  // bench build: the example lines of include/user_telemetry.h
 #else
-#define ROVER_FW_VERSION "0.7.17"
+#define ROVER_FW_VERSION "0.7.18"
 #endif
 #define RX_BOARD "RX_REVA"  // the hardware this build targets: Trail Tracer Rx board, revision A

@@ -1524,6 +1524,7 @@ void chargeControl(){
         }
 
         if((millis() - charge_start_millis) > 4000 || WFRX_STATUS_GET_BIT(stmPacket.items.status_bits, WFRX_STATUS_CP_COOLDOWN)){
+          espPacketFifo_addCmdInt32(9 | 0x80000000, 0);  // 0.7.18: the request ends (the Rx UART frame flag holds the last value)
           charge_start_millis = millis();
           charge_status = -1;  // abandon if charging does not start in 4 seconds, or a charging fault occurred
         }
@@ -1531,6 +1532,7 @@ void chargeControl(){
 
       case 3: // Charging, waiting for charging to stop (for any reason)
         if(!WFRX_STATUS_GET_BIT(stmPacket.items.status_bits, WFRX_STATUS_CP_ENABLE)){
+          espPacketFifo_addCmdInt32(9 | 0x80000000, 0);  // 0.7.18: the request ends, so the Rx cooldown can run out
           charge_start_millis = millis();
           charge_status = -1;
         }
