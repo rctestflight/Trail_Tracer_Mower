@@ -31,6 +31,7 @@ bool can_init_ok = false;  // Peripheral running, not proof of an ODrive connect
 
 uint32_t odrive_axis_errors[ODRIVE_NODE_COUNT] = {};
 bool odrive_heartbeat_received[ODRIVE_NODE_COUNT] = {};
+uint32_t odrive_heartbeat_count[ODRIVE_NODE_COUNT] = {}, odrive_error_count[ODRIVE_NODE_COUNT] = {};
 static bool odrive_silent[ODRIVE_NODE_COUNT] = {};  // 0.7.7: heard, then no heartbeat for ODRIVE_SILENT_MS
 uint32_t odrive_heartbeat_millis[ODRIVE_NODE_COUNT] = {};
 uint8_t odrive_axis_states[ODRIVE_NODE_COUNT] = {};
@@ -326,6 +327,7 @@ void odrive_pollAndPrintCan() {
       odrive_status_byte5[node_id] = frame.data[5];
       odrive_status_byte6[node_id] = frame.data[6];
       odrive_heartbeat_received[node_id] = true;
+      ++odrive_heartbeat_count[node_id];
       odrive_heartbeat_millis[node_id] = millis();
     }
     if (cmd_id == ODRIVE_CMD_GET_ERROR && frame.data_length_code == 8) {
@@ -344,6 +346,7 @@ void odrive_pollAndPrintCan() {
         usbOut.println();
       }
       odrive_error_received[node_id] = true;
+      ++odrive_error_count[node_id];
       odrive_error_millis[node_id] = millis();
     }
     if (cmd_id == ODRIVE_CMD_GET_VERSION && frame.data_length_code == 8)  // 0.7.7: ODrive manual, Get_Version
@@ -408,4 +411,3 @@ void writePwmMicros(uint8_t ch, uint32_t micros){
   uint16_t duty_cycle = (int32_t)((float)micros * 1e-6 * (float)(PWM_OUT_FREQUENCY * ((1 << PWM_OUT_RESOLUTION_BITS) - 1)));
   ledcWrite(ch, duty_cycle);
 }
-

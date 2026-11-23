@@ -35,6 +35,14 @@ The settings page and the telemetry program show the rover settings in three gro
 7. Check the IMU at boot: USB shows `MPU6050 +-8 g, +-500 deg/s`. With "IMU HALT", the rover does not drive (section 6).
 8. Watch the first runs in rover mode. The stuck detector is the only stall stop (only while the signal is not lost). Stop the rover with the RC, `run stop`, or the STOP button of the telemetry program.
 
+**ODrive fault recovery.** An ODrive error stops all motors and can trigger up to three automatic clear-and-rearm
+attempts per arm-switch cycle. Each attempt commands idle, clears errors and waits for fresh CAN reports; after a clear,
+the normal arm sequence commands zero speed before closed loop. The arm switch and existing drive, CAN, gyro, Rx and
+other stop checks still apply. The rover can resume its current drive command after recovery. The three-attempt budget
+is not reset by a successful recovery: once used, a further error or failed clear remains latched until the arm switch
+is cycled. Other latched faults still require that switch cycle. Recovery
+messages appear on USB when the serial port is open. Test with the wheels off the ground before operating the mower.
+
 ## 3. Settings
 
 Three ways, all with the same keys:

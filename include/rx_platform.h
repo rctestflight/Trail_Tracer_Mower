@@ -183,7 +183,8 @@ void sonarEvent(int32_t a, int32_t b, const char* text);
 
 /**
  * @brief 0.7.7: one log event each time the motor controllers turn off (event 25, body 0x38): the reason, the
- * node (255: none) and whether the fault holds them off until the arm switch toggles.
+ * node (255: none) and whether a fault latch is active. Motor-controller errors can be recovered automatically;
+ * other latched faults hold the motors off until the arm switch toggles.
  */
 // 1 to 8: real faults and switch states; 9 and up: the stops (the rover is not meant to move; the motors come on again
 // by themselves when it is).
@@ -330,6 +331,9 @@ extern bool odrive_heartbeat_received[ODRIVE_NODE_COUNT];
 extern uint32_t odrive_active_errors[ODRIVE_NODE_COUNT];
 /** @brief Disarm reason bits of each motor controller. */
 extern uint32_t odrive_disarm_reasons[ODRIVE_NODE_COUNT];
+/** @brief Receive counts and presence for confirming fresh reports after clearing faults. */
+extern uint32_t odrive_heartbeat_count[ODRIVE_NODE_COUNT], odrive_error_count[ODRIVE_NODE_COUNT];
+extern bool odrive_error_received[ODRIVE_NODE_COUNT];
 /** @brief Wheel speed of each motor controller, rev/s. */
 extern float odrive_vel_rps[ODRIVE_NODE_COUNT];
 /** @brief millis() of the last wheel speed of each motor controller. */
