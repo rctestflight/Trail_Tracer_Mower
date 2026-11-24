@@ -15,8 +15,9 @@ The rover is standalone. It needs no Monitor Rx, no PC and no radio to behave co
 The autopilot (from 0.6.23) roams inside the perimeter wire and turns back at it, returns to the wire below the return voltage, joins it in the goal direction, follows it to the dock with the wire follower, charges, and departs again (`lib/rover_autopilot/README.md`). Lost signal in join or follow, or no Tx signal in any state: it stops and waits.
 
 From 0.7.0 the setting **Roam mode** (`rover_bounce_style`) chooses how the rover turns back at the wire:
-- **Bounce** (default): as it drives, the rover measures the distance and the direction of the wire. At the bounce distance it stops, turns on the spot and drives back into the loop at the mirror angle.
+- **Bounce**: as it drives, the rover measures the distance and the direction of the wire. At the bounce distance it stops, turns on the spot and drives back into the loop at the mirror angle.
 - **Join then leave**: the rover joins the wire at the approach angle, follows it for the short follow time, then leaves on an arc back into the loop. It never stops or turns on the spot at the wire.
+- **Reverse bounce** (default): the rover stops, reverses direction and sweeps back into the loop instead of turning on the spot.
 
 The settings page and the telemetry program show the rover settings in three groups: both roam modes, Bounce mode only, and Join then leave only.
 
@@ -29,7 +30,7 @@ The settings page and the telemetry program show the rover settings in three gro
 1. Flash the firmware (section 8).
 2. Set the settings (section 3).
 3. Check the ODrive CAN watchdog on all six nodes (an ODrive setting). With it off, an ODrive keeps its last speed when the ESP32 stops sending, for example after a restart.
-4. Check the steering sign with the wheels off the ground: set `rover_mode` rover and enter mode 2; hold the sensor near the wire. The rover must stop and pivot away from the wire. If it pivots toward the wire, invert `pid_direction`. If the wire follower already follows correctly, the sign is correct.
+4. Check the steering sign with the wheels off the ground: set `rover_mode` rover and enter mode 2; hold the sensor near the wire. The rover must stop and turn away from the wire, reversing first in Reverse bounce. If it turns toward the wire, invert `pid_direction`. If the wire follower already follows correctly, the sign is correct.
 5. Measure the ground speed at full drive in mode 0 and set `rover_roam_speed_mps` to it: roam drives at full drive command, and the distances driven come from it. The pivot rate needs no setting: the gyro rate loop turns at the rate the autopilot asks for, up to `steering_rate_max_dps`.
 6. Set the current direction of the followed Tx channel (`tx_dir_ch1` to `tx_dir_ch5`) for polarity: the join then knows inside from outside, and the wrong-direction check works. Without it, the join assumes inside (`rover_join_no_pol`). On the first runs, check the dock direction: if the rover follows the wire counter-clockwise with `rover_goal_cw` true, invert `rover_goal_cw`.
 7. Check the IMU at boot: USB shows `MPU6050 +-8 g, +-500 deg/s`. With "IMU HALT", the rover does not drive (section 6).
@@ -82,12 +83,12 @@ Three ways, all with the same keys:
 | rover_wrong_dir_check | true | Follow: polarity direction against the goal, or the exit beacon before the entry beacon: turn round |
 | rover_entry_btx | 1 | BTx channel before the dock (0 = none) |
 | rover_exit_btx | 2 | BTx channel just past the dock exit (0 = none) |
-| rover_depart_min_m, rover_depart_max_m | 0.5, 3.0 | After a charge: follow a random distance off the dock contacts |
+| rover_depart_min_m, rover_depart_max_m | 0.5, 8.0 | After a charge: follow a random distance off the dock contacts |
 | rover_turn_min_deg, rover_turn_max_deg | 60, 140 | Then pivot inward by a random angle |
 | rover_probe_m | 0.5 | Probe: a straight drive of this length at the start in range, and before a bounce or join when the fitted heading is weak (0 = off) |
 | rover_imu_roll | off | IMU roll correction: turn the Rx x and y back by the accelerometer roll before the heading fit (inverted: the IMU sits the other way round; check on a side slope over the wire) |
 | rover_lost_timeout_s | 30 | Fault after this long without the wire in join, follow or depart (0 = never) |
-| battery_cells | 2 | Series cells (2 = 2S). The telemetry program scales its power graph from it |
+| battery_cells | 4 | Series cells (4 = 4S). The telemetry program scales its power graph from it; this setting does not protect the battery from overcharging |
 | telemetry_enabled | true | Vehicle log over ESP-NOW |
 | espnow_tx_power_dbm | 19.5 | The radio transmit power, 2 to 19.5 dBm, in 0.25 dB steps. A change applies at once. A low power can cut the radio link to the vehicle |
 | telemetry_rate_hz | 20 | The sample rate of the vehicle log, in Hz: 100, 50, 25, 20, 10, 5, 4, 2 or 1. Below 100 Hz, an anti-alias filter runs first. A change applies at once |
@@ -113,7 +114,7 @@ All other keys are live. Every `set` and `save`, applied or refused, is an event
 | `rx_channel` | 1 | 1 to 5 | Sensor 1 listens to this transmitter channel |
 | `enable_sensor_2` | false | | "Sensor 2". On: the STM32 reads both sensors, and the rover shows and logs the sensor 2 data. Off: the STM32 reads sensor 1 only, with all its processing time, for the best sensor 1 signal. Sensor 2 always listens to transmitter channel 1. A change applies with no restart. From 0.6.36 this setting also sets the STM32 sensor count and lanes; `dsp_sensors` and `dsp_lanes` are no longer settings (an older config.json with them loads with no error) |
 | `use_sensor_2` | false | | "Use sensor 2 for control" (0.6.36, ESP32 only). On, with `enable_sensor_2` on: the inside/outside value, the heading round the loop and the follow direction come from the sensor nearest the wire. Off: sensor 2 is data only, and every rover decision uses sensor 1. Turn it on only when sensor 2 faces the same way as sensor 1 and has the same sign |
-| `CHARGE_VBATT_STOP` | 11.9 | 6 to 16 V | Ends the charge when the battery voltage is above this value. STM32 limit 16.0 V |
+| `CHARGE_VBATT_STOP` | 15.8 | 6 to 16 V | Ends the charge when the battery voltage is above this value. STM32 limit 16.0 V. Set this for the actual battery; the default is not suitable for a 2S pack |
 | `CHARGE_MAX_CURRENT` | 6.0 | 0.1 to 6 A | Stops the charge above this current, then waits 10 s. STM32 limit 6.0 A |
 | `CHARGE_MAX_SECONDS` | 180 | 5 to 1800 s | Stops a charge after **2 x** this value: 360 s with the default. STM32 limit 3600 s. Shipped units (V1.0) send 2 x the value too |
 
