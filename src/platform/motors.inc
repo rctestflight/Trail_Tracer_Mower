@@ -333,6 +333,8 @@ void odrive_pollAndPrintCan() {
 void odrive_printErrorNames(uint32_t errors) {
   // Common Micro errors; all bits are also printed in hex for other faults.
   static const struct { uint32_t bit; const char* name; } names[] = {
+    {0x1, "INITIALIZING"}, {0x2, "SYSTEM_LEVEL"}, {0x4, "TIMING_ERROR"}, {0x8, "MISSING_ESTIMATE"},
+    {0x10, "BAD_CONFIG"}, {0x40, "MISSING_INPUT"},  // 0.7.19: ODrive 0.6 ODrive.Error flags
     {0x20, "DRV_FAULT"}, {0x100, "DC_BUS_OVER_VOLTAGE"},
     {0x200, "DC_BUS_UNDER_VOLTAGE"}, {0x400, "DC_BUS_OVER_CURRENT"},
     {0x800, "DC_BUS_OVER_REGEN_CURRENT"}, {0x1000, "CURRENT_LIMIT_VIOLATION"},

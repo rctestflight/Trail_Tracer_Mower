@@ -541,6 +541,45 @@ void odrive_setDriveOutput(double throttle_us, double steering_us, bool enabled)
   if (!enabled && odrive_rc_active) odrive_stopRc();
 }
 
+// 0.7.19: SYSTEM_LEVEL (ODrive error 0x2) alone: the ESP32 clears it and the normal arm follows; it holds nothing.
+// The ODrives report it at docks, at start and while driving (field logs 2026-11-15 to 2026-11-23: 199 reports in
+// 72 starts, on every node). Up to 0.7.18 any axis error blocked the arm until the arm switch toggled, so the wheels
+// stayed stopped after a dock (3 of 8 docks on 2026-11-23). Any other error bit on any node keeps that hold.
+// Repeats: a SYSTEM_LEVEL that comes back at once is not a passing one, so after ODRIVE_SYS_CLEARS_MAX clears in a
+// row, each within ODRIVE_SYS_REPEAT_MS of the one before, the motors stay off until the arm switch toggles (no loop).
+const uint32_t ODRIVE_ERROR_SYSTEM_LEVEL = 0x2;  // ODrive.Error SYSTEM_LEVEL (ODrive 0.6, heartbeat Axis_Error)
+const uint32_t ODRIVE_SYS_CLEAR_GAP_MS = 1000;   // chosen: one clear per s, so a heartbeat shows the result first
+const uint32_t ODRIVE_SYS_REPEAT_MS = 5000;      // chosen: the logs show single reports minutes apart and at most
+const uint8_t ODRIVE_SYS_CLEARS_MAX = 3;         // 3 within 2 s at a start (run 1076772855), so 3 clears pass
+static uint32_t odrive_sys_clear_ms = 0;
+static uint8_t odrive_sys_clears = 0;
+static bool odrive_sys_hold = false;
+
+static void odrive_systemLevelService(uint32_t now) {
+  if (odrive_sys_hold || !can_init_ok) return;
+  uint8_t nodes = 0;
+  for (uint8_t n = 0; n < ODRIVE_NODE_COUNT; ++n) {
+    const uint32_t e = odrive_axis_errors[n];
+    if (e & ~ODRIVE_ERROR_SYSTEM_LEVEL) return;  // a real fault: the hold until the arm switch toggles, as before
+    if (e) nodes |= (uint8_t)(1u << n);
+  }
+  if (!nodes || now - odrive_sys_clear_ms < ODRIVE_SYS_CLEAR_GAP_MS) return;
+  odrive_sys_clears = (odrive_sys_clear_ms && now - odrive_sys_clear_ms < ODRIVE_SYS_REPEAT_MS) ? odrive_sys_clears + 1 : 1;
+  if (odrive_sys_clears > ODRIVE_SYS_CLEARS_MAX) {
+    odrive_sys_hold = true;
+    usbOut.printf("ODrive: SYSTEM_LEVEL back after %u clears (nodes 0x%02x); motors off until the arm switch toggles\n",
+                  (unsigned)ODRIVE_SYS_CLEARS_MAX, nodes);
+    return;
+  }
+  for (uint8_t n = 0; n < ODRIVE_NODE_COUNT; ++n) {
+    if (!(nodes & (1u << n))) continue;
+    odrive_clearErrors(n);
+    delay(2);
+  }
+  odrive_sys_clear_ms = now;
+  usbOut.printf("ODrive: SYSTEM_LEVEL cleared (nodes 0x%02x, clear %u in a row)\n", nodes, (unsigned)odrive_sys_clears);
+}
+
 // frame_now: called with a new STM32 frame (the CAN commands go out with every frame). loop() also calls it
 // every pass: with no frame for ODRIVE_RC_UPDATE_MS it sends the last commands again (ODrive watchdog floor).
 void odrive_outputUpdate(bool frame_now) {
@@ -557,8 +596,11 @@ void odrive_outputUpdate(bool frame_now) {
       odrive_clearErrors(node);
       delay(2);
     }
+    odrive_sys_hold = false;  // 0.7.19: the SYSTEM_LEVEL repeat hold ends here too
+    odrive_sys_clears = 0;
   }
   odrive_arm_switch_was_high = arm_switch_high;
+  if (arm_switch_high) odrive_systemLevelService(now);
   if (motor_idle_requested && odrive_rc_active) odrive_stopRc();
   if (!frame_now && now - odrive_rc_update_millis < ODRIVE_RC_UPDATE_MS) return;
   // dt of the gyro rate PID step: the true time since its last step. A packet step with no resend step since the last
