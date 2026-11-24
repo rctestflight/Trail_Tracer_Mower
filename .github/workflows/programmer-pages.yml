@@ -19,8 +19,23 @@ concurrency:
   group: programmer-pages
   cancel-in-progress: false
 
+# Only dev-tyler and main may deploy (the github-pages environment rule). A run on any other ref (a tag, dev, a
+# dispatch on another ref) builds nothing and starts this workflow on dev-tyler, which builds every ref, the new one
+# too, and publishes. A workflow_dispatch made with the run's token starts a new run (GitHub rule).
 jobs:
+  hand-off:
+    if: github.ref != 'refs/heads/dev-tyler' && github.ref != 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      - name: Start the page run on dev-tyler
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run programmer-pages.yml --ref dev-tyler --repo "$GITHUB_REPOSITORY"
+
   build:
+    if: github.ref == 'refs/heads/dev-tyler' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
